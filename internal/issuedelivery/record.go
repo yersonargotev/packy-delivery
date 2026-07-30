@@ -380,19 +380,31 @@ func validateCandidates(record runRecord) error {
 				proof.Phase != deliveryevidence.AssuranceCandidateReview {
 				return fmt.Errorf("issue delivery candidate contains a stale acceptance proof")
 			}
-			if proof.ValidationReceipt != nil && index == len(record.Candidates)-1 {
+			if candidate.Exhaustive != nil {
+				reference := proof.ValidationReceipt
+				if reference == nil ||
+					reference.Schema != deliveryevidence.ValidationReceiptV1 ||
+					reference.CandidateID != candidate.ID ||
+					reference.CommitSHA != candidate.CommitSHA ||
+					reference.CommitSHA != candidate.Exhaustive.Result.CommitSHA ||
+					reference.TreeSHA != candidate.TreeSHA ||
+					reference.TreeSHA != candidate.Exhaustive.Result.TreeSHA ||
+					reference.CompletedAt != candidate.Exhaustive.CompletedAt {
+					return fmt.Errorf("issue delivery candidate contains a stale acceptance validation reference")
+				}
+			}
+			if candidate.Exhaustive != nil && index == len(record.Candidates)-1 {
+				reference := proof.ValidationReceipt
 				matched := false
 				for _, receipt := range record.Evidence.ValidationReceipts {
-					if receipt.Schema == proof.ValidationReceipt.Schema &&
-						receipt.CommitSHA == proof.ValidationReceipt.CommitSHA &&
-						receipt.TreeSHA == proof.ValidationReceipt.TreeSHA &&
-						receipt.CompletedAt == proof.ValidationReceipt.CompletedAt {
+					if receipt.Schema == reference.Schema &&
+						receipt.CommitSHA == reference.CommitSHA &&
+						receipt.TreeSHA == reference.TreeSHA &&
+						receipt.CompletedAt == reference.CompletedAt {
 						matched = true
 					}
 				}
-				if proof.ValidationReceipt.CandidateID != candidate.ID ||
-					proof.ValidationReceipt.CommitSHA != candidate.CommitSHA ||
-					proof.ValidationReceipt.TreeSHA != candidate.TreeSHA || !matched {
+				if !matched {
 					return fmt.Errorf("issue delivery candidate contains a stale acceptance validation reference")
 				}
 			}

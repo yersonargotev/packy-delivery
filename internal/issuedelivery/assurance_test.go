@@ -1023,6 +1023,79 @@ func TestPersistedAcceptanceMustMatchRetainedSpecReview(t *testing.T) {
 	}
 }
 
+func TestSupersededCandidateRequiresExactValidationReceiptReference(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	git.value.TreeSHA = strings.Repeat("e", 40)
+	mustAdvance(t, module, request)
+
+	var persisted []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			persisted = append([]byte(nil), data...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := decodeRun(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseline.Candidates) < 2 || baseline.Candidates[0].Exhaustive == nil ||
+		len(baseline.Candidates[0].Acceptance) == 0 ||
+		baseline.Candidates[0].Acceptance[0].ValidationReceipt == nil {
+		t.Fatalf("fixture lacks superseded exhaustive candidate: %#v", baseline.Candidates)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*AcceptanceProof)
+	}{
+		{"removed", func(proof *AcceptanceProof) { proof.ValidationReceipt = nil }},
+		{"schema", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.Schema = "packy.exhaustive-validation/unknown"
+		}},
+		{"candidate", func(proof *AcceptanceProof) { proof.ValidationReceipt.CandidateID = "stale" }},
+		{"commit", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.CommitSHA = strings.Repeat("f", 40)
+		}},
+		{"tree", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.TreeSHA = strings.Repeat("f", 40)
+		}},
+		{"completedAt", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.CompletedAt = "2026-07-30T23:59:59Z"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, decodeErr := decodeRun(persisted)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			proof := &record.Candidates[0].Acceptance[0]
+			if proof.ValidationReceipt != nil {
+				reference := *proof.ValidationReceipt
+				proof.ValidationReceipt = &reference
+			}
+			test.mutate(proof)
+			if err := validateRun(record); err == nil ||
+				!strings.Contains(err.Error(), "stale acceptance validation reference") {
+				t.Fatalf("superseded %s reference validation error=%v", test.name, err)
+			}
+		})
+	}
+}
+
 func TestAcceptanceProofRejectsStaleStructuralReceiptIdentity(t *testing.T) {
 	candidate := Candidate{
 		ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
