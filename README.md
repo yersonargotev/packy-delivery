@@ -17,7 +17,20 @@ go build ./cmd/packy-deliver
 Install the executable with:
 
 ```sh
+brew install yersonargotev/tap/packy-delivery
+```
+
+Homebrew installs `packy-deliver`; later releases are available through
+`brew upgrade packy-delivery`. Alternatively, install directly from Go:
+
+```sh
 go install github.com/yersonargotev/packy-delivery/cmd/packy-deliver@latest
+```
+
+Confirm the installed release with:
+
+```sh
+packy-deliver version
 ```
 
 ## Use
@@ -47,3 +60,5 @@ Historical schema-v1 commands remain available under:
 ```sh
 packy-deliver legacy-v1 <historical-subcommand> ...
 ```
+
+Packy Delivery is available under the [MIT License](LICENSE).

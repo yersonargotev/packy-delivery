@@ -1,0 +1,190 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packy-delivery-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish immutable release artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate tag and repository
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release tags must match vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          }
+          [[ "$(git rev-list -n 1 "$RELEASE_TAG")" == "$GITHUB_SHA" ]] || {
+            echo "release tag does not resolve to the workflow commit" >&2
+            exit 1
+          }
+          echo "tag=$RELEASE_TAG" >>"$GITHUB_OUTPUT"
+      - name: Run repository validation
+        run: ./scripts/validate-packy-delivery.sh
+      - name: Build release matrix and checksums
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir -p dist release-metadata
+          for goos in darwin linux; do
+            for goarch in arm64 amd64; do
+              artifact="packy-deliver_v${version}_${goos}_${goarch}"
+              CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+                go build -trimpath -ldflags "-s -w -X main.version=$version" \
+                -o "dist/$artifact" ./cmd/packy-deliver
+            done
+          done
+          [[ "$(dist/packy-deliver_v${version}_linux_amd64 version)" == "$version" ]]
+          (
+            cd dist
+            LC_ALL=C sha256sum packy-deliver_* >SHA256SUMS
+          )
+          ./scripts/generate-homebrew-formula.sh \
+            --version "$version" \
+            --checksums dist/SHA256SUMS \
+            --out release-metadata/packy-delivery.rb
+      - name: Create or verify immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,assets >"$RUNNER_TEMP/release.json"
+          jq -e --arg tag "$RELEASE_TAG" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == false' \
+            "$RUNNER_TEMP/release.json" >/dev/null
+          find dist -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort \
+            >"$RUNNER_TEMP/expected-assets"
+          jq -r '.assets[].name' "$RUNNER_TEMP/release.json" | LC_ALL=C sort \
+            >"$RUNNER_TEMP/actual-assets"
+          cmp "$RUNNER_TEMP/expected-assets" "$RUNNER_TEMP/actual-assets"
+          downloaded="$RUNNER_TEMP/published-assets"
+          mkdir -p "$downloaded"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$downloaded"
+          for path in dist/*; do
+            cmp "$path" "$downloaded/$(basename "$path")"
+          done
+      - name: Retain exact Homebrew formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula-${{ steps.release.outputs.tag }}
+          path: release-metadata/packy-delivery.rb
+          if-no-files-found: error
+
+  homebrew:
+    name: Update only the Packy Delivery formula
+    needs: release
+    runs-on: ubuntu-latest
+    environment: homebrew
+    permissions:
+      contents: read
+    steps:
+      - name: Download exact formula
+        uses: actions/download-artifact@v4
+        with:
+          name: homebrew-formula-${{ needs.release.outputs.tag }}
+          path: release-metadata
+      - name: Check out Homebrew tap with its scoped credential
+        uses: actions/checkout@v4
+        with:
+          repository: yersonargotev/homebrew-tap
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: true
+      - name: Prepare formula-only update
+        id: formula
+        working-directory: homebrew-tap
+        env:
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p Formula
+          new_version="${RELEASE_TAG#v}"
+          if [[ -f Formula/packy-delivery.rb ]]; then
+            current_version="$(
+              sed -nE 's/^[[:space:]]*version "([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+                Formula/packy-delivery.rb
+            )"
+            [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "current packy-delivery formula has no single stable semantic version" >&2
+              exit 1
+            }
+            if [[ "$current_version" == "$new_version" ]]; then
+              cmp Formula/packy-delivery.rb ../release-metadata/packy-delivery.rb || {
+                echo "published formula differs for existing version $new_version" >&2
+                exit 1
+              }
+              echo "changed=false" >>"$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [[ "$(printf '%s\n%s\n' "$current_version" "$new_version" | sort -V | tail -n 1)" == "$new_version" ]] || {
+              echo "refusing to downgrade formula from $current_version to $new_version" >&2
+              exit 1
+            }
+          fi
+          cp ../release-metadata/packy-delivery.rb Formula/packy-delivery.rb
+          mapfile -t changed_paths < <(
+            {
+              git diff --name-only
+              git ls-files --others --exclude-standard
+            } | LC_ALL=C sort -u
+          )
+          if [[ "${#changed_paths[@]}" == 0 ]]; then
+            echo "changed=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "${#changed_paths[@]}" == 1 && "${changed_paths[0]}" == "Formula/packy-delivery.rb" ]] || {
+            printf "unexpected tap paths changed: %s\n" "${changed_paths[*]}" >&2
+            exit 1
+          }
+          git add Formula/packy-delivery.rb
+          [[ "$(git diff --cached --name-only)" == "Formula/packy-delivery.rb" ]] || {
+            echo "tap commit is not scoped to Formula/packy-delivery.rb" >&2
+            exit 1
+          }
+          git commit -m "feat: update packy-delivery formula to ${RELEASE_TAG}"
+          echo "changed=true" >>"$GITHUB_OUTPUT"
+      - name: Publish formula-only commit
+        if: steps.formula.outputs.changed == 'true'
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          [[ "$(git diff-tree --no-commit-id --name-only -r HEAD)" == "Formula/packy-delivery.rb" ]]
+          git push --dry-run origin HEAD:main
+          git push origin HEAD:main

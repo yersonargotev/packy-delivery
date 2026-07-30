@@ -22,6 +22,8 @@ import (
 	"github.com/yersonargotev/packy-delivery/internal/issuedelivery"
 )
 
+var version = "dev"
+
 type Runner interface {
 	Output(context.Context, string, ...string) ([]byte, error)
 }
@@ -128,7 +130,7 @@ func main() {
 
 func (c command) run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("command is required: advance, status, or a legacy v1 command")
+		return errors.New("command is required: advance, status, version, or a legacy v1 command")
 	}
 	switch args[0] {
 	case "advance":
@@ -140,6 +142,12 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		return c.runLegacy(ctx, args[1:], stdout)
 	case "status":
 		return c.status(args[1:], stdout)
+	case "version":
+		if len(args) != 1 {
+			return errors.New("version does not accept arguments")
+		}
+		_, err := fmt.Fprintln(stdout, version)
+		return err
 	default:
 		if c.LegacyPrefixRequired {
 			return fmt.Errorf("unknown command %q; historical evidence sequencing is available only through legacy-v1", args[0])

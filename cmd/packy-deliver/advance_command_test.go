@@ -320,3 +320,20 @@ func TestProductionCommandExposesHistoricalSequencingOnlyBehindLegacyV1(t *testi
 		t.Fatalf("legacy-v1 accepted caller-assembled v2 evidence: %v", err)
 	}
 }
+
+func TestProductionCommandReportsBuildVersion(t *testing.T) {
+	original := version
+	version = "1.2.3"
+	t.Cleanup(func() { version = original })
+
+	var output bytes.Buffer
+	if err := (command{}).run(context.Background(), []string{"version"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "1.2.3\n" {
+		t.Fatalf("version output = %q", output.String())
+	}
+	if err := (command{}).run(context.Background(), []string{"version", "extra"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("version accepted an argument")
+	}
+}
