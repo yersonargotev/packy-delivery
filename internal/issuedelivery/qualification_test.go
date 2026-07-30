@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -36,32 +37,14 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 			Findings:               []deliveryevidence.ReviewFinding{}, Completed: true,
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "every acceptance row") {
+	if err == nil || !strings.Contains(err.Error(), "correction is required") {
 		t.Fatalf("unresolved qualification approval error = %v", err)
 	}
-	finding := deliveryevidence.ReviewFinding{
-		ID: "qualification-product-seam", Axis: deliveryevidence.ReviewSpec,
-		Severity: deliveryevidence.SeverityP1, Authority: deliveryevidence.AuthoritySpecRequirement,
-		Citation: qualified.Evidence.Scope.OwnedNow[0].EvidenceLink,
-		Location: qualified.Evidence.AcceptanceMatrix[0].Identity,
-		Evidence: "the row names issuedelivery.Advance instead of the observable product seam",
-	}
-	review := &QualificationReview{
-		AuthoritySHA256:        qualified.Observations.AuthoritySHA256,
-		AcceptanceMatrixSHA256: matrixHash,
-		Findings:               []deliveryevidence.ReviewFinding{finding}, Completed: true,
-	}
-
-	rejected, err := module.Advance(context.Background(), Request{
-		RepositoryPath: "/repo", IssueNumber: 370,
-		QualificationReview: review,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rejected.State != StateNeedsDecision || rejected.QualificationCorrection == nil ||
-		len(rejected.QualificationCorrection.FindingIDs) != 1 {
-		t.Fatalf("rejected qualification = %#v", rejected)
+	rejected := qualified
+	pending := rejected.QualificationCorrection
+	if rejected.State != StateNeedsDecision || pending == nil ||
+		len(pending.FindingIDs) != len(rejected.Evidence.AcceptanceMatrix) {
+		t.Fatalf("compiled qualification correction = %#v", rejected)
 	}
 	resumed, err := module.Advance(context.Background(), request)
 	if err != nil {
@@ -74,22 +57,12 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	revisions, err := os.ReadDir(filepath.Join(
 		module.storePathForTest(t, 370), "revisions", qualified.RunID,
 	))
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if len(revisions) != 1 {
-		t.Fatalf("qualification rejection revisions = %d, want 1", len(revisions))
+	if len(revisions) != 0 {
+		t.Fatalf("new compiler correction request revisions = %d, want 0", len(revisions))
 	}
-	replayedRejection, err := module.Advance(context.Background(), Request{
-		RepositoryPath: "/repo", IssueNumber: 370, QualificationReview: review,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if replayedRejection.State != StateNeedsDecision {
-		t.Fatalf("replayed qualification rejection = %#v", replayedRejection)
-	}
-	assertQualificationRevisionCount(t, module, qualified.RunID, 1)
 	gotOriginal, err := os.ReadFile(originalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -97,17 +70,81 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	if !bytes.Equal(gotOriginal, originalBytes) {
 		t.Fatal("qualification rejection rewrote the original run bytes")
 	}
+	for _, test := range []struct {
+		name string
+		ids  []string
+	}{
+		{
+			name: "duplicate",
+			ids:  []string{pending.FindingIDs[0], pending.FindingIDs[0]},
+		},
+		{
+			name: "foreign equal length",
+			ids:  []string{pending.FindingIDs[0], "qualification-compiler-finding-ffffffffffffffff"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows := append(
+				[]deliveryevidence.AcceptanceRow(nil), rejected.Evidence.AcceptanceMatrix...,
+			)
+			for index := range rows {
+				rows[index].OwningSeam = "issuedelivery qualification correction boundary"
+				rows[index].PositiveEvidence = "renderer positive behavior assertion"
+				rows[index].NegativeEvidence = "renderer negative behavior assertion"
+				rows[index].FailureEvidence = "renderer failure behavior assertion"
+				rows[index].MutationEvidence = "renderer mutation boundary assertion"
+				rows[index].CompatibilityEvidence = "renderer compatibility contract assertion"
+				rows[index].PreservationEvidence = "renderer preservation contract assertion"
+			}
+			correction := compilerQualificationCorrectionForTest(
+				pending, rows, "mapped renderer authority to observable contract assertions",
+			)
+			correction.FindingIDs = canonicalFindingIDs(test.ids)
+			correction.Evidence = "[request:" + pending.ID + "] findings=" +
+				strings.Join(correction.FindingIDs, ",") +
+				"; rationale=mapped renderer authority to observable contract assertions"
+			if _, advanceErr := module.Advance(context.Background(), Request{
+				RepositoryPath: "/repo", IssueNumber: 370,
+				QualificationCorrection: correction,
+			}); advanceErr == nil ||
+				!strings.Contains(advanceErr.Error(), "every finding") {
+				t.Fatalf("invalid finding set error = %v", advanceErr)
+			}
+			current, readErr := os.ReadFile(originalPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(current, originalBytes) {
+				t.Fatal("invalid finding set mutated active run bytes")
+			}
+			revisions, readErr := os.ReadDir(filepath.Join(
+				module.storePathForTest(t, 370), "revisions", qualified.RunID,
+			))
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatal(readErr)
+			}
+			if len(revisions) != 0 {
+				t.Fatalf("invalid finding set revisions = %d, want 0", len(revisions))
+			}
+			resumed := mustAdvance(t, module, request)
+			if resumed.State != StateNeedsDecision ||
+				!reflect.DeepEqual(resumed.QualificationCorrection, pending) {
+				t.Fatalf("invalid finding set damaged resume: %#v", resumed)
+			}
+		})
+	}
 	_, err = module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 370,
 		QualificationCorrection: &QualificationCorrection{
+			RequestID:            pending.ID,
 			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
 			ReviewedMatrixSHA256: matrixHash,
-			FindingIDs:           []string{finding.ID},
+			FindingIDs:           pending.FindingIDs,
 			AcceptanceMatrix:     rejected.Evidence.AcceptanceMatrix,
 			Evidence:             "unresolved correction must fail closed",
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "traceability") {
+	if err == nil || !strings.Contains(err.Error(), "not bound") {
 		t.Fatalf("unresolved qualification correction error = %v", err)
 	}
 	spacedSentinel := append(
@@ -117,14 +154,15 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	_, err = module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 370,
 		QualificationCorrection: &QualificationCorrection{
+			RequestID:            pending.ID,
 			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
 			ReviewedMatrixSHA256: matrixHash,
-			FindingIDs:           []string{finding.ID},
+			FindingIDs:           pending.FindingIDs,
 			AcceptanceMatrix:     spacedSentinel,
 			Evidence:             "normalized unresolved correction must fail closed",
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "traceability") {
+	if err == nil || !strings.Contains(err.Error(), "not bound") {
 		t.Fatalf("normalized unresolved qualification correction error = %v", err)
 	}
 
@@ -143,9 +181,10 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	_, err = module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 370,
 		QualificationCorrection: &QualificationCorrection{
+			RequestID:            pending.ID,
 			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
 			ReviewedMatrixSHA256: strings.Repeat("0", 64),
-			FindingIDs:           []string{finding.ID},
+			FindingIDs:           pending.FindingIDs,
 			AcceptanceMatrix:     correctedRows,
 			Evidence:             "mismatched correction must fail closed",
 		},
@@ -153,13 +192,15 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("mismatched qualification correction error = %v", err)
 	}
-	correction := &QualificationCorrection{
-		AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
-		ReviewedMatrixSHA256: matrixHash,
-		FindingIDs:           []string{finding.ID},
-		AcceptanceMatrix:     correctedRows,
-		Evidence:             "mapped the criterion to its observable renderer and compatibility tests",
+	reorderedIDs := append([]string(nil), pending.FindingIDs...)
+	for left, right := 0, len(reorderedIDs)-1; left < right; left, right = left+1, right-1 {
+		reorderedIDs[left], reorderedIDs[right] = reorderedIDs[right], reorderedIDs[left]
 	}
+	correction := compilerQualificationCorrectionForTest(
+		pending, correctedRows,
+		"mapped the criterion to its observable renderer and compatibility tests",
+	)
+	correction.FindingIDs = reorderedIDs
 	corrected, err := module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 370, QualificationCorrection: correction,
 	})
@@ -167,8 +208,14 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 		t.Fatal(err)
 	}
 	if corrected.State != StateNeedsReview || corrected.QualificationCorrection != nil ||
-		corrected.Evidence.AcceptanceMatrix[0].OwningSeam != "internal/cli pack-show renderer" {
+		corrected.Evidence.AcceptanceMatrix[0].OwningSeam !=
+			correction.AcceptanceMatrix[0].OwningSeam {
 		t.Fatalf("corrected qualification = %#v", corrected)
+	}
+	if !reflect.DeepEqual(
+		corrected.QualificationCorrections[0].FindingIDs, pending.FindingIDs,
+	) {
+		t.Fatalf("stored compiler finding IDs are not canonical: %#v", corrected)
 	}
 	replayedCorrection, err := module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 370, QualificationCorrection: correction,
@@ -179,7 +226,7 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	if replayedCorrection.State != StateNeedsReview {
 		t.Fatalf("replayed qualification correction = %#v", replayedCorrection)
 	}
-	assertQualificationRevisionCount(t, module, qualified.RunID, 2)
+	assertQualificationRevisionCount(t, module, qualified.RunID, 1)
 	correctedHash, err := acceptanceMatrixDigest(corrected.Evidence.AcceptanceMatrix)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +243,7 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 		t.Fatal(err)
 	}
 	if approved.State != StateNeedsReview || !approved.QualificationApproved ||
-		len(approved.QualificationReviews) != 2 || len(approved.QualificationCorrections) != 1 {
+		len(approved.QualificationReviews) != 1 || len(approved.QualificationCorrections) != 1 {
 		t.Fatalf("approved qualification = %#v", approved)
 	}
 	if approved.PauseCause != PauseDeterministicAdvance || approved.NextAction != ActionAdvance {
@@ -214,12 +261,12 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	if replayedApproval.PauseCause != approved.PauseCause || replayedApproval.NextAction != approved.NextAction {
 		t.Fatalf("replayed qualification pause metadata changed: approved=%#v replayed=%#v", approved, replayedApproval)
 	}
-	assertQualificationRevisionCount(t, module, qualified.RunID, 3)
+	assertQualificationRevisionCount(t, module, qualified.RunID, 2)
 	reloaded, err := module.Advance(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reloaded.QualificationApproved || len(reloaded.QualificationReviews) != 2 {
+	if !reloaded.QualificationApproved || len(reloaded.QualificationReviews) != 1 {
 		t.Fatalf("reloaded approved qualification = %#v", reloaded)
 	}
 }
@@ -245,37 +292,17 @@ func TestAdvanceCompilesIssue347ProductSpecificQualificationEvidence(t *testing.
 	if outcome.Candidate != nil || outcome.QualificationApproved {
 		t.Fatalf("unqualified product criteria advanced: %#v", outcome)
 	}
-	matrixHash, err := acceptanceMatrixDigest(outcome.Evidence.AcceptanceMatrix)
-	if err != nil {
-		t.Fatal(err)
+	pending := outcome.QualificationCorrection
+	if pending == nil {
+		t.Fatalf("compiler did not request product-specific qualification: %#v", outcome)
 	}
-	links := make(map[string]string, len(outcome.Evidence.Scope.OwnedNow))
-	for _, entry := range outcome.Evidence.Scope.OwnedNow {
-		links[entry.Identity] = entry.EvidenceLink
-	}
-	findings := make([]deliveryevidence.ReviewFinding, len(outcome.Evidence.AcceptanceMatrix))
-	for index, row := range outcome.Evidence.AcceptanceMatrix {
+	for _, row := range outcome.Evidence.AcceptanceMatrix {
 		if row.OwningSeam != qualificationPlanRequired {
 			t.Fatalf("unqualified criterion inferred a product seam: %#v", row)
 		}
-		findings[index] = deliveryevidence.ReviewFinding{
-			ID:   "qualification-product-seam-" + row.Identity,
-			Axis: deliveryevidence.ReviewSpec, Severity: deliveryevidence.SeverityP1,
-			Authority: deliveryevidence.AuthoritySpecRequirement,
-			Citation:  links[row.Identity], Location: row.Identity,
-			Evidence: "the criterion requires an explicit observable product evidence plan",
-		}
 	}
-	rejected := mustAdvance(t, module, Request{
-		RepositoryPath: "/repo", IssueNumber: 347,
-		QualificationReview: &QualificationReview{
-			AuthoritySHA256:        outcome.Observations.AuthoritySHA256,
-			AcceptanceMatrixSHA256: matrixHash,
-			Findings:               findings, Completed: true,
-		},
-	})
 	correctedRows := append(
-		[]deliveryevidence.AcceptanceRow(nil), rejected.Evidence.AcceptanceMatrix...,
+		[]deliveryevidence.AcceptanceRow(nil), outcome.Evidence.AcceptanceMatrix...,
 	)
 	plans := []*deliveryevidence.AcceptanceRow{
 		{
@@ -349,16 +376,10 @@ func TestAdvanceCompilesIssue347ProductSpecificQualificationEvidence(t *testing.
 	}
 	corrected := mustAdvance(t, module, Request{
 		RepositoryPath: "/repo", IssueNumber: 347,
-		QualificationCorrection: &QualificationCorrection{
-			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
-			ReviewedMatrixSHA256: matrixHash,
-			FindingIDs: []string{
-				findings[0].ID, findings[1].ID, findings[2].ID,
-				findings[3].ID, findings[4].ID, findings[5].ID,
-			},
-			AcceptanceMatrix: correctedRows,
-			Evidence:         "mapped every criterion to its explicit product evidence seam",
-		},
+		QualificationCorrection: compilerQualificationCorrectionForTest(
+			pending, correctedRows,
+			"mapped every criterion to its explicit product evidence seam",
+		),
 	})
 	rows := make(map[string]deliveryevidence.AcceptanceRow)
 	for _, row := range corrected.Evidence.AcceptanceMatrix {
@@ -377,26 +398,8 @@ func TestCandidateInvalidationPreservesCorrectedQualificationEvidencePlan(t *tes
 	module := fixture.module
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
 	qualified := mustAdvance(t, module, request)
-	matrixHash, err := acceptanceMatrixDigest(qualified.Evidence.AcceptanceMatrix)
-	if err != nil {
-		t.Fatal(err)
-	}
-	finding := deliveryevidence.ReviewFinding{
-		ID: "qualification-specific-plan", Axis: deliveryevidence.ReviewSpec,
-		Severity: deliveryevidence.SeverityP1, Authority: deliveryevidence.AuthoritySpecRequirement,
-		Citation: qualified.Evidence.Scope.OwnedNow[0].EvidenceLink,
-		Location: qualified.Evidence.AcceptanceMatrix[0].Identity,
-		Evidence: "the row requires a product-specific evidence plan",
-	}
-	rejected := mustAdvance(t, module, Request{
-		RepositoryPath: "/repo", IssueNumber: 357,
-		QualificationReview: &QualificationReview{
-			AuthoritySHA256:        qualified.Observations.AuthoritySHA256,
-			AcceptanceMatrixSHA256: matrixHash,
-			Findings:               []deliveryevidence.ReviewFinding{finding}, Completed: true,
-		},
-	})
-	rows := append([]deliveryevidence.AcceptanceRow(nil), rejected.Evidence.AcceptanceMatrix...)
+	pending := qualified.QualificationCorrection
+	rows := append([]deliveryevidence.AcceptanceRow(nil), qualified.Evidence.AcceptanceMatrix...)
 	for index := range rows {
 		rows[index].OwningSeam = "specific supporting seam"
 		rows[index].PositiveEvidence = "planned: supporting positive evidence"
@@ -415,12 +418,9 @@ func TestCandidateInvalidationPreservesCorrectedQualificationEvidencePlan(t *tes
 	rows[0].PreservationEvidence = "planned: specific preservation evidence"
 	corrected := mustAdvance(t, module, Request{
 		RepositoryPath: "/repo", IssueNumber: 357,
-		QualificationCorrection: &QualificationCorrection{
-			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
-			ReviewedMatrixSHA256: matrixHash,
-			FindingIDs:           []string{finding.ID}, AcceptanceMatrix: rows,
-			Evidence: "mapped the criterion to its specific product evidence",
-		},
+		QualificationCorrection: compilerQualificationCorrectionForTest(
+			pending, rows, "mapped the criterion to its specific product evidence",
+		),
 	})
 	correctedHash, err := acceptanceMatrixDigest(corrected.Evidence.AcceptanceMatrix)
 	if err != nil {
@@ -437,8 +437,49 @@ func TestCandidateInvalidationPreservesCorrectedQualificationEvidencePlan(t *tes
 	candidate := mustAdvance(t, module, request)
 	if candidate.Candidate == nil ||
 		candidate.Evidence.AcceptanceMatrix[0].PositiveEvidence !=
-			"planned: specific positive evidence" {
+			corrected.Evidence.AcceptanceMatrix[0].PositiveEvidence {
 		t.Fatalf("candidate invalidated corrected qualification plan: %#v", candidate)
+	}
+}
+
+func TestAdvanceResumesPreCorrectionV2MarkerRunWithDirectCompilerRequest(t *testing.T) {
+	module, _, _ := moduleFixture(t, 371)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 371}
+	created := mustAdvance(t, module, request)
+	runPath := filepath.Join(module.storePathForTest(t, 371), "runs", created.RunID+".json")
+	data, err := os.ReadFile(runPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := decodeRun(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.PendingQualificationCorrection = nil
+	record.State = StateNeedsReview
+	record.Reason = "qualification evidence is ready for independent review"
+	record.Timing[len(record.Timing)-1].To = StateNeedsReview
+	historical, err := encodeRun(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runPath, historical, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed := mustAdvance(t, module, request)
+	if resumed.State != StateNeedsDecision || resumed.QualificationCorrection == nil ||
+		len(resumed.QualificationReviews) != 0 {
+		t.Fatalf("historical marker run did not converge to direct correction: %#v", resumed)
+	}
+	revisions, err := os.ReadDir(filepath.Join(
+		module.storePathForTest(t, 371), "revisions", created.RunID,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("historical marker convergence revisions = %d, want 1", len(revisions))
 	}
 }
 
@@ -472,6 +513,308 @@ func TestQualificationSeamValidationAllowsProofsButRejectsUnreviewedOwnership(t 
 	}
 }
 
+func TestSpecificQualificationTextRejectsGenericAndMarkerVariants(t *testing.T) {
+	for _, value := range []string{
+		"implementation",
+		"evidence",
+		"planned evidence",
+		"qualification correction required here",
+		"planned implementation evidence",
+		"updated qualification proof",
+	} {
+		t.Run(strings.ReplaceAll(value, " ", "_"), func(t *testing.T) {
+			if specificQualificationText(value) {
+				t.Fatalf("generic qualification text accepted: %q", value)
+			}
+		})
+	}
+	for _, value := range []string{
+		"internal/cli pack-show renderer ordering contract",
+		"candidate mismatch is rejected by the pack-show snapshot assertion",
+	} {
+		if !specificQualificationText(value) {
+			t.Fatalf("substantive qualification text rejected: %q", value)
+		}
+	}
+}
+
+func TestQualificationMatrixRejectsGenericContentInEveryCorrectedCell(t *testing.T) {
+	evidence := &deliveryevidence.Bundle{Scope: deliveryevidence.ScopeLedger{
+		OwnedNow: []deliveryevidence.LedgerEntry{{
+			Identity: "criterion-1", Requirement: "Render the compact pack summary.",
+		}},
+	}}
+	base := deliveryevidence.AcceptanceRow{
+		Identity: "criterion-1", Criterion: "Render the compact pack summary.",
+		OwningSeam:            "internal/cli compact pack summary renderer",
+		PositiveEvidence:      "pack summary ordering assertion covers the compact renderer",
+		NegativeEvidence:      "expanded resource output rejects compact-only omissions",
+		FailureEvidence:       "renderer failure reports the unavailable pack summary",
+		MutationEvidence:      "read-only renderer leaves lifecycle resources unchanged",
+		CompatibilityEvidence: "versioned pack JSON remains byte-compatible",
+		PreservationEvidence:  "complete resource details remain available below the summary",
+		MigrationEvidence:     "self-contained delivery has no persisted format migration",
+		State:                 deliveryevidence.AcceptancePlanned,
+	}
+	fields := []struct {
+		name string
+		set  func(*deliveryevidence.AcceptanceRow, string)
+	}{
+		{"owning seam", func(row *deliveryevidence.AcceptanceRow, value string) { row.OwningSeam = value }},
+		{"positive", func(row *deliveryevidence.AcceptanceRow, value string) { row.PositiveEvidence = value }},
+		{"negative", func(row *deliveryevidence.AcceptanceRow, value string) { row.NegativeEvidence = value }},
+		{"failure", func(row *deliveryevidence.AcceptanceRow, value string) { row.FailureEvidence = value }},
+		{"mutation", func(row *deliveryevidence.AcceptanceRow, value string) { row.MutationEvidence = value }},
+		{"compatibility", func(row *deliveryevidence.AcceptanceRow, value string) { row.CompatibilityEvidence = value }},
+		{"preservation", func(row *deliveryevidence.AcceptanceRow, value string) { row.PreservationEvidence = value }},
+		{"migration", func(row *deliveryevidence.AcceptanceRow, value string) { row.MigrationEvidence = value }},
+	}
+	for _, field := range fields {
+		for _, generic := range []string{
+			"implementation", "evidence", "planned evidence",
+			"qualification correction required here",
+		} {
+			t.Run(field.name+"/"+strings.ReplaceAll(generic, " ", "_"), func(t *testing.T) {
+				row := base
+				field.set(&row, generic)
+				if err := validateQualificationMatrix(
+					evidence, []deliveryevidence.AcceptanceRow{row},
+				); err == nil {
+					t.Fatalf("%s accepted generic value %q", field.name, generic)
+				}
+			})
+		}
+	}
+}
+
+func TestCompilerQualificationBindingsRejectGenericAndForeignContent(t *testing.T) {
+	pending := &QualificationCorrectionRequest{
+		ID:         "qualification-compiler-request-binding",
+		FindingIDs: []string{"finding-alpha", "finding-beta"},
+	}
+	rows := []deliveryevidence.AcceptanceRow{
+		{
+			Identity:              "criterion-aaaaaaaaaaaaaaaa",
+			OwningSeam:            "pack summary renderer boundary",
+			PositiveEvidence:      "summary ordering assertion",
+			NegativeEvidence:      "omission regression assertion",
+			FailureEvidence:       "renderer failure guidance",
+			MutationEvidence:      "read-only lifecycle assertion",
+			CompatibilityEvidence: "versioned JSON snapshot",
+			PreservationEvidence:  "resource detail availability",
+			MigrationEvidence:     "self-contained format disposition",
+		},
+		{
+			Identity:              "criterion-bbbbbbbbbbbbbbbb",
+			OwningSeam:            "dry-run audit renderer",
+			PositiveEvidence:      "complete action assertion",
+			NegativeEvidence:      "missing action regression",
+			FailureEvidence:       "blocked action guidance",
+			MutationEvidence:      "non-mutating execution assertion",
+			CompatibilityEvidence: "action identity snapshot",
+			PreservationEvidence:  "audit detail availability",
+			MigrationEvidence:     "unchanged format disposition",
+		},
+	}
+	valid := compilerQualificationCorrectionForTest(
+		pending, rows, "mapped renderer authority to observable contract assertions",
+	)
+	if err := validateCompilerQualificationBindings(*valid); err != nil {
+		t.Fatalf("valid distinct criterion bindings rejected: %v", err)
+	}
+
+	for _, value := range []string{
+		"[request:" + pending.ID + "] findings=finding-alpha,finding-beta",
+		"[request:" + pending.ID + "] findings=finding-alpha; rationale=" +
+			"mapped renderer authority to observable contract assertions",
+		"[request:wrong-request] findings=finding-alpha,finding-beta; rationale=" +
+			"mapped renderer authority to observable contract assertions",
+		"[request:" + pending.ID + "] findings=finding-alpha,finding-beta; rationale=",
+		"[request:" + pending.ID + "] findings=finding-alpha,finding-beta; rationale=" +
+			"mapped renderer authority; extra=field",
+	} {
+		correction := *valid
+		correction.Evidence = value
+		if err := validateCompilerQualificationBindings(correction); err == nil {
+			t.Fatalf("compiler explanation binding accepted %q", value)
+		}
+	}
+
+	fields := []struct {
+		name string
+		set  func(*deliveryevidence.AcceptanceRow, string)
+	}{
+		{"owning seam", func(row *deliveryevidence.AcceptanceRow, value string) { row.OwningSeam = value }},
+		{"positive", func(row *deliveryevidence.AcceptanceRow, value string) { row.PositiveEvidence = value }},
+		{"negative", func(row *deliveryevidence.AcceptanceRow, value string) { row.NegativeEvidence = value }},
+		{"failure", func(row *deliveryevidence.AcceptanceRow, value string) { row.FailureEvidence = value }},
+		{"mutation", func(row *deliveryevidence.AcceptanceRow, value string) { row.MutationEvidence = value }},
+		{"compatibility", func(row *deliveryevidence.AcceptanceRow, value string) { row.CompatibilityEvidence = value }},
+		{"preservation", func(row *deliveryevidence.AcceptanceRow, value string) { row.PreservationEvidence = value }},
+		{"migration", func(row *deliveryevidence.AcceptanceRow, value string) { row.MigrationEvidence = value }},
+	}
+	for _, field := range fields {
+		for _, value := range []string{
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=review:review status approved; assertion=" +
+				"renderer contract assertion covers observable behavior",
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=review:validation status passed; assertion=" +
+				"renderer contract assertion covers observable behavior",
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=review:review result accepted; assertion=" +
+				"renderer contract assertion covers observable behavior",
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=status:review/status-approved; assertion=" +
+				"renderer contract assertion covers observable behavior",
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=test:TestRendererContract",
+			"[criterion:criterion-bbbbbbbbbbbbbbbb] source=test:TestRendererContract; assertion=" +
+				"renderer contract assertion covers observable behavior",
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=test:TestRendererContract; assertion=",
+			"[criterion:criterion-aaaaaaaaaaaaaaaa] source=test:TestRendererContract; assertion=" +
+				"renderer contract assertion; extra=field",
+		} {
+			correction := *valid
+			correction.AcceptanceMatrix = append(
+				[]deliveryevidence.AcceptanceRow(nil), valid.AcceptanceMatrix...,
+			)
+			field.set(&correction.AcceptanceMatrix[0], value)
+			if err := validateCompilerQualificationBindings(correction); err == nil {
+				t.Fatalf("%s binding accepted %q", field.name, value)
+			}
+		}
+	}
+}
+
+func TestQualificationHistoryRejectsSelfConsistentForgedCompilerRequest(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	var persisted []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			persisted = append([]byte(nil), data...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*QualificationCorrection)
+	}{
+		{
+			name: "matrix hash",
+			mutate: func(correction *QualificationCorrection) {
+				correction.ReviewedMatrixSHA256 = strings.Repeat("0", 64)
+			},
+		},
+		{
+			name: "finding set",
+			mutate: func(correction *QualificationCorrection) {
+				correction.FindingIDs = []string{"forged-compiler-finding"}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, decodeErr := decodeRun(persisted)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			correction := &record.QualificationCorrections[0]
+			test.mutate(correction)
+			correction.FindingIDs = canonicalFindingIDs(correction.FindingIDs)
+			correction.RequestID = stableID(
+				"qualification-compiler-request",
+				correction.AuthoritySHA256+"\x00"+correction.ReviewedMatrixSHA256+
+					"\x00"+strings.Join(correction.FindingIDs, "\x00"),
+			)
+			if err := validateQualificationHistory(record); err == nil ||
+				!strings.Contains(err.Error(), "invalid compiler correction") {
+				t.Fatalf("forged compiler correction validation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeV2PreservesHistoricalReviewerCorrectionWithPlannedEvidence(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	var record runRecord
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, loadErr = decodeRun(data)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := append(
+		[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
+	)
+	for index := range rows {
+		rows[index].OwningSeam = "planned"
+		rows[index].PositiveEvidence = "planned"
+		rows[index].NegativeEvidence = "planned"
+		rows[index].FailureEvidence = "planned"
+		rows[index].MutationEvidence = "planned"
+		rows[index].CompatibilityEvidence = "planned"
+		rows[index].PreservationEvidence = "planned"
+		rows[index].MigrationEvidence = "planned"
+	}
+	matrixHash, err := acceptanceMatrixDigest(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := record.Evidence.Scope.OwnedNow[0]
+	finding := deliveryevidence.ReviewFinding{
+		ID: "historical-reviewer-finding", Axis: deliveryevidence.ReviewSpec,
+		Severity:  deliveryevidence.SeverityP1,
+		Authority: deliveryevidence.AuthoritySpecRequirement,
+		Citation:  scope.EvidenceLink, Location: scope.Identity,
+		Evidence: "historical reviewer requested a planned evidence correction",
+	}
+	rejected := QualificationReview{
+		AuthoritySHA256:        record.AuthoritySHA256,
+		AcceptanceMatrixSHA256: record.QualificationReviews[0].AcceptanceMatrixSHA256,
+		Findings:               []deliveryevidence.ReviewFinding{finding}, Completed: true,
+	}
+	approved := QualificationReview{
+		AuthoritySHA256:        record.AuthoritySHA256,
+		AcceptanceMatrixSHA256: matrixHash,
+		Findings:               []deliveryevidence.ReviewFinding{}, Completed: true,
+	}
+	reviewerCorrection := QualificationCorrection{
+		AuthoritySHA256:      record.AuthoritySHA256,
+		ReviewedMatrixSHA256: rejected.AcceptanceMatrixSHA256,
+		FindingIDs:           []string{finding.ID}, AcceptanceMatrix: rows,
+		Evidence: "planned",
+	}
+	record.Evidence.AcceptanceMatrix = rows
+	record.QualificationReviews = []QualificationReview{rejected, approved}
+	record.QualificationCorrections = append(
+		record.QualificationCorrections[:1], reviewerCorrection,
+	)
+	historical, err := encodeRun(record)
+	if err != nil {
+		t.Fatalf("encode canonical historical reviewer correction: %v", err)
+	}
+	decoded, err := decodeRun(historical)
+	if err != nil {
+		t.Fatalf("decode canonical historical reviewer correction: %v", err)
+	}
+	got := decoded.QualificationCorrections[1]
+	if got.RequestID != "" || got.Evidence != "planned" ||
+		got.AcceptanceMatrix[0].PositiveEvidence != "planned" {
+		t.Fatalf("historical reviewer correction changed during decode: %#v", got)
+	}
+}
+
 func TestQualificationHistoryRejectsNullFindingsAndInvalidCorrectionMatrices(t *testing.T) {
 	module, git, _, _, _ := assuranceFixture(t)
 	var record runRecord
@@ -501,7 +844,7 @@ func TestQualificationHistoryRejectsNullFindingsAndInvalidCorrectionMatrices(t *
 	record.QualificationCorrections[0].AcceptanceMatrix[0].OwningSeam =
 		qualificationPlanRequired
 	if err := validateQualificationHistory(record); err == nil ||
-		!strings.Contains(err.Error(), "invalid correction matrix") {
+		!strings.Contains(err.Error(), "invalid compiler correction") {
 		t.Fatalf("invalid correction matrix validation error = %v", err)
 	}
 
@@ -538,7 +881,7 @@ func TestQualificationHistoryRejectsNullFindingsAndInvalidCorrectionMatrices(t *
 	pending.QualificationReviews = pending.QualificationReviews[:1]
 	pending.Evidence.AcceptanceMatrix[0].OwningSeam = "different complete seam"
 	if err := validateQualificationHistory(pending); err == nil ||
-		!strings.Contains(err.Error(), "pending independent rereview") {
+		!strings.Contains(err.Error(), "not ready for independent rereview") {
 		t.Fatalf("unbound pending rereview matrix validation error = %v", err)
 	}
 }

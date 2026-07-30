@@ -25,6 +25,28 @@ review results, and adjudications only when the returned state requires them.
 Otherwise let `Advance` reacquire facts, perform deterministic work, persist
 evidence, and recover idempotently.
 
+When `Advance` returns `provide-qualification-correction`, submit one complete
+correction that echoes the returned request ID, authority hash, reviewed matrix
+hash, and full finding-ID set. Preserve every criterion identity and authority
+text, replace every compiler marker and placeholder with a criterion-specific
+evidence plan, and include concrete correction evidence. Do not ask an
+independent reviewer to restate compiler-known findings and do not fabricate a
+`QualificationReview`; independent qualification review begins only after the
+corrected run returns to `needs-review`.
+
+Use the compiler correction binding grammar exactly:
+
+- correction evidence is exactly
+  `[request:<request-id>] findings=<canonical-comma-joined-finding-ids>; rationale=<rationale>`;
+- every owning-seam and evidence cell is exactly
+  `[criterion:<criterion-id>] source=<kind>:<locator>; assertion=<assertion>`.
+
+Use only `file`, `symbol`, `test`, `command`, `fixture`, `review`, `authority`,
+or `not-applicable` source kinds and a concrete locator shaped for that kind.
+Use the exact returned canonical finding list. Rationale and assertion text
+must be bounded, marker-free statements; do not add, omit, reorder, or duplicate
+fields.
+
 Stop only when the run is completed, blocked, waiting for an external result,
 needs review, or needs one decision. For a schema v1 run, follow only the
 contract's explicit legacy-v1 behavior.

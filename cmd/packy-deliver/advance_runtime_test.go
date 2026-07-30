@@ -248,26 +248,11 @@ func productionReadyModule(
 		sum := sha256.Sum256(raw)
 		return hex.EncodeToString(sum[:])
 	}
-	plannedHash := matrixDigest(qualified.Evidence.AcceptanceMatrix)
-	finding := deliveryevidence.ReviewFinding{
-		ID: "production-validation-qualification", Axis: deliveryevidence.ReviewSpec,
-		Severity: deliveryevidence.SeverityP1, Authority: deliveryevidence.AuthoritySpecRequirement,
-		Citation: qualified.Evidence.Scope.OwnedNow[0].EvidenceLink,
-		Location: qualified.Evidence.AcceptanceMatrix[0].Identity,
-		Evidence: "production validation requires an explicit observable evidence seam",
+	pending := qualified.QualificationCorrection
+	if pending == nil {
+		t.Fatalf("compiler did not request qualification correction: %#v", qualified)
 	}
-	rejected, err := module.Advance(context.Background(), issuedelivery.Request{
-		RepositoryPath: repository, IssueNumber: 361,
-		QualificationReview: &issuedelivery.QualificationReview{
-			AuthoritySHA256:        qualified.Observations.AuthoritySHA256,
-			AcceptanceMatrixSHA256: plannedHash,
-			Findings:               []deliveryevidence.ReviewFinding{finding}, Completed: true,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := append([]deliveryevidence.AcceptanceRow(nil), rejected.Evidence.AcceptanceMatrix...)
+	rows := append([]deliveryevidence.AcceptanceRow(nil), qualified.Evidence.AcceptanceMatrix...)
 	rows[0].OwningSeam = "production validation adapter"
 	rows[0].PositiveEvidence = "planned: exact candidate validation succeeds"
 	rows[0].NegativeEvidence = "planned: mismatched candidate is rejected"
@@ -275,14 +260,38 @@ func productionReadyModule(
 	rows[0].MutationEvidence = "planned: readiness receipt is persisted"
 	rows[0].CompatibilityEvidence = "planned: validation contract remains compatible"
 	rows[0].PreservationEvidence = "planned: sandbox preserves operator configuration"
+	for index := range rows {
+		identity := strings.ReplaceAll(rows[index].Identity, "-", "_")
+		prefix := "[criterion:" + rows[index].Identity + "] "
+		rows[index].OwningSeam = prefix + "source=symbol:packydeliver." +
+			identity + ".validationAdapter; assertion=" + rows[index].OwningSeam +
+			" owns the production validation boundary"
+		rows[index].PositiveEvidence = prefix + "source=test:TestProduction_" +
+			identity + "_Positive; assertion=" + rows[index].PositiveEvidence
+		rows[index].NegativeEvidence = prefix + "source=test:TestProduction_" +
+			identity + "_Negative; assertion=" + rows[index].NegativeEvidence
+		rows[index].FailureEvidence = prefix + "source=test:TestProduction_" +
+			identity + "_Failure; assertion=" + rows[index].FailureEvidence
+		rows[index].MutationEvidence = prefix + "source=test:TestProduction_" +
+			identity + "_Mutation; assertion=" + rows[index].MutationEvidence
+		rows[index].CompatibilityEvidence = prefix + "source=test:TestProduction_" +
+			identity + "_Compatibility; assertion=" + rows[index].CompatibilityEvidence
+		rows[index].PreservationEvidence = prefix + "source=test:TestProduction_" +
+			identity + "_Preservation; assertion=" + rows[index].PreservationEvidence
+		rows[index].MigrationEvidence = prefix + "source=authority:" +
+			rows[index].Identity + "/migration; assertion=" + rows[index].MigrationEvidence
+	}
 	corrected, err := module.Advance(context.Background(), issuedelivery.Request{
 		RepositoryPath: repository, IssueNumber: 361,
 		QualificationCorrection: &issuedelivery.QualificationCorrection{
-			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
-			ReviewedMatrixSHA256: plannedHash,
-			FindingIDs:           []string{finding.ID},
+			RequestID:            pending.ID,
+			AuthoritySHA256:      pending.AuthoritySHA256,
+			ReviewedMatrixSHA256: pending.ReviewedMatrixSHA256,
+			FindingIDs:           pending.FindingIDs,
 			AcceptanceMatrix:     rows,
-			Evidence:             "mapped validation authority through the typed correction envelope",
+			Evidence: "[request:" + pending.ID + "] findings=" +
+				strings.Join(pending.FindingIDs, ",") +
+				"; rationale=mapped validation authority through the typed correction envelope",
 		},
 	})
 	if err != nil {

@@ -156,16 +156,41 @@ evidence requirements. Every acceptance obligation must remain traceable to its
 authority and have positive, negative or failure, and preservation or
 compatibility evidence as applicable.
 
-An independent qualification review may approve the exact compiled matrix or
-reject it with findings tied to criterion identities and authority links. A
-row marked `qualification correction required` is unresolved: neither a clean
-review nor a correction that retains that marker may approve it. A
-rejection moves the run to one persisted correction request. The corrected
-matrix is stored in a new immutable run revision, retains the original
-criterion identities and text, and returns to `needs-review`; development
-cannot resume through that path until a later independent review approves the
-corrected matrix. Resume preserves the original run bytes and adopts the active
-revision without duplicating either effect.
+The compiler treats a row marked `qualification correction required` as a
+known unresolved finding. Before any independent review, it emits one
+structured correction request bound to the exact authority hash and current
+matrix hash. Its stable request and finding identities name every affected
+criterion by its stable identity and unchanged authority text; this compiler
+finding is not an independent review finding and does not create a
+`QualificationReview`.
+
+The correction must echo the exact request, authority, matrix, and complete
+finding set as one batch. It fails closed when stale, partial, generic, when it
+changes criterion identities or text, or when any compiler marker remains. A
+compiler correction uses this exact binding grammar:
+
+- correction evidence:
+  `[request:<request-id>] findings=<canonical-comma-joined-finding-ids>; rationale=<rationale>`;
+- every owning-seam and evidence cell:
+  `[criterion:<criterion-id>] source=<kind>:<locator>; assertion=<assertion>`.
+
+The identifiers and canonical finding list must exactly match the returned
+request and row. Source kind is one of `file`, `symbol`, `test`, `command`,
+`fixture`, `review`, `authority`, or `not-applicable`; its locator must satisfy
+that kind's concrete path, symbol, test, command, receipt, authority, or reason
+shape. Status/result prose is not a locator. Rationale and assertion text are
+marker-free bounded statements. Fields, separators, and ordering are exact;
+missing, duplicate, or extra fields fail closed. Reviewer-originated correction
+history predating this compiler envelope remains readable without these
+compiler bindings. A
+matching replay is adopted without another revision. The complete corrected
+matrix is stored in a new immutable run revision and returns to `needs-review`;
+only then may an independent qualification review approve the exact matrix or
+reject it with new findings tied to criterion identities and authority links.
+Review findings use the same one-correction, independent-rereview loop. Resume
+preserves original run bytes and adopts the active revision without duplicating
+an effect. Active v2 runs compiled before this rule converge by persisting the
+same direct compiler correction request before accepting review content.
 
 For bugs, use `diagnosing-bugs` only while reproduction, cause, or failure
 boundary is uncertain. Run Delegation Preflight before separable local work.

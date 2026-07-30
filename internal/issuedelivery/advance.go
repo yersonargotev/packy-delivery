@@ -122,7 +122,13 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 			if err := store.activate(runID); err != nil {
 				return err
 			}
-			outcome = outcomeFromRecord(orphan)
+			outcome, _, err = m.advanceQualification(store, orphan, request)
+			if err != nil {
+				return err
+			}
+			if outcome.RunID == "" {
+				outcome = outcomeFromRecord(orphan)
+			}
 			outcome.Observations = observationsFrom(git, tracker, compiled.hash)
 			return nil
 		}
@@ -131,9 +137,10 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 			Schema: runSchema, ID: runID, Repository: tracker.Repository, Issue: tracker.Issue,
 			AuthoritySHA256: compiled.hash, State: compiled.state, Reason: compiled.reason,
 			Evidence: &compiled.evidence, PendingDecision: compiled.pending,
-			Decisions:        append([]Decision{}, compiled.decisions...),
-			Observations:     observationsFrom(git, tracker, compiled.hash),
-			EffectiveProfile: compiled.evidence.RiskProfile,
+			PendingQualificationCorrection: compiled.qualification,
+			Decisions:                      append([]Decision{}, compiled.decisions...),
+			Observations:                   observationsFrom(git, tracker, compiled.hash),
+			EffectiveProfile:               compiled.evidence.RiskProfile,
 			Timing: []Timing{{
 				Sequence: 1, Phase: "qualification", To: compiled.state,
 				StartedAt: nowStarted.Format(timeFormat), CompletedAt: nowCompleted.Format(timeFormat),
@@ -175,15 +182,36 @@ func compatibleOrphan(
 	compiled compiledAuthority,
 	supersedes string,
 ) bool {
-	return record.Repository == tracker.Repository &&
+	common := record.Repository == tracker.Repository &&
 		record.Issue == tracker.Issue &&
 		record.AuthoritySHA256 == compiled.hash &&
 		record.SupersedesRunID == supersedes &&
-		record.State == compiled.state &&
-		record.Reason == compiled.reason &&
 		reflect.DeepEqual(record.Evidence, evidencePointer(compiled)) &&
 		reflect.DeepEqual(record.PendingDecision, compiled.pending) &&
 		reflect.DeepEqual(record.Decisions, compiled.decisions)
+	if !common {
+		return false
+	}
+	if record.State == compiled.state && record.Reason == compiled.reason &&
+		reflect.DeepEqual(record.PendingQualificationCorrection, compiled.qualification) {
+		return true
+	}
+	return compatiblePreCompilerCorrectionOrphan(record, compiled)
+}
+
+func compatiblePreCompilerCorrectionOrphan(
+	record runRecord,
+	compiled compiledAuthority,
+) bool {
+	return record.Schema == runSchema &&
+		compiled.qualification != nil &&
+		record.State == StateNeedsReview &&
+		record.Reason == "qualification evidence is ready for independent review" &&
+		record.PendingQualificationCorrection == nil &&
+		!record.QualificationApproved &&
+		len(record.QualificationReviews) == 0 &&
+		len(record.QualificationCorrections) == 0 &&
+		requiresQualificationCorrection(record.Evidence)
 }
 
 func evidencePointer(compiled compiledAuthority) *deliveryevidence.Bundle {
