@@ -261,6 +261,11 @@ Adjudicate all findings and repair accepted findings as a batch:
   cumulative repair class never weakens:
   candidate-changing outranks bounded, which outranks adjudication-only, so a
   later rejected batch cannot erase an already-accepted repair obligation.
+  When a compatible older v2 candidate has a cumulative decision but no batch
+  history, applying its next batch first records that old decision as one
+  explicitly marked compatibility prefix with a deterministic request identity.
+  Only this first prefix may retain the historical candidate-changing/all-
+  rejected semantics; the actual new batch remains the final replay receipt.
 - A `Bounded Repair` preserves behavior, contract, scope, architecture, security
   posture, and acceptance meaning. Run focused verification and obtain
   confirmation from the originating review axis.

@@ -413,11 +413,12 @@ func (m *Module) applyRepairDecision(
 	if decision.Class == RepairAdjudicationOnly && hasAcceptedFindings(&decision) {
 		return Outcome{}, errors.New("adjudication-only requires every finding to be rejected with evidence")
 	}
+	priorDecision := candidate.RepairDecision
 	merged := decision
-	if candidate.RepairDecision != nil {
-		merged.Class = strongestRepairClass(candidate.RepairDecision.Class, decision.Class)
+	if priorDecision != nil {
+		merged.Class = strongestRepairClass(priorDecision.Class, decision.Class)
 		merged.Findings = append(
-			append([]FindingDecision(nil), candidate.RepairDecision.Findings...),
+			append([]FindingDecision(nil), priorDecision.Findings...),
 			decision.Findings...,
 		)
 		sort.Slice(merged.Findings, func(i, j int) bool {
@@ -426,6 +427,22 @@ func (m *Module) applyRepairDecision(
 	}
 	candidate.RepairDecision = &merged
 	if record.Schema != legacyRunSchema {
+		if len(candidate.RepairBatches) == 0 && candidate.LastRepairBatch == nil &&
+			priorDecision != nil {
+			prefixDecision := *priorDecision
+			prefixDecision.Findings = append(
+				[]FindingDecision(nil), priorDecision.Findings...,
+			)
+			prefixIDs := make([]string, 0, len(prefixDecision.Findings))
+			for _, item := range prefixDecision.Findings {
+				prefixIDs = append(prefixIDs, item.FindingID)
+			}
+			candidate.RepairBatches = append(candidate.RepairBatches, RepairBatchReceipt{
+				RequestID:        repairDecisionRequest(record.Schema, candidate.ID, prefixIDs).ID,
+				CompatiblePrefix: true,
+				Decision:         prefixDecision,
+			})
+		}
 		receipt := RepairBatchReceipt{
 			RequestID: record.PendingRepair.ID,
 			Decision:  decision,

@@ -505,8 +505,9 @@ type RepairDecisionRequest struct {
 }
 
 type RepairBatchReceipt struct {
-	RequestID string         `json:"request_id"`
-	Decision  RepairDecision `json:"decision"`
+	RequestID        string         `json:"request_id"`
+	CompatiblePrefix bool           `json:"compatible_prefix,omitempty"`
+	Decision         RepairDecision `json:"decision"`
 }
 
 type ValidationProof struct {

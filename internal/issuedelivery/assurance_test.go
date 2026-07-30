@@ -806,6 +806,31 @@ func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing
 			}},
 		},
 	})
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, decodeErr := decodeRun(data)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			current := &record.Candidates[len(record.Candidates)-1]
+			current.RepairBatches = nil
+			current.LastRepairBatch = nil
+			encoded, encodeErr := encodeRun(record)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			_, storeErr := store.storeRevisionAndActivate(record.ID, encoded)
+			return storeErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
 		Completed: true, Findings: []deliveryevidence.ReviewFinding{{
 			ID: "rejected-second", Axis: deliveryevidence.ReviewSpec,
@@ -838,8 +863,16 @@ func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing
 		t.Fatalf("later rejection downgraded accepted repair: %#v", merged)
 	}
 	persisted := persistedAssuranceRun(t, module, git)
-	if _, err := decodeRun(persisted); err != nil {
+	resumedRecord, err := decodeRun(persisted)
+	if err != nil {
 		t.Fatalf("cumulative accepted repair did not resume: %v", err)
+	}
+	resumedCandidate := &resumedRecord.Candidates[len(resumedRecord.Candidates)-1]
+	if len(resumedCandidate.RepairBatches) != 2 ||
+		!resumedCandidate.RepairBatches[0].CompatiblePrefix ||
+		resumedCandidate.LastRepairBatch == nil ||
+		resumedCandidate.LastRepairBatch.CompatiblePrefix {
+		t.Fatalf("historyless v2 repair was not bootstrapped: %#v", resumedCandidate)
 	}
 	for _, mutate := range []func(*Candidate){
 		func(candidate *Candidate) { candidate.RepairDecision.Class = RepairBounded },
@@ -857,6 +890,24 @@ func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing
 		if err := validateRun(record); err == nil {
 			t.Fatal("tampered cumulative repair history was admitted")
 		}
+	}
+	compatible, err := decodeRun(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compatibleCandidate := &compatible.Candidates[len(compatible.Candidates)-1]
+	for index := range compatibleCandidate.RepairDecision.Findings {
+		if compatibleCandidate.RepairDecision.Findings[index].FindingID == "accepted-first" {
+			compatibleCandidate.RepairDecision.Findings[index].Disposition = FindingRejected
+		}
+	}
+	compatibleCandidate.RepairBatches[0].Decision.Findings[0].Disposition = FindingRejected
+	if err := validateRun(compatible); err != nil {
+		t.Fatalf("compatible candidate-changing rejected-only prefix failed validation: %v", err)
+	}
+	compatibleCandidate.RepairBatches[0].CompatiblePrefix = false
+	if err := validateRun(compatible); err == nil {
+		t.Fatal("tampered compatible repair prefix was admitted")
 	}
 	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
 	next := mustAdvance(t, module, request)

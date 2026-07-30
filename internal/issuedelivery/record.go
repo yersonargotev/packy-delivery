@@ -653,8 +653,12 @@ func validateLastRepairBatch(schema string, candidate Candidate) error {
 	}
 	history := make(map[string]FindingDecision, len(cumulative))
 	strongest := RepairAdjudicationOnly
-	for _, batch := range candidate.RepairBatches {
+	for batchIndex, batch := range candidate.RepairBatches {
 		if batch.Decision.CandidateID != candidate.ID || len(batch.Decision.Findings) == 0 {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
+		if batch.CompatiblePrefix &&
+			(batchIndex != 0 || len(candidate.RepairBatches) < 2) {
 			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
 		}
 		accepted := false
@@ -671,7 +675,7 @@ func validateLastRepairBatch(schema string, candidate Candidate) error {
 		class := batch.Decision.Class
 		if (class == RepairAdjudicationOnly && accepted) ||
 			(class == RepairBounded && !accepted) ||
-			(class == RepairCandidateChanging && !accepted) ||
+			(class == RepairCandidateChanging && !accepted && !batch.CompatiblePrefix) ||
 			(class != RepairAdjudicationOnly && class != RepairBounded &&
 				class != RepairCandidateChanging) ||
 			batch.RequestID != repairDecisionRequest(schema, candidate.ID, ids).ID {
