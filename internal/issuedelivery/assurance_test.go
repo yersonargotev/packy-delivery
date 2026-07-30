@@ -1088,12 +1088,128 @@ func TestSupersededCandidateRequiresExactValidationReceiptReference(t *testing.T
 				proof.ValidationReceipt = &reference
 			}
 			test.mutate(proof)
-			if err := validateRun(record); err == nil ||
-				!strings.Contains(err.Error(), "stale acceptance validation reference") {
+			if err := validateRun(record); err == nil {
 				t.Fatalf("superseded %s reference validation error=%v", test.name, err)
 			}
 		})
 	}
+}
+
+func TestPhaseOwnedPersistedCandidateRequiresCompleteExhaustiveAssurance(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	currentBytes := persistedAssuranceRun(t, module, git)
+	t.Run("current acceptance removed", func(t *testing.T) {
+		record, err := decodeRun(currentBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.Candidates[len(record.Candidates)-1].Acceptance = nil
+		if err := validateRun(record); err == nil {
+			t.Fatal("current exhaustive candidate admitted a removed acceptance slice")
+		}
+	})
+
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	git.value.TreeSHA = strings.Repeat("e", 40)
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	supersededBytes := persistedAssuranceRun(t, module, git)
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*runRecord)
+	}{
+		{"superseded acceptance removed", func(record *runRecord) {
+			record.Candidates[0].Acceptance = nil
+		}},
+		{"superseded Standards review removed", func(record *runRecord) {
+			reviews := record.Candidates[0].Reviews[:0]
+			for _, review := range record.Candidates[0].Reviews {
+				if review.Axis != deliveryevidence.ReviewStandards {
+					reviews = append(reviews, review)
+				}
+			}
+			record.Candidates[0].Reviews = reviews
+		}},
+		{"superseded Spec review removed", func(record *runRecord) {
+			reviews := record.Candidates[0].Reviews[:0]
+			for _, review := range record.Candidates[0].Reviews {
+				if review.Axis != deliveryevidence.ReviewSpec {
+					reviews = append(reviews, review)
+				}
+			}
+			record.Candidates[0].Reviews = reviews
+		}},
+		{"superseded proof missing", func(record *runRecord) {
+			record.Candidates[0].Acceptance = record.Candidates[0].Acceptance[:1]
+		}},
+		{"superseded proof duplicate", func(record *runRecord) {
+			record.Candidates[0].Acceptance[1].Identity =
+				record.Candidates[0].Acceptance[0].Identity
+		}},
+		{"superseded proof foreign", func(record *runRecord) {
+			record.Candidates[0].Acceptance[1].Identity = "criterion-foreign"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := decodeRun(supersededBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&record)
+			if err := validateRun(record); err == nil {
+				t.Fatal("incomplete superseded exhaustive assurance was admitted")
+			}
+		})
+	}
+
+	t.Run("pre-exhaustive validation reference", func(t *testing.T) {
+		record, err := decodeRun(supersededBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		current := &record.Candidates[len(record.Candidates)-1]
+		if current.Exhaustive != nil || len(current.Acceptance) == 0 {
+			t.Fatalf("fixture is not a pre-exhaustive reviewed candidate: %#v", current)
+		}
+		current.Acceptance[0].ValidationReceipt = &ValidationReceiptReference{
+			Schema: deliveryevidence.ValidationReceiptV1, CandidateID: current.ID,
+			CommitSHA: current.CommitSHA, TreeSHA: current.TreeSHA,
+			CompletedAt: "2026-07-30T23:59:59Z",
+		}
+		if err := validateRun(record); err == nil ||
+			!strings.Contains(err.Error(), "premature acceptance validation reference") {
+			t.Fatalf("forged pre-exhaustive reference validation error=%v", err)
+		}
+	})
+}
+
+func persistedAssuranceRun(
+	t *testing.T,
+	module *Module,
+	git *fakeGitObserver,
+) []byte {
+	t.Helper()
+	var persisted []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			persisted = append([]byte(nil), data...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return persisted
 }
 
 func TestAcceptanceProofRejectsStaleStructuralReceiptIdentity(t *testing.T) {

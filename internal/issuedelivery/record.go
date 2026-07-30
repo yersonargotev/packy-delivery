@@ -291,6 +291,8 @@ func validateCandidates(record runRecord) error {
 		}
 		findingIDs := make(map[string]bool)
 		var reviewedAcceptance []AcceptanceProof
+		specReviewCompleted := false
+		completedReviews := make(map[deliveryevidence.ReviewAxis]int, len(candidate.RequiredReviews))
 		for _, review := range candidate.Reviews {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
@@ -326,15 +328,35 @@ func validateCandidates(record runRecord) error {
 			}
 			if review.Axis == deliveryevidence.ReviewSpec && review.Completed {
 				reviewedAcceptance = review.Acceptance
+				specReviewCompleted = true
+			}
+			if review.Completed {
+				completedReviews[review.Axis]++
 			}
 		}
-		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) && len(candidate.Acceptance) > 0 {
+		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) && specReviewCompleted {
 			candidateSemantic := append([]AcceptanceProof(nil), candidate.Acceptance...)
 			for proofIndex := range candidateSemantic {
 				candidateSemantic[proofIndex].ValidationReceipt = nil
 			}
 			if !reflect.DeepEqual(candidateSemantic, reviewedAcceptance) {
 				return fmt.Errorf("issue delivery candidate acceptance does not match its completed Spec review")
+			}
+		}
+		if candidate.Exhaustive != nil && phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			for axis := range required {
+				if completedReviews[axis] != 1 {
+					return fmt.Errorf("issue delivery exhaustive candidate lacks exactly one completed required review")
+				}
+			}
+			acceptanceEvidence := *record.Evidence
+			acceptanceEvidence.AcceptanceMatrix = append(
+				[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
+			)
+			if err := admitAcceptanceProofs(
+				&acceptanceEvidence, &candidate, candidate.Acceptance,
+			); err != nil {
+				return fmt.Errorf("issue delivery exhaustive candidate acceptance is incomplete: %w", err)
 			}
 		}
 		for _, proof := range []*ValidationProof{candidate.Focused, candidate.Exhaustive} {
@@ -379,6 +401,9 @@ func validateCandidates(record runRecord) error {
 			if proof.CandidateID != candidate.ID ||
 				proof.Phase != deliveryevidence.AssuranceCandidateReview {
 				return fmt.Errorf("issue delivery candidate contains a stale acceptance proof")
+			}
+			if candidate.Exhaustive == nil && proof.ValidationReceipt != nil {
+				return fmt.Errorf("issue delivery candidate contains a premature acceptance validation reference")
 			}
 			if candidate.Exhaustive != nil {
 				reference := proof.ValidationReceipt
