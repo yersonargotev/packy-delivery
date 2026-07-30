@@ -55,6 +55,8 @@ type advanceReport struct {
 	RunID                    string                                        `json:"run_id"`
 	State                    issuedelivery.State                           `json:"state"`
 	Reason                   string                                        `json:"reason"`
+	PauseCause               issuedelivery.PauseCause                      `json:"pause_cause"`
+	NextAction               issuedelivery.NextAction                      `json:"next_action"`
 	SupersedesRunID          string                                        `json:"supersedes_run_id,omitempty"`
 	Decision                 *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                   *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
@@ -197,6 +199,7 @@ func reportFromOutcome(outcome issuedelivery.Outcome, now time.Time) (advanceRep
 	}
 	return advanceReport{
 		RunID: outcome.RunID, State: outcome.State, Reason: outcome.Reason,
+		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		SupersedesRunID: outcome.SupersedesRunID, Decision: outcome.Decision,
 		Repair: outcome.Repair, Evidence: outcome.Evidence, Observations: outcome.Observations,
 		QualificationCorrection:  outcome.QualificationCorrection,

@@ -291,6 +291,9 @@ func TestAdvanceReviewsAccumulatedCandidateInParallelAndReachesExactLocalReadine
 	if reviewOutcome.State != StateNeedsReview || len(reviewOutcome.Candidate.Reviews) != 2 {
 		t.Fatalf("review outcome=%#v", reviewOutcome)
 	}
+	if reviewOutcome.PauseCause != PauseDeterministicAdvance || reviewOutcome.NextAction != ActionAdvance {
+		t.Fatalf("post-review pause metadata = %q, %q", reviewOutcome.PauseCause, reviewOutcome.NextAction)
+	}
 	reviewer.hook = nil
 
 	ready, err := module.Advance(context.Background(), request)
@@ -341,6 +344,9 @@ func TestAdvanceBoundedRepairUsesFocusedOriginatingAxisConfirmation(t *testing.T
 	})
 	if planned.State != StateNeedsReview {
 		t.Fatalf("repair plan outcome=%#v", planned)
+	}
+	if planned.PauseCause != PauseCandidateRepair || planned.NextAction != ActionRepairCandidate {
+		t.Fatalf("repair plan pause metadata = %q, %q", planned.PauseCause, planned.NextAction)
 	}
 	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
 	repaired := mustAdvance(t, module, request)

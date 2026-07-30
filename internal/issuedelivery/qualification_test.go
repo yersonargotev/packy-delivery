@@ -199,6 +199,9 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 		len(approved.QualificationReviews) != 2 || len(approved.QualificationCorrections) != 1 {
 		t.Fatalf("approved qualification = %#v", approved)
 	}
+	if approved.PauseCause != PauseDeterministicAdvance || approved.NextAction != ActionAdvance {
+		t.Fatalf("approved qualification pause metadata = %q, %q", approved.PauseCause, approved.NextAction)
+	}
 	replayedApproval, err := module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 370, QualificationReview: approval,
 	})
@@ -207,6 +210,9 @@ func TestAdvancePersistsRejectedQualificationCorrectionAndIndependentRereview(t 
 	}
 	if !replayedApproval.QualificationApproved {
 		t.Fatalf("replayed qualification approval = %#v", replayedApproval)
+	}
+	if replayedApproval.PauseCause != approved.PauseCause || replayedApproval.NextAction != approved.NextAction {
+		t.Fatalf("replayed qualification pause metadata changed: approved=%#v replayed=%#v", approved, replayedApproval)
 	}
 	assertQualificationRevisionCount(t, module, qualified.RunID, 3)
 	reloaded, err := module.Advance(context.Background(), request)

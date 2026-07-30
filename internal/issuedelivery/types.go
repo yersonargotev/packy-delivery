@@ -20,6 +20,92 @@ const (
 	StateCompleted     State = "completed"
 )
 
+type PauseCause string
+
+const (
+	PauseSemanticInput         PauseCause = "semantic-input"
+	PauseIndependentReview     PauseCause = "independent-review"
+	PauseExternalResult        PauseCause = "external-result"
+	PauseNonLocalAuthorization PauseCause = "non-local-authorization"
+	PauseInvariantBlock        PauseCause = "invariant-block"
+	PauseCompleted             PauseCause = "completed"
+	PauseDeterministicAdvance  PauseCause = "deterministic-advance"
+	PauseCandidateRepair       PauseCause = "candidate-repair"
+	PauseLockContention        PauseCause = "lock-contention"
+	PauseLegacyWorkflow        PauseCause = "legacy-workflow"
+)
+
+type NextAction string
+
+type BlockerKind string
+
+const (
+	BlockerAuthority               BlockerKind = "authority"
+	BlockerNonLocalObserver        BlockerKind = "non-local-observer"
+	BlockerLocalCompletionObserver BlockerKind = "local-completion-observer"
+	BlockerMergeObservationAbsent  BlockerKind = "merge-observation-absent"
+	BlockerIssueClosure            BlockerKind = "issue-closure"
+	BlockerMergeIdentity           BlockerKind = "merge-identity"
+	BlockerSpecialistReview        BlockerKind = "specialist-review"
+	BlockerRiskObservation         BlockerKind = "risk-observation"
+	BlockerValidationEnvironment   BlockerKind = "validation-environment"
+	BlockerAcceptanceTraceability  BlockerKind = "acceptance-traceability"
+	BlockerLocalReadiness          BlockerKind = "local-readiness"
+	BlockerNonLocalFreshness       BlockerKind = "non-local-freshness"
+	BlockerNonLocalObservation     BlockerKind = "non-local-observation"
+	BlockerRemoteBranch            BlockerKind = "remote-branch"
+	BlockerPullRequest             BlockerKind = "pull-request"
+	BlockerCIAttribution           BlockerKind = "ci-attribution"
+	BlockerCIObservation           BlockerKind = "ci-observation"
+	BlockerMergeReadiness          BlockerKind = "merge-readiness"
+	BlockerIntegration             BlockerKind = "integration"
+	BlockerRemoteCleanup           BlockerKind = "remote-cleanup"
+	BlockerWorktreeCleanup         BlockerKind = "worktree-cleanup"
+	BlockerLocalBranchCleanup      BlockerKind = "local-branch-cleanup"
+	BlockerMainSynchronization     BlockerKind = "main-synchronization"
+	BlockerLocalCleanup            BlockerKind = "local-cleanup"
+)
+
+const (
+	ActionProvideDecision                  NextAction = "provide-decision"
+	ActionProvideQualificationCorrection   NextAction = "provide-qualification-correction"
+	ActionProvideRepairDecision            NextAction = "provide-repair-decision"
+	ActionProvideQualificationReview       NextAction = "provide-qualification-review"
+	ActionProvideCandidateReview           NextAction = "provide-candidate-review"
+	ActionRepairCandidate                  NextAction = "repair-candidate"
+	ActionObserveExternalResult            NextAction = "observe-external-result"
+	ActionAuthorizeNonLocal                NextAction = "authorize-non-local"
+	ActionAdvance                          NextAction = "advance"
+	ActionRetryAdvance                     NextAction = "retry-advance"
+	ActionResumeLegacyV1                   NextAction = "resume-legacy-v1"
+	ActionResolveAuthorityBlock            NextAction = "resolve-authority-block"
+	ActionConfigureNonLocalObserver        NextAction = "configure-non-local-observer"
+	ActionConfigureLocalCompletionObserver NextAction = "configure-local-completion-observer"
+	ActionRestoreSpecialistReview          NextAction = "restore-specialist-review"
+	ActionInspectMergeObservation          NextAction = "inspect-merge-observation"
+	ActionInspectIssueClosure              NextAction = "inspect-issue-closure"
+	ActionProvideCIAttribution             NextAction = "provide-ci-attribution"
+	ActionRestoreCIObservation             NextAction = "restore-ci-observation"
+	ActionRepairAcceptanceTraceability     NextAction = "repair-acceptance-traceability"
+	ActionRepairRiskObservation            NextAction = "repair-risk-observation"
+	ActionRepairValidationEnvironment      NextAction = "repair-validation-environment"
+	ActionRestoreLocalReadiness            NextAction = "restore-local-readiness"
+	ActionRestoreNonLocalFreshness         NextAction = "restore-non-local-freshness"
+	ActionRestoreNonLocalObservation       NextAction = "restore-non-local-observation"
+	ActionReconcileRemoteBranch            NextAction = "reconcile-remote-branch"
+	ActionReconcilePullRequest             NextAction = "reconcile-pull-request"
+	ActionRestoreMergeReadiness            NextAction = "restore-merge-readiness"
+	ActionReconcileMerge                   NextAction = "reconcile-merge"
+	ActionReconcileIntegration             NextAction = "reconcile-integration"
+	ActionReconcileRemoteCleanup           NextAction = "reconcile-remote-cleanup"
+	ActionReconcileWorktreeCleanup         NextAction = "reconcile-worktree-cleanup"
+	ActionReconcileLocalBranchCleanup      NextAction = "reconcile-local-branch-cleanup"
+	ActionReconcileMainSynchronization     NextAction = "reconcile-main-synchronization"
+	ActionReconcileLocalCleanup            NextAction = "reconcile-local-cleanup"
+	ActionInspectBlockedTransition         NextAction = "inspect-blocked-transition"
+	ActionNone                             NextAction = "none"
+)
+
 type DecisionKind string
 
 const (
@@ -84,6 +170,11 @@ type Outcome struct {
 	RunID                    string
 	State                    State
 	Reason                   string
+	PauseCause               PauseCause
+	NextAction               NextAction
+	IssueLockContended       bool
+	RunSchema                string
+	BlockerKind              BlockerKind
 	SupersedesRunID          string
 	Decision                 *DecisionRequest
 	Evidence                 *deliveryevidence.Bundle

@@ -328,6 +328,9 @@ func TestAdvancePausesForTypedDecisionAndResumesWithMatchingAnswer(t *testing.T)
 	if pending.State != StateNeedsDecision || pending.Decision == nil || pending.Evidence != nil {
 		t.Fatalf("pending outcome = %#v", pending)
 	}
+	if pending.PauseCause != PauseSemanticInput || pending.NextAction != ActionProvideDecision {
+		t.Fatalf("pending pause metadata = %q, %q", pending.PauseCause, pending.NextAction)
+	}
 
 	_, err = module.Advance(context.Background(), Request{
 		RepositoryPath: "/repo", IssueNumber: 356,
@@ -358,6 +361,255 @@ func TestAdvancePausesForTypedDecisionAndResumesWithMatchingAnswer(t *testing.T)
 	}
 	if resumed.RunID != resolved.RunID || resumed.State != StateNeedsReview {
 		t.Fatalf("resolved decision was not resumed: resolved=%#v resumed=%#v", resolved, resumed)
+	}
+	if resumed.PauseCause != resolved.PauseCause || resumed.NextAction != resolved.NextAction {
+		t.Fatalf("resumed pause metadata changed: resolved=%#v resumed=%#v", resolved, resumed)
+	}
+}
+
+func TestOutcomeWithPauseDerivesExactActionFromTypedFacts(t *testing.T) {
+	candidate := &Candidate{
+		ID: "candidate-1", RequiredReviews: []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec},
+	}
+	reviewedCandidate := &Candidate{ID: "candidate-2"}
+	repairCandidate := &Candidate{
+		ID: "candidate-3",
+		RepairDecision: &RepairDecision{Findings: []FindingDecision{{
+			FindingID: "finding-1", Disposition: FindingAccepted,
+		}}},
+	}
+	readiness := &LocalReadiness{CandidateID: candidate.ID}
+	tests := []struct {
+		name    string
+		outcome Outcome
+		cause   PauseCause
+		action  NextAction
+	}{
+		{
+			name: "semantic decision", outcome: Outcome{
+				State: StateNeedsDecision, Decision: &DecisionRequest{},
+			},
+			cause: PauseSemanticInput, action: ActionProvideDecision,
+		},
+		{
+			name: "qualification correction", outcome: Outcome{
+				State: StateNeedsDecision, QualificationCorrection: &QualificationCorrectionRequest{},
+			},
+			cause: PauseSemanticInput, action: ActionProvideQualificationCorrection,
+		},
+		{
+			name: "repair decision", outcome: Outcome{
+				State: StateNeedsDecision, Repair: &RepairDecisionRequest{},
+			},
+			cause: PauseSemanticInput, action: ActionProvideRepairDecision,
+		},
+		{
+			name: "qualification review", outcome: Outcome{State: StateNeedsReview},
+			cause: PauseIndependentReview, action: ActionProvideQualificationReview,
+		},
+		{
+			name: "candidate review", outcome: Outcome{
+				State: StateNeedsReview, Candidate: candidate,
+			},
+			cause: PauseIndependentReview, action: ActionProvideCandidateReview,
+		},
+		{
+			name: "post-qualification advance", outcome: Outcome{
+				State: StateNeedsReview, QualificationApproved: true,
+			},
+			cause: PauseDeterministicAdvance, action: ActionAdvance,
+		},
+		{
+			name: "post-review advance", outcome: Outcome{
+				State: StateNeedsReview, Candidate: reviewedCandidate,
+			},
+			cause: PauseDeterministicAdvance, action: ActionAdvance,
+		},
+		{
+			name: "repair candidate", outcome: Outcome{
+				State: StateNeedsReview, Candidate: repairCandidate,
+			},
+			cause: PauseCandidateRepair, action: ActionRepairCandidate,
+		},
+		{
+			name: "external result", outcome: Outcome{State: StateWaiting},
+			cause: PauseExternalResult, action: ActionObserveExternalResult,
+		},
+		{
+			name: "non-local authorization", outcome: Outcome{
+				State: StateWaiting, RunSchema: runSchema,
+				Evidence:  &deliveryevidence.Bundle{Schema: deliveryevidence.SchemaV2},
+				Candidate: candidate, LocalReadiness: readiness,
+			},
+			cause: PauseNonLocalAuthorization, action: ActionAuthorizeNonLocal,
+		},
+		{
+			name: "invariant block", outcome: Outcome{
+				State: StateBlocked, BlockerKind: BlockerAuthority,
+				Timing: []Timing{{Phase: "qualification"}},
+			},
+			cause: PauseInvariantBlock, action: ActionResolveAuthorityBlock,
+		},
+		{
+			name: "legacy workflow", outcome: Outcome{
+				State: StateWaiting, RunSchema: legacyRunSchema,
+				Evidence:       &deliveryevidence.Bundle{Schema: deliveryevidence.SchemaV2},
+				LocalReadiness: readiness,
+			},
+			cause: PauseLegacyWorkflow, action: ActionResumeLegacyV1,
+		},
+		{
+			name: "completion", outcome: Outcome{State: StateCompleted},
+			cause: PauseCompleted, action: ActionNone,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := outcomeWithPause(test.outcome)
+			if got.PauseCause != test.cause || got.NextAction != test.action {
+				t.Fatalf("pause metadata = %q, %q; want %q, %q", got.PauseCause, got.NextAction, test.cause, test.action)
+			}
+		})
+	}
+}
+
+func TestOutcomeFromLegacyEnvelopeUsesRunSchemaForReadinessAction(t *testing.T) {
+	outcome := outcomeWithPause(outcomeFromRecord(runRecord{
+		Schema: legacyRunSchema, State: StateWaiting,
+		Evidence:       &deliveryevidence.Bundle{Schema: deliveryevidence.SchemaV2},
+		LocalReadiness: &LocalReadiness{CandidateID: "legacy-candidate"},
+	}))
+	if outcome.RunSchema != legacyRunSchema ||
+		outcome.PauseCause != PauseLegacyWorkflow ||
+		outcome.NextAction != ActionResumeLegacyV1 {
+		t.Fatalf("legacy envelope pause metadata = %#v", outcome)
+	}
+}
+
+func TestAdvanceIssueLockWaitIncludesStableExternalObservation(t *testing.T) {
+	module, git, _ := moduleFixture(t, 356)
+	var first Outcome
+	err := module.store.withIssueLock(
+		context.Background(),
+		git.value.CommonDir,
+		356,
+		func(lockedIssueStore) error {
+			var err error
+			first, err = module.Advance(context.Background(), Request{
+				RepositoryPath: "/repo", IssueNumber: 356,
+			})
+			return err
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.State != StateWaiting || first.PauseCause != PauseLockContention ||
+		first.NextAction != ActionRetryAdvance {
+		t.Fatalf("issue-lock outcome = %#v", first)
+	}
+	second := outcomeWithPause(Outcome{
+		State: first.State, Reason: first.Reason, IssueLockContended: first.IssueLockContended,
+	})
+	if second.PauseCause != first.PauseCause || second.NextAction != first.NextAction {
+		t.Fatalf("repeated issue-lock metadata changed: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestBlockedNextActionCoversProductionTransitionPhases(t *testing.T) {
+	tests := map[string]NextAction{
+		"qualification":            ActionResolveAuthorityBlock,
+		"qualification-review":     ActionResolveAuthorityBlock,
+		"qualification-correction": ActionResolveAuthorityBlock,
+		"post-merge-observation":   ActionReconcileMerge,
+		"specialist-review":        ActionRestoreSpecialistReview,
+		"risk-observation":         ActionRepairRiskObservation,
+		"focused-validation":       ActionRepairValidationEnvironment,
+		"boundary-validation":      ActionRepairValidationEnvironment,
+		"exhaustive-validation":    ActionRepairValidationEnvironment,
+		"local-readiness":          ActionRestoreLocalReadiness,
+		"non-local-freshness":      ActionRestoreNonLocalFreshness,
+		"non-local-observation":    ActionRestoreNonLocalObservation,
+		"branch-push":              ActionReconcileRemoteBranch,
+		"pull-request":             ActionReconcilePullRequest,
+		"ci-wait":                  ActionRestoreCIObservation,
+		"merge-readiness":          ActionRestoreMergeReadiness,
+		"merge-adoption":           ActionReconcileMerge,
+		"merge":                    ActionReconcileMerge,
+		"integration-verification": ActionReconcileIntegration,
+		"remote-cleanup":           ActionReconcileRemoteCleanup,
+		"worktree-cleanup":         ActionReconcileWorktreeCleanup,
+		"local-branch-cleanup":     ActionReconcileLocalBranchCleanup,
+		"main-synchronization":     ActionReconcileMainSynchronization,
+		"local-cleanup":            ActionReconcileLocalCleanup,
+	}
+	for phase, want := range tests {
+		t.Run(phase, func(t *testing.T) {
+			record := runRecord{
+				State: StateBlocked, Reason: "generic blocked condition",
+				Timing: []Timing{{Phase: phase}},
+			}
+			if got := blockerNextAction(blockerKindFromRecord(record)); got != want {
+				t.Fatalf("blocked action = %q, want %q", got, want)
+			}
+		})
+	}
+	specific := []struct {
+		name, phase, reason string
+		kind                BlockerKind
+		action              NextAction
+	}{
+		{
+			name: "missing observer", phase: "post-merge-observation",
+			reason: "existing pull request requires a non-local observer to exclude or adopt merge; candidate flow remains disabled",
+			kind:   BlockerNonLocalObserver, action: ActionConfigureNonLocalObserver,
+		},
+		{
+			name: "missing local completion observer", phase: "post-merge-observation",
+			reason: "confirmed merge requires a local verification and cleanup adapter; candidate flow remains disabled",
+			kind:   BlockerLocalCompletionObserver, action: ActionConfigureLocalCompletionObserver,
+		},
+		{
+			name: "merge absent", phase: "post-merge-observation",
+			reason: "confirmed merge is absent from current observation; preserve external state for inspection",
+			kind:   BlockerMergeObservationAbsent, action: ActionInspectMergeObservation,
+		},
+		{
+			name: "closed without merge", phase: "post-merge-observation",
+			reason: "issue closed without an exact matching merge; preserve external state for inspection",
+			kind:   BlockerIssueClosure, action: ActionInspectIssueClosure,
+		},
+		{
+			name: "ci attribution", phase: "ci-wait",
+			reason: "CI failure attribution is unknown; classify the exact failed run before retrying or repairing",
+			kind:   BlockerCIAttribution, action: ActionProvideCIAttribution,
+		},
+		{
+			name: "acceptance traceability", phase: "exhaustive-validation",
+			reason: "exhaustive validation lacks exact acceptance traceability",
+			kind:   BlockerAcceptanceTraceability, action: ActionRepairAcceptanceTraceability,
+		},
+		{
+			name: "merge adoption local observation", phase: "merge-adoption",
+			reason: "pre-merge local/operator observation is incomplete or incompatible",
+			kind:   BlockerLocalCleanup, action: ActionReconcileLocalCleanup,
+		},
+	}
+	for _, test := range specific {
+		t.Run(test.name, func(t *testing.T) {
+			record := runRecord{
+				State: StateBlocked, Reason: test.reason, Timing: []Timing{{Phase: test.phase}},
+			}
+			kind := blockerKindFromRecord(record)
+			if kind != test.kind || blockerNextAction(kind) != test.action {
+				t.Fatalf("blocker = %q, %q; want %q, %q", kind, blockerNextAction(kind), test.kind, test.action)
+			}
+		})
+	}
+	if got := blockerNextAction(blockerKindFromRecord(runRecord{
+		State: StateBlocked, Reason: "unknown", Timing: []Timing{{Phase: "unknown"}},
+	})); got != ActionInspectBlockedTransition {
+		t.Fatalf("unknown blocker action = %q", got)
 	}
 }
 
@@ -548,8 +800,19 @@ func TestAdvanceReportsBlockedDependency(t *testing.T) {
 		t.Fatal(err)
 	}
 	if outcome.State != StateBlocked ||
+		outcome.BlockerKind != BlockerAuthority ||
+		outcome.NextAction != ActionResolveAuthorityBlock ||
 		outcome.Evidence.Authority.DependencyDisposition[0].Disposition != deliveryevidence.DependencyBlocking {
 		t.Fatalf("blocked outcome = %#v", outcome)
+	}
+	replayed, err := module.Advance(context.Background(), Request{
+		RepositoryPath: "/repo", IssueNumber: 356,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.BlockerKind != outcome.BlockerKind || replayed.NextAction != outcome.NextAction {
+		t.Fatalf("replayed blocker changed: first=%#v replayed=%#v", outcome, replayed)
 	}
 }
 
