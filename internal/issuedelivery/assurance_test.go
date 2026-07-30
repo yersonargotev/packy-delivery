@@ -183,35 +183,12 @@ func approveQualificationFixture(t *testing.T, module *Module, issue int) {
 	t.Helper()
 	request := Request{RepositoryPath: "/repo", IssueNumber: issue}
 	qualified := mustAdvance(t, module, request)
-	matrixHash, err := acceptanceMatrixDigest(qualified.Evidence.AcceptanceMatrix)
-	if err != nil {
-		t.Fatal(err)
+	pending := qualified.QualificationCorrection
+	if pending == nil {
+		t.Fatalf("fixture compiler did not request qualification correction: %#v", qualified)
 	}
-	findings := make([]deliveryevidence.ReviewFinding, len(qualified.Evidence.AcceptanceMatrix))
-	links := make(map[string]string, len(qualified.Evidence.Scope.OwnedNow))
-	for _, entry := range qualified.Evidence.Scope.OwnedNow {
-		links[entry.Identity] = entry.EvidenceLink
-	}
-	for index, row := range qualified.Evidence.AcceptanceMatrix {
-		findings[index] = deliveryevidence.ReviewFinding{
-			ID: "fixture-qualification-" + row.Identity, Axis: deliveryevidence.ReviewSpec,
-			Severity: deliveryevidence.SeverityP1, Authority: deliveryevidence.AuthoritySpecRequirement,
-			Citation: links[row.Identity], Location: row.Identity,
-			Evidence: "the production-shaped assurance fixture requires an explicit evidence seam",
-		}
-	}
-	rejected := mustAdvance(t, module, Request{
-		RepositoryPath: "/repo", IssueNumber: issue,
-		QualificationReview: &QualificationReview{
-			AuthoritySHA256:        qualified.Observations.AuthoritySHA256,
-			AcceptanceMatrixSHA256: matrixHash,
-			Findings:               findings, Completed: true,
-		},
-	})
-	rows := append([]deliveryevidence.AcceptanceRow(nil), rejected.Evidence.AcceptanceMatrix...)
-	findingIDs := make([]string, len(findings))
+	rows := append([]deliveryevidence.AcceptanceRow(nil), qualified.Evidence.AcceptanceMatrix...)
 	for index := range rows {
-		findingIDs[index] = findings[index].ID
 		rows[index].OwningSeam = "issuedelivery assurance fixture seam"
 		rows[index].PositiveEvidence = "planned: focused positive evidence"
 		rows[index].NegativeEvidence = "planned: focused negative evidence"
@@ -222,13 +199,10 @@ func approveQualificationFixture(t *testing.T, module *Module, issue int) {
 	}
 	corrected := mustAdvance(t, module, Request{
 		RepositoryPath: "/repo", IssueNumber: issue,
-		QualificationCorrection: &QualificationCorrection{
-			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
-			ReviewedMatrixSHA256: matrixHash,
-			FindingIDs:           findingIDs,
-			AcceptanceMatrix:     rows,
-			Evidence:             "mapped every assurance criterion through the typed correction envelope",
-		},
+		QualificationCorrection: compilerQualificationCorrectionForTest(
+			pending, rows,
+			"mapped every assurance criterion through the typed correction envelope",
+		),
 	})
 	correctedHash, err := acceptanceMatrixDigest(corrected.Evidence.AcceptanceMatrix)
 	if err != nil {
@@ -244,6 +218,49 @@ func approveQualificationFixture(t *testing.T, module *Module, issue int) {
 	})
 	if !approved.QualificationApproved {
 		t.Fatalf("fixture qualification was not approved: %#v", approved)
+	}
+}
+
+func compilerQualificationCorrectionForTest(
+	pending *QualificationCorrectionRequest,
+	rows []deliveryevidence.AcceptanceRow,
+	evidence string,
+) *QualificationCorrection {
+	bound := append([]deliveryevidence.AcceptanceRow(nil), rows...)
+	for index := range bound {
+		identity := strings.ReplaceAll(bound[index].Identity, "-", "_")
+		prefix := "[criterion:" + bound[index].Identity + "] "
+		assertion := func(value string) string {
+			if len(value) < 24 {
+				return value + " contract assertion"
+			}
+			return value
+		}
+		bound[index].OwningSeam = prefix + "source=symbol:issuedelivery." +
+			identity + ".owningSeam; assertion=" + assertion(bound[index].OwningSeam)
+		bound[index].PositiveEvidence = prefix + "source=test:TestQualification_" +
+			identity + "_Positive; assertion=" + assertion(bound[index].PositiveEvidence)
+		bound[index].NegativeEvidence = prefix + "source=test:TestQualification_" +
+			identity + "_Negative; assertion=" + assertion(bound[index].NegativeEvidence)
+		bound[index].FailureEvidence = prefix + "source=test:TestQualification_" +
+			identity + "_Failure; assertion=" + assertion(bound[index].FailureEvidence)
+		bound[index].MutationEvidence = prefix + "source=test:TestQualification_" +
+			identity + "_Mutation; assertion=" + assertion(bound[index].MutationEvidence)
+		bound[index].CompatibilityEvidence = prefix + "source=test:TestQualification_" +
+			identity + "_Compatibility; assertion=" + assertion(bound[index].CompatibilityEvidence)
+		bound[index].PreservationEvidence = prefix + "source=test:TestQualification_" +
+			identity + "_Preservation; assertion=" + assertion(bound[index].PreservationEvidence)
+		bound[index].MigrationEvidence = prefix + "source=authority:" +
+			bound[index].Identity + "/migration; assertion=" + assertion(bound[index].MigrationEvidence)
+	}
+	return &QualificationCorrection{
+		RequestID:            pending.ID,
+		AuthoritySHA256:      pending.AuthoritySHA256,
+		ReviewedMatrixSHA256: pending.ReviewedMatrixSHA256,
+		FindingIDs:           append([]string(nil), pending.FindingIDs...),
+		AcceptanceMatrix:     bound,
+		Evidence: "[request:" + pending.ID + "] findings=" +
+			strings.Join(pending.FindingIDs, ",") + "; rationale=" + evidence,
 	}
 }
 

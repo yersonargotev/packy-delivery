@@ -110,7 +110,8 @@ func TestAdvanceIssue344StyleSelfContainedLowRiskRunCreatesAndResumes(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.RunID == "" || first.State != StateNeedsReview || first.Evidence == nil {
+	if first.RunID == "" || first.State != StateNeedsDecision || first.Evidence == nil ||
+		first.QualificationCorrection == nil {
 		t.Fatalf("fresh outcome = %#v", first)
 	}
 	if first.Evidence.Schema != deliveryevidence.SchemaV2 ||
@@ -135,7 +136,7 @@ func TestAdvanceIssue344StyleSelfContainedLowRiskRunCreatesAndResumes(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.RunID != first.RunID || second.State != StateNeedsReview ||
+	if second.RunID != first.RunID || second.State != StateNeedsDecision ||
 		len(second.Timing) != len(first.Timing) {
 		t.Fatalf("resume changed run: first=%#v second=%#v", first, second)
 	}
@@ -351,7 +352,8 @@ func TestAdvancePausesForTypedDecisionAndResumesWithMatchingAnswer(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.State != StateNeedsReview || resolved.Evidence == nil ||
+	if resolved.State != StateNeedsDecision || resolved.Evidence == nil ||
+		resolved.QualificationCorrection == nil ||
 		resolved.SupersedesRunID != pending.RunID || len(resolved.Evidence.Scope.Forbidden) != 2 {
 		t.Fatalf("resolved outcome = %#v", resolved)
 	}
@@ -359,7 +361,7 @@ func TestAdvancePausesForTypedDecisionAndResumesWithMatchingAnswer(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.RunID != resolved.RunID || resumed.State != StateNeedsReview {
+	if resumed.RunID != resolved.RunID || resumed.State != StateNeedsDecision {
 		t.Fatalf("resolved decision was not resumed: resolved=%#v resumed=%#v", resolved, resumed)
 	}
 	if resumed.PauseCause != resolved.PauseCause || resumed.NextAction != resolved.NextAction {
@@ -639,7 +641,8 @@ func TestAdvanceResolvesEveryMaterialAmbiguityBeforeReview(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if outcome.State != StateNeedsReview || len(outcome.Evidence.Scope.Forbidden) != 3 {
+	if outcome.State != StateNeedsDecision || outcome.QualificationCorrection == nil ||
+		len(outcome.Evidence.Scope.Forbidden) != 3 {
 		t.Fatalf("all ambiguities resolved outcome = %#v", outcome)
 	}
 }
@@ -714,7 +717,7 @@ func TestAdvanceRejectsSemanticallyInvalidPersistedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := module.Advance(context.Background(), request); err == nil ||
-		!strings.Contains(err.Error(), "timing does not reach current state") {
+		!strings.Contains(err.Error(), "completed run requires admitted evidence") {
 		t.Fatalf("invalid persisted run error = %v", err)
 	}
 }
@@ -740,6 +743,58 @@ func TestAdvanceRecoversRunPersistedWithoutActivePointer(t *testing.T) {
 	}
 	if _, err := os.Stat(activePath); err != nil {
 		t.Fatalf("active pointer was not recovered: %v", err)
+	}
+}
+
+func TestAdvanceAdoptsPreCompilerCorrectionOrphanAndConverges(t *testing.T) {
+	module, _, _ := moduleFixture(t, 356)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 356}
+	created, err := module.Advance(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPath := filepath.Join(module.storePathForTest(t, 356), "runs", created.RunID+".json")
+	data, err := os.ReadFile(runPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := decodeRun(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.State = StateNeedsReview
+	record.Reason = "qualification evidence is ready for independent review"
+	record.PendingQualificationCorrection = nil
+	record.Timing[len(record.Timing)-1].To = StateNeedsReview
+	historical, err := encodeRun(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runPath, historical, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activePath := filepath.Join(module.storePathForTest(t, 356), "active.json")
+	if err := os.Remove(activePath); err != nil {
+		t.Fatal(err)
+	}
+
+	adopted, err := module.Advance(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.RunID != created.RunID || adopted.State != StateNeedsDecision ||
+		adopted.QualificationCorrection == nil ||
+		len(adopted.QualificationReviews) != 0 {
+		t.Fatalf("historical qualification orphan was not adopted and converged: %#v", adopted)
+	}
+	revisions, err := os.ReadDir(filepath.Join(
+		module.storePathForTest(t, 356), "revisions", created.RunID,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("historical orphan convergence revisions = %d, want 1", len(revisions))
 	}
 }
 
@@ -844,7 +899,7 @@ func TestAdvanceSerializesOneIssueButAllowsDifferentIssues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if other.State != StateNeedsReview {
+	if other.State != StateNeedsDecision || other.QualificationCorrection == nil {
 		t.Fatalf("different issue outcome = %#v", other)
 	}
 	close(release)

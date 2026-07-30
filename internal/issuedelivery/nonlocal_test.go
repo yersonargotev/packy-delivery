@@ -248,7 +248,9 @@ func TestAdvanceChangedAuthorityOrHEADCannotUseStaleNonLocalAuthorization(t *tes
 			request.NonLocal = &authorization
 
 			outcome := mustAdvance(t, module, request)
-			if outcome.State != StateNeedsReview ||
+			if (test.name == "authority" &&
+				(outcome.State != StateNeedsDecision || outcome.QualificationCorrection == nil)) ||
+				(test.name == "head" && outcome.State != StateNeedsReview) ||
 				gateway.observeCalls != 0 || gateway.pushCalls != 0 || gateway.createCalls != 0 {
 				t.Fatalf("stale %s reached NON-LOCAL: outcome=%#v gateway=%#v", test.name, outcome, gateway)
 			}

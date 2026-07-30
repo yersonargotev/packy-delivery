@@ -357,9 +357,10 @@ func TestAdvanceCommandHighestSeamCreatesV2RunThroughRealModule(t *testing.T) {
 	if err = json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.State != issuedelivery.StateNeedsReview || report.RunID == "" ||
-		report.PauseCause != issuedelivery.PauseIndependentReview ||
-		report.NextAction != issuedelivery.ActionProvideQualificationReview ||
+	if report.State != issuedelivery.StateNeedsDecision || report.RunID == "" ||
+		report.PauseCause != issuedelivery.PauseSemanticInput ||
+		report.NextAction != issuedelivery.ActionProvideQualificationCorrection ||
+		report.QualificationCorrection == nil ||
 		report.Evidence == nil || report.Evidence.Schema != deliveryevidence.SchemaV2 ||
 		report.Evidence.RiskProfile != deliveryevidence.RiskLow ||
 		report.TimingReport.LowRisk.PRReadinessObjectiveNanoseconds != int64(25*time.Minute) {

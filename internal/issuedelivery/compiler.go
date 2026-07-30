@@ -13,12 +13,13 @@ import (
 )
 
 type compiledAuthority struct {
-	hash      string
-	evidence  deliveryevidence.Bundle
-	pending   *DecisionRequest
-	decisions []Decision
-	state     State
-	reason    string
+	hash          string
+	evidence      deliveryevidence.Bundle
+	pending       *DecisionRequest
+	decisions     []Decision
+	state         State
+	reason        string
+	qualification *QualificationCorrectionRequest
 }
 
 func compileAuthority(
@@ -84,11 +85,20 @@ func compileAuthority(
 		return compiledAuthority{}, err
 	}
 	state, reason := StateNeedsReview, "qualification evidence is ready for independent review"
+	qualification, err := compilerQualificationCorrectionRequest(authorityHash, &bundle)
+	if err != nil {
+		return compiledAuthority{}, err
+	}
+	if qualification != nil {
+		state, reason = StateNeedsDecision, "compiler qualification findings require one persisted correction"
+	}
 	if blocked {
 		state, reason = StateBlocked, "one or more issue dependencies are not satisfied"
+		qualification = nil
 	}
 	return compiledAuthority{
 		hash: authorityHash, evidence: bundle, decisions: applied, state: state, reason: reason,
+		qualification: qualification,
 	}, nil
 }
 
