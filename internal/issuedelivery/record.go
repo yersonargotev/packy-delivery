@@ -201,6 +201,12 @@ func validateRun(record runRecord) error {
 
 func validateCandidates(record runRecord) error {
 	if record.Schema == legacyRunSchema {
+		for _, candidate := range record.Candidates {
+			if candidate.RepairDecision != nil &&
+				candidate.RepairDecision.Class == RepairAdjudicationOnly {
+				return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
+			}
+		}
 		return validateLegacyCandidates(record)
 	}
 	if len(record.Candidates) == 0 {
@@ -329,7 +335,19 @@ func validateCandidates(record runRecord) error {
 				review.Specialist != specialistForBoundary(review.Boundary) || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid specialist review")
 			}
+			if !review.Completed && len(review.Findings) != 0 {
+				return fmt.Errorf("incomplete issue delivery specialist review contains findings")
+			}
+			for _, finding := range review.Findings {
+				if findingIDs[finding.ID] || strings.TrimSpace(finding.ID) == "" {
+					return fmt.Errorf("issue delivery candidate contains an invalid specialist finding")
+				}
+				findingIDs[finding.ID] = true
+			}
 			specialists[review.Boundary] = true
+		}
+		if err := validatePersistedRepairDecision(record.Schema, candidate, findingIDs); err != nil {
+			return err
 		}
 		proofs := map[SensitiveBoundary]bool{}
 		for _, proof := range candidate.BoundaryProofs {
@@ -420,6 +438,44 @@ func validateCandidates(record runRecord) error {
 	}
 	if err := validateNonLocalRecord(record, current); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validatePersistedRepairDecision(
+	schema string,
+	candidate Candidate,
+	findingIDs map[string]bool,
+) error {
+	decision := candidate.RepairDecision
+	if decision == nil {
+		return nil
+	}
+	if decision.CandidateID != candidate.ID ||
+		(schema == legacyRunSchema && decision.Class == RepairAdjudicationOnly) ||
+		(decision.Class != RepairBounded &&
+			decision.Class != RepairCandidateChanging &&
+			decision.Class != RepairAdjudicationOnly) ||
+		len(decision.Findings) != len(findingIDs) {
+		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
+	}
+	seen := make(map[string]bool, len(decision.Findings))
+	accepted := false
+	for _, item := range decision.Findings {
+		if seen[item.FindingID] || !findingIDs[item.FindingID] ||
+			strings.TrimSpace(item.Evidence) == "" ||
+			(item.Disposition != FindingAccepted && item.Disposition != FindingRejected) {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
+		}
+		seen[item.FindingID] = true
+		accepted = accepted || item.Disposition == FindingAccepted
+	}
+	if decision.Class == RepairAdjudicationOnly {
+		if accepted {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
+		}
+	} else if decision.Class == RepairBounded && !accepted {
+		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
 	}
 	return nil
 }

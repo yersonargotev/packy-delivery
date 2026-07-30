@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -81,6 +82,24 @@ func TestDecodeLegacyRunPreservesCanonicalV1SemanticsAndEncoding(t *testing.T) {
 	}
 	if !bytes.Equal(encoded, legacyBytes) {
 		t.Fatalf("v1 encoding changed:\n got %s\nwant %s", encoded, legacyBytes)
+	}
+
+	var invalid legacyRunWire
+	if err := json.Unmarshal(legacyBytes, &invalid); err != nil {
+		t.Fatal(err)
+	}
+	invalid.Candidates[0].RepairDecision = &RepairDecision{
+		CandidateID: invalid.Candidates[0].ID,
+		Class:       RepairAdjudicationOnly,
+		Findings:    []FindingDecision{},
+	}
+	invalidBytes, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeRun(invalidBytes); err == nil ||
+		!strings.Contains(err.Error(), "invalid repair decision") {
+		t.Fatalf("legacy adjudication-only record decode error=%v", err)
 	}
 }
 
@@ -168,5 +187,101 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 		!strings.Contains(blocked.Reason, "acceptance traceability") ||
 		risk.calls != initialRiskCalls {
 		t.Fatalf("weakened legacy acceptance outcome=%#v risk calls=%d", blocked, risk.calls)
+	}
+}
+
+func TestLegacyRepairDecisionOptionsAndAcceptanceRemainV1(t *testing.T) {
+	request := repairDecisionRequest(legacyRunSchema, "candidate", []string{"finding"})
+	if !reflect.DeepEqual(request.Options, []RepairClass{RepairBounded, RepairCandidateChanging}) {
+		t.Fatalf("legacy repair options=%v", request.Options)
+	}
+	module := &Module{}
+	record := runRecord{
+		Schema: legacyRunSchema,
+		Candidates: []Candidate{{
+			ID: "candidate",
+		}},
+		PendingRepair: request,
+	}
+	_, err := module.applyRepairDecision(lockedIssueStore{}, record, RepairDecision{
+		CandidateID: "candidate", Class: RepairAdjudicationOnly,
+		Findings: []FindingDecision{{
+			FindingID: "finding", Disposition: FindingRejected, Evidence: "evidence",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid repair class") {
+		t.Fatalf("legacy adjudication-only acceptance error=%v", err)
+	}
+}
+
+func TestLegacyCandidateChangingRejectedOnlyDecisionRetainsRuntimeSemantics(t *testing.T) {
+	module, git, tracker, reviewer, _ := assuranceFixture(t)
+	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
+		Completed: true,
+		Findings: []deliveryevidence.ReviewFinding{{
+			ID: "legacy-rejected", Axis: deliveryevidence.ReviewSpec,
+			Severity: deliveryevidence.SeverityP2, Authority: deliveryevidence.AuthoritySpecRequirement,
+			Citation: "issue#357", Location: "internal/issuedelivery/record_v1_test.go",
+			Evidence: "legacy candidate-changing finding",
+		}},
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+
+	var outcome Outcome
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, _, loadErr := store.loadActive()
+			if loadErr != nil {
+				return loadErr
+			}
+			record, loadErr := decodeRun(data)
+			if loadErr != nil {
+				return loadErr
+			}
+			record.Schema = legacyRunSchema
+			record.EffectiveProfile = ""
+			record.RequiredBoundaries = nil
+			record.ProfileHistory = nil
+			for index := range record.Candidates {
+				record.Candidates[index].ObservedFloor = ""
+				record.Candidates[index].Profile = ""
+				record.Candidates[index].Effects = nil
+				record.Candidates[index].Boundaries = nil
+				record.Candidates[index].RequiredSpecialists = nil
+				record.Candidates[index].SpecialistReviews = nil
+				record.Candidates[index].BoundaryProofs = nil
+			}
+			compiled, compileErr := compileAuthority(
+				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard,
+			)
+			if compileErr != nil {
+				return compileErr
+			}
+			legacyRequest := request
+			legacyRequest.Repair = &RepairDecision{
+				CandidateID: found.Repair.CandidateID, Class: RepairCandidateChanging,
+				Findings: []FindingDecision{{
+					FindingID: "legacy-rejected", Disposition: FindingRejected,
+					Evidence: "legacy evidence rejects finding",
+				}},
+			}
+			outcome, loadErr = module.advanceAssurance(
+				context.Background(), store, record, git.value, tracker.value, compiled, legacyRequest,
+			)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.State != StateNeedsReview || outcome.Candidate == nil ||
+		outcome.Candidate.RepairDecision == nil ||
+		outcome.Candidate.RepairDecision.Class != RepairCandidateChanging {
+		t.Fatalf("legacy candidate-changing rejected-only outcome=%#v", outcome)
 	}
 }

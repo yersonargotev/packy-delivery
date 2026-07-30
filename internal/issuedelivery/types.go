@@ -349,6 +349,7 @@ type RepairClass string
 const (
 	RepairBounded           RepairClass = "bounded"
 	RepairCandidateChanging RepairClass = "candidate-changing"
+	RepairAdjudicationOnly  RepairClass = "adjudication-only"
 )
 
 type FindingDisposition string

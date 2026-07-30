@@ -169,6 +169,11 @@ review.
 
 Adjudicate all findings and repair accepted findings as a batch:
 
+- An `Adjudication-only` decision rejects every finding with evidence and
+  performs no repair. It preserves the exact candidate, risk observations,
+  reviews, and receipts. Mixed, missing, stale, or unsupported adjudications
+  fail closed. Resume adopts an already-recorded matching adjudication without
+  duplicating it.
 - A `Bounded Repair` preserves behavior, contract, scope, architecture, security
   posture, and acceptance meaning. Run focused verification and obtain
   confirmation from the originating review axis.
