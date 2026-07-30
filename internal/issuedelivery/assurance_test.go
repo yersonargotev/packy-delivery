@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -428,6 +429,220 @@ func TestAdvanceRejectsBoundedClassificationWithoutAcceptedFinding(t *testing.T)
 	})
 	if err == nil || !strings.Contains(err.Error(), "bounded repair requires") {
 		t.Fatalf("bounded rejected-only adjudication error=%v", err)
+	}
+}
+
+func TestAdvanceRejectsCandidateChangingClassificationWithoutAcceptedFinding(t *testing.T) {
+	module, _, _, reviewer, _ := assuranceFixture(t)
+	finding := deliveryevidence.ReviewFinding{
+		ID: "S357-3b", Axis: deliveryevidence.ReviewSpec, Severity: deliveryevidence.SeverityP2,
+		Authority: deliveryevidence.AuthoritySpecRequirement, Citation: "issue#357",
+		Location: "internal/issuedelivery/assurance.go", Evidence: "finding may be rejected",
+	}
+	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{finding},
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	_, err := module.Advance(context.Background(), Request{
+		RepositoryPath: "/repo", IssueNumber: 357,
+		Repair: &RepairDecision{
+			CandidateID: found.Repair.CandidateID, Class: RepairCandidateChanging,
+			Findings: []FindingDecision{{
+				FindingID: "S357-3b", Disposition: FindingRejected, Evidence: "review evidence disproves finding",
+			}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "candidate-changing repair requires") {
+		t.Fatalf("candidate-changing rejected-only adjudication error=%v", err)
+	}
+}
+
+func TestAdvanceRejectsRepairDecisionForStaleGitCheckout(t *testing.T) {
+	module, git, _, reviewer, _ := assuranceFixture(t)
+	finding := deliveryevidence.ReviewFinding{
+		ID: "S357-stale", Axis: deliveryevidence.ReviewStandards, Severity: deliveryevidence.SeverityP2,
+		Authority: deliveryevidence.AuthorityDocumentedStandard, Citation: "AGENTS.md",
+		Location: "internal/issuedelivery/assurance.go", Evidence: "bounded repair required",
+	}
+	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{finding},
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+	_, err := module.Advance(context.Background(), Request{
+		RepositoryPath: "/repo", IssueNumber: 357,
+		Repair: &RepairDecision{
+			CandidateID: found.Repair.CandidateID, Class: RepairBounded,
+			Findings: []FindingDecision{{
+				FindingID: "S357-stale", Disposition: FindingAccepted, Evidence: "repair finding",
+			}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "current Git checkout") {
+		t.Fatalf("stale checkout repair decision error=%v", err)
+	}
+}
+
+func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *testing.T) {
+	module, _, _, reviewer, validator := assuranceFixture(t)
+	standardsFinding := deliveryevidence.ReviewFinding{
+		ID: "S357-4", Axis: deliveryevidence.ReviewStandards, Severity: deliveryevidence.SeverityP2,
+		Authority: deliveryevidence.AuthorityDocumentedStandard, Citation: "AGENTS.md",
+		Location: "internal/issuedelivery/assurance.go", Evidence: "standards finding may be rejected",
+	}
+	specFinding := deliveryevidence.ReviewFinding{
+		ID: "S357-5", Axis: deliveryevidence.ReviewSpec, Severity: deliveryevidence.SeverityP2,
+		Authority: deliveryevidence.AuthoritySpecRequirement, Citation: "issue#357",
+		Location: "internal/issuedelivery/assurance.go", Evidence: "spec finding may be rejected",
+	}
+	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{standardsFinding},
+	}}
+	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{specFinding},
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	if found.Repair == nil || !reflect.DeepEqual(
+		found.Repair.Options,
+		[]RepairClass{RepairAdjudicationOnly, RepairBounded, RepairCandidateChanging},
+	) {
+		t.Fatalf("repair options=%#v", found.Repair)
+	}
+	before := *found.Candidate
+	beforeEvidence := *found.Evidence
+	decision := RepairDecision{
+		CandidateID: found.Repair.CandidateID, Class: RepairAdjudicationOnly,
+		Findings: []FindingDecision{
+			{FindingID: "S357-5", Disposition: FindingRejected, Evidence: "spec evidence disproves finding"},
+			{FindingID: "S357-4", Disposition: FindingRejected, Evidence: "standards evidence disproves finding"},
+		},
+	}
+	adjudicated := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, Repair: &decision,
+	})
+	if adjudicated.State != StateNeedsReview || adjudicated.Repair != nil ||
+		adjudicated.Candidate.ID != before.ID ||
+		adjudicated.Candidate.CommitSHA != before.CommitSHA ||
+		adjudicated.Candidate.TreeSHA != before.TreeSHA ||
+		adjudicated.Candidate.RepairDecision == nil ||
+		adjudicated.Candidate.RepairDecision.Class != RepairAdjudicationOnly ||
+		!reflect.DeepEqual(adjudicated.Candidate.Effects, before.Effects) ||
+		!reflect.DeepEqual(adjudicated.Candidate.Boundaries, before.Boundaries) ||
+		!reflect.DeepEqual(adjudicated.Candidate.Reviews, before.Reviews) ||
+		!reflect.DeepEqual(adjudicated.Candidate.SpecialistReviews, before.SpecialistReviews) ||
+		!reflect.DeepEqual(adjudicated.Evidence, &beforeEvidence) {
+		t.Fatalf("adjudication-only outcome=%#v", adjudicated)
+	}
+	timingCount := len(adjudicated.Timing)
+	resumed := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, Repair: &decision,
+	})
+	if !reflect.DeepEqual(resumed.Candidate, adjudicated.Candidate) ||
+		!reflect.DeepEqual(resumed.Evidence, adjudicated.Evidence) ||
+		len(resumed.Timing) != timingCount {
+		t.Fatalf("matching adjudication resume duplicated or changed evidence: %#v", resumed)
+	}
+	ready := mustAdvance(t, module, request)
+	if ready.State != StateWaiting || ready.LocalReadiness == nil ||
+		validator.focusedCalls != 1 || validator.exhaustiveCalls != 1 {
+		t.Fatalf("adjudication-only readiness=%#v", ready)
+	}
+}
+
+func TestAdvanceAdjudicationOnlyFailsClosed(t *testing.T) {
+	module, _, _, reviewer, _ := assuranceFixture(t)
+	for axis, finding := range map[deliveryevidence.ReviewAxis]deliveryevidence.ReviewFinding{
+		deliveryevidence.ReviewStandards: {
+			ID: "S357-6", Axis: deliveryevidence.ReviewStandards, Severity: deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthorityDocumentedStandard, Citation: "AGENTS.md",
+			Location: "internal/issuedelivery/assurance.go", Evidence: "standards finding",
+		},
+		deliveryevidence.ReviewSpec: {
+			ID: "S357-7", Axis: deliveryevidence.ReviewSpec, Severity: deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthoritySpecRequirement, Citation: "issue#357",
+			Location: "internal/issuedelivery/assurance.go", Evidence: "spec finding",
+		},
+	} {
+		reviewer.responses[axis] = []CandidateReview{{Completed: true, Findings: []deliveryevidence.ReviewFinding{finding}}}
+	}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	rejected := FindingDecision{
+		FindingID: "S357-6", Disposition: FindingRejected, Evidence: "evidence disproves standards finding",
+	}
+	specRejected := FindingDecision{
+		FindingID: "S357-7", Disposition: FindingRejected, Evidence: "evidence disproves spec finding",
+	}
+	tests := []struct {
+		name     string
+		decision RepairDecision
+	}{
+		{
+			name: "mixed",
+			decision: RepairDecision{
+				CandidateID: found.Repair.CandidateID, Class: RepairAdjudicationOnly,
+				Findings: []FindingDecision{
+					{FindingID: "S357-6", Disposition: FindingAccepted, Evidence: "accept finding"},
+					specRejected,
+				},
+			},
+		},
+		{
+			name: "missing finding",
+			decision: RepairDecision{
+				CandidateID: found.Repair.CandidateID, Class: RepairAdjudicationOnly,
+				Findings: []FindingDecision{rejected},
+			},
+		},
+		{
+			name: "missing evidence",
+			decision: RepairDecision{
+				CandidateID: found.Repair.CandidateID, Class: RepairAdjudicationOnly,
+				Findings: []FindingDecision{
+					{FindingID: "S357-6", Disposition: FindingRejected},
+					specRejected,
+				},
+			},
+		},
+		{
+			name: "stale candidate",
+			decision: RepairDecision{
+				CandidateID: "stale-candidate", Class: RepairAdjudicationOnly,
+				Findings: []FindingDecision{rejected, specRejected},
+			},
+		},
+		{
+			name: "unsupported class",
+			decision: RepairDecision{
+				CandidateID: found.Repair.CandidateID, Class: RepairClass("unsupported"),
+				Findings: []FindingDecision{rejected, specRejected},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := module.Advance(context.Background(), Request{
+				RepositoryPath: "/repo", IssueNumber: 357, Repair: &test.decision,
+			}); err == nil {
+				t.Fatal("invalid adjudication-only decision succeeded")
+			}
+		})
+	}
+	status := mustAdvance(t, module, request)
+	if status.State != StateNeedsDecision || status.Repair == nil ||
+		status.Candidate.RepairDecision != nil {
+		t.Fatalf("failed adjudication changed pending state=%#v", status)
 	}
 }
 

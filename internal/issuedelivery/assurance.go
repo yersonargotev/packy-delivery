@@ -25,6 +25,11 @@ func (m *Module) advanceAssurance(
 	request Request,
 ) (Outcome, error) {
 	if request.Repair != nil {
+		candidate := latestCandidate(&record)
+		if record.Schema != legacyRunSchema &&
+			(candidate == nil || candidate.CommitSHA != git.HeadSHA || candidate.TreeSHA != git.TreeSHA) {
+			return Outcome{}, errors.New("repair decision does not match the current Git checkout")
+		}
 		return m.applyRepairDecision(store, record, *request.Repair)
 	}
 	if record.PendingRepair != nil {
@@ -158,7 +163,7 @@ func (m *Module) advanceAssurance(
 			}
 		}
 		if ids := unresolvedFindingIDs(candidate); len(ids) > 0 {
-			record.PendingRepair = repairDecisionRequest(candidate.ID, ids)
+			record.PendingRepair = repairDecisionRequest(record.Schema, candidate.ID, ids)
 			return m.persistAssuranceTransition(
 				store, record, StateNeedsDecision, "review findings require one batch adjudication", "review",
 			)
@@ -169,7 +174,7 @@ func (m *Module) advanceAssurance(
 	}
 
 	if ids := unresolvedFindingIDs(candidate); len(ids) > 0 {
-		record.PendingRepair = repairDecisionRequest(candidate.ID, ids)
+		record.PendingRepair = repairDecisionRequest(record.Schema, candidate.ID, ids)
 		return m.persistAssuranceTransition(
 			store, record, StateNeedsDecision, "review findings require one batch adjudication", "review",
 		)
@@ -199,7 +204,7 @@ func (m *Module) advanceAssurance(
 			}
 		}
 		if ids := unresolvedFindingIDs(candidate); len(ids) > 0 {
-			record.PendingRepair = repairDecisionRequest(candidate.ID, ids)
+			record.PendingRepair = repairDecisionRequest(record.Schema, candidate.ID, ids)
 			return m.persistAssuranceTransition(
 				store, record, StateNeedsDecision, "review findings require one batch adjudication",
 				"specialist-review",
@@ -324,12 +329,29 @@ func (m *Module) applyRepairDecision(
 	decision RepairDecision,
 ) (Outcome, error) {
 	candidate := latestCandidate(&record)
-	if candidate == nil || record.PendingRepair == nil ||
-		decision.CandidateID != candidate.ID || decision.CandidateID != record.PendingRepair.CandidateID {
+	if candidate == nil || decision.CandidateID != candidate.ID {
 		return Outcome{}, errors.New("repair decision does not match the pending candidate")
 	}
-	if decision.Class != RepairBounded && decision.Class != RepairCandidateChanging {
+	if decision.Class != RepairBounded && decision.Class != RepairCandidateChanging &&
+		decision.Class != RepairAdjudicationOnly {
 		return Outcome{}, fmt.Errorf("invalid repair class %q", decision.Class)
+	}
+	if record.Schema == legacyRunSchema && decision.Class == RepairAdjudicationOnly {
+		return Outcome{}, fmt.Errorf("invalid repair class %q", decision.Class)
+	}
+	decision.Findings = append([]FindingDecision(nil), decision.Findings...)
+	sort.Slice(decision.Findings, func(i, j int) bool {
+		return decision.Findings[i].FindingID < decision.Findings[j].FindingID
+	})
+	if record.PendingRepair == nil {
+		if decision.Class == RepairAdjudicationOnly &&
+			matchingRepairDecision(candidate.RepairDecision, decision) {
+			return outcomeFromRecord(record), nil
+		}
+		return Outcome{}, errors.New("repair decision does not match the pending candidate")
+	}
+	if decision.CandidateID != record.PendingRepair.CandidateID {
+		return Outcome{}, errors.New("repair decision does not match the pending candidate")
 	}
 	expected := unresolvedFindingIDs(candidate)
 	if len(decision.Findings) != len(expected) {
@@ -351,10 +373,13 @@ func (m *Module) applyRepairDecision(
 	if decision.Class == RepairBounded && !hasAcceptedFindings(&decision) {
 		return Outcome{}, errors.New("bounded repair requires at least one accepted finding")
 	}
-	decision.Findings = append([]FindingDecision(nil), decision.Findings...)
-	sort.Slice(decision.Findings, func(i, j int) bool {
-		return decision.Findings[i].FindingID < decision.Findings[j].FindingID
-	})
+	if record.Schema != legacyRunSchema &&
+		decision.Class == RepairCandidateChanging && !hasAcceptedFindings(&decision) {
+		return Outcome{}, errors.New("candidate-changing repair requires at least one accepted finding")
+	}
+	if decision.Class == RepairAdjudicationOnly && hasAcceptedFindings(&decision) {
+		return Outcome{}, errors.New("adjudication-only requires every finding to be rejected with evidence")
+	}
 	candidate.RepairDecision = &decision
 	record.PendingRepair = nil
 	reason := "review findings were adjudicated without an accepted repair"
@@ -362,6 +387,19 @@ func (m *Module) applyRepairDecision(
 		reason = "accepted findings must be repaired as one candidate batch"
 	}
 	return m.persistAssuranceTransition(store, record, StateNeedsReview, reason, "adjudication")
+}
+
+func matchingRepairDecision(recorded *RepairDecision, supplied RepairDecision) bool {
+	if recorded == nil || recorded.CandidateID != supplied.CandidateID ||
+		recorded.Class != supplied.Class || len(recorded.Findings) != len(supplied.Findings) {
+		return false
+	}
+	for i := range recorded.Findings {
+		if recorded.Findings[i] != supplied.Findings[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Module) executeReviews(
@@ -700,12 +738,16 @@ func unresolvedFindingIDs(candidate *Candidate) []string {
 	return ids
 }
 
-func repairDecisionRequest(candidateID string, findingIDs []string) *RepairDecisionRequest {
+func repairDecisionRequest(schema, candidateID string, findingIDs []string) *RepairDecisionRequest {
 	ids := append([]string(nil), findingIDs...)
+	options := []RepairClass{RepairBounded, RepairCandidateChanging}
+	if schema != legacyRunSchema {
+		options = []RepairClass{RepairAdjudicationOnly, RepairBounded, RepairCandidateChanging}
+	}
 	return &RepairDecisionRequest{
 		ID:          stableID("repair-decision", candidateID+"\x00"+strings.Join(ids, "\x00")),
 		CandidateID: candidateID, FindingIDs: ids,
-		Options: []RepairClass{RepairBounded, RepairCandidateChanging},
+		Options: options,
 	}
 }
 
