@@ -161,7 +161,14 @@ func TestProductionBoundaryValidationRejectsProtectedRepositoryWrite(t *testing.
 	}
 }
 
-func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testing.T) {
+func productionReadyModule(
+	t *testing.T,
+	nonLocal issuedelivery.NonLocalGateway,
+	localCompletion issuedelivery.LocalCompletionGateway,
+	review issuedelivery.ReviewExecutor,
+	stop string,
+) (*issuedelivery.Module, issuedelivery.Outcome, string, *commandMutableTrackerObserver, *commandClock) {
+	t.Helper()
 	repository := t.TempDir()
 	var err error
 	repository, err = filepath.EvalSymlinks(repository)
@@ -194,7 +201,7 @@ func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testin
 		HeadSHA: commit, TreeSHA: tree, WorkspaceClean: true,
 		Branch: "chore/issue-361-production-validation",
 	}}
-	tracker := commandTrackerObserver{observation: issuedelivery.TrackerObservation{
+	tracker := &commandMutableTrackerObserver{observation: issuedelivery.TrackerObservation{
 		Repository: deliveryevidence.RepositoryIdentity{
 			Owner: "yersonargotev", Name: "packy", NodeID: "R1",
 		},
@@ -214,11 +221,15 @@ func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testin
 		runner:     productionValidationObservationRunner{commit: commit, tree: tree},
 		focused:    focusedRunner, exhaustive: exhaustiveRunner, now: clock.Now,
 	}
+	if review == nil {
+		review = productionPathReviewExecutor{}
+	}
 	module, err := issuedelivery.New(issuedelivery.Config{
-		Git: git, GitHub: tracker, Review: productionPathReviewExecutor{},
+		Git: git, GitHub: tracker, Review: review,
 		Validation: validationAdapter,
 		Risk:       productionPathRiskObserver{}, Clock: clock, SandboxRoot: sandbox,
-		DeclaredProfile: deliveryevidence.RiskLow,
+		NonLocal: nonLocal, LocalCompletion: localCompletion,
+		DeclaredProfile: deliveryevidence.RiskLow, AllowLegacyV1: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +288,9 @@ func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	if stop == "before-qualification-approval" {
+		return module, corrected, repository, tracker, clock
+	}
 	_, err = module.Advance(context.Background(), issuedelivery.Request{
 		RepositoryPath: repository, IssueNumber: 361,
 		QualificationReview: &issuedelivery.QualificationReview{
@@ -313,6 +327,9 @@ func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testin
 		if outcome.LocalReadiness != nil {
 			break
 		}
+		if stop == "repair-decision" && outcome.Repair != nil {
+			return module, outcome, repository, tracker, clock
+		}
 		if outcome.Candidate != nil {
 			lastCandidateID = outcome.Candidate.ID
 		}
@@ -326,6 +343,11 @@ func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testin
 		len(focusedRunner.calls) != 1 || len(exhaustiveRunner.calls) != 1 {
 		t.Fatalf("production-shaped path did not reach local readiness: %#v", outcome)
 	}
+	return module, outcome, repository, tracker, clock
+}
+
+func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testing.T) {
+	_, _, _, _, _ = productionReadyModule(t, nil, nil, nil, "")
 }
 
 func TestProductionTrackerObserverBindsSelectedSpecification(t *testing.T) {

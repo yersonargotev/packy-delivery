@@ -157,9 +157,16 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 		return nil
 	})
 	if errors.Is(err, errIssueRunActive) {
-		return Outcome{State: StateWaiting, Reason: "another Advance call is active for this issue"}, nil
+		outcome = Outcome{
+			State: StateWaiting, Reason: "another Advance call is active for this issue",
+			IssueLockContended: true,
+		}
+		err = nil
 	}
-	return outcome, err
+	if err != nil {
+		return Outcome{}, err
+	}
+	return outcomeWithPause(outcome), nil
 }
 
 func compatibleOrphan(
@@ -207,6 +214,8 @@ func outcomeFromRecord(record runRecord) Outcome {
 	}
 	return Outcome{
 		RunID: record.ID, State: record.State, Reason: record.Reason,
+		RunSchema:       record.Schema,
+		BlockerKind:     blockerKindFromRecord(record),
 		SupersedesRunID: record.SupersedesRunID, Decision: record.PendingDecision,
 		Evidence: record.Evidence, Observations: record.Observations,
 		Candidate: candidate, Repair: record.PendingRepair, LocalReadiness: record.LocalReadiness,
@@ -218,6 +227,181 @@ func outcomeFromRecord(record runRecord) Outcome {
 		),
 		NonLocal: record.NonLocal,
 		Timing:   append([]Timing(nil), record.Timing...),
+	}
+}
+
+func outcomeWithPause(outcome Outcome) Outcome {
+	switch {
+	case outcome.State == StateCompleted:
+		outcome.PauseCause, outcome.NextAction = PauseCompleted, ActionNone
+	case outcome.State == StateBlocked:
+		outcome.PauseCause, outcome.NextAction = PauseInvariantBlock, blockerNextAction(outcome.BlockerKind)
+	case outcome.QualificationCorrection != nil:
+		outcome.PauseCause, outcome.NextAction = PauseSemanticInput, ActionProvideQualificationCorrection
+	case outcome.Repair != nil:
+		outcome.PauseCause, outcome.NextAction = PauseSemanticInput, ActionProvideRepairDecision
+	case outcome.Decision != nil || outcome.State == StateNeedsDecision:
+		outcome.PauseCause, outcome.NextAction = PauseSemanticInput, ActionProvideDecision
+	case outcome.State == StateNeedsReview:
+		outcome.PauseCause, outcome.NextAction = reviewPause(outcome)
+	case outcome.State == StateWaiting && outcome.IssueLockContended:
+		outcome.PauseCause, outcome.NextAction = PauseLockContention, ActionRetryAdvance
+	case outcome.State == StateWaiting && outcome.LocalReadiness != nil && outcome.NonLocal == nil:
+		if outcome.RunSchema == legacyRunSchema {
+			outcome.PauseCause, outcome.NextAction = PauseLegacyWorkflow, ActionResumeLegacyV1
+		} else {
+			outcome.PauseCause, outcome.NextAction = PauseNonLocalAuthorization, ActionAuthorizeNonLocal
+		}
+	default:
+		outcome.PauseCause, outcome.NextAction = PauseExternalResult, ActionObserveExternalResult
+	}
+	return outcome
+}
+
+func reviewPause(outcome Outcome) (PauseCause, NextAction) {
+	if outcome.Candidate == nil {
+		if outcome.QualificationApproved {
+			return PauseDeterministicAdvance, ActionAdvance
+		}
+		return PauseIndependentReview, ActionProvideQualificationReview
+	}
+	if hasAcceptedFindings(outcome.Candidate.RepairDecision) ||
+		(outcome.NonLocal != nil && outcome.NonLocal.CandidateFailure != nil) {
+		return PauseCandidateRepair, ActionRepairCandidate
+	}
+	if len(missingReviewAxes(outcome.Candidate)) > 0 ||
+		len(missingSpecialistBoundaries(outcome.Candidate)) > 0 {
+		return PauseIndependentReview, ActionProvideCandidateReview
+	}
+	return PauseDeterministicAdvance, ActionAdvance
+}
+
+func blockerKindFromRecord(record runRecord) BlockerKind {
+	if record.State != StateBlocked || len(record.Timing) == 0 {
+		return ""
+	}
+	phase, reason := record.Timing[len(record.Timing)-1].Phase, record.Reason
+	switch phase {
+	case "qualification", "qualification-review", "qualification-correction":
+		return BlockerAuthority
+	case "post-merge-observation":
+		switch {
+		case strings.Contains(reason, "requires a non-local observer"):
+			return BlockerNonLocalObserver
+		case strings.Contains(reason, "requires a local verification and cleanup adapter"):
+			return BlockerLocalCompletionObserver
+		case strings.Contains(reason, "confirmed merge is absent"):
+			return BlockerMergeObservationAbsent
+		case strings.Contains(reason, "issue closed without"):
+			return BlockerIssueClosure
+		default:
+			return BlockerMergeIdentity
+		}
+	case "specialist-review":
+		return BlockerSpecialistReview
+	case "risk-observation":
+		return BlockerRiskObservation
+	case "focused-validation", "boundary-validation", "exhaustive-validation":
+		if strings.Contains(reason, "traceability") {
+			return BlockerAcceptanceTraceability
+		}
+		return BlockerValidationEnvironment
+	case "local-readiness":
+		return BlockerLocalReadiness
+	case "non-local-freshness":
+		return BlockerNonLocalFreshness
+	case "non-local-observation":
+		return BlockerNonLocalObservation
+	case "branch-push":
+		return BlockerRemoteBranch
+	case "pull-request":
+		return BlockerPullRequest
+	case "ci-wait":
+		if strings.Contains(reason, "attribution is unknown") {
+			return BlockerCIAttribution
+		}
+		return BlockerCIObservation
+	case "merge-readiness":
+		return BlockerMergeReadiness
+	case "merge-adoption":
+		if strings.Contains(reason, "local/operator observation") {
+			return BlockerLocalCleanup
+		}
+		return BlockerMergeIdentity
+	case "merge":
+		return BlockerMergeIdentity
+	case "integration-verification":
+		return BlockerIntegration
+	case "remote-cleanup":
+		if strings.Contains(reason, "remote issue branch identity") {
+			return BlockerRemoteBranch
+		}
+		return BlockerRemoteCleanup
+	case "worktree-cleanup":
+		return BlockerWorktreeCleanup
+	case "local-branch-cleanup":
+		return BlockerLocalBranchCleanup
+	case "main-synchronization":
+		return BlockerMainSynchronization
+	case "local-cleanup":
+		return BlockerLocalCleanup
+	default:
+		return ""
+	}
+}
+
+func blockerNextAction(kind BlockerKind) NextAction {
+	switch kind {
+	case BlockerAuthority:
+		return ActionResolveAuthorityBlock
+	case BlockerNonLocalObserver:
+		return ActionConfigureNonLocalObserver
+	case BlockerLocalCompletionObserver:
+		return ActionConfigureLocalCompletionObserver
+	case BlockerMergeObservationAbsent:
+		return ActionInspectMergeObservation
+	case BlockerIssueClosure:
+		return ActionInspectIssueClosure
+	case BlockerMergeIdentity:
+		return ActionReconcileMerge
+	case BlockerSpecialistReview:
+		return ActionRestoreSpecialistReview
+	case BlockerRiskObservation:
+		return ActionRepairRiskObservation
+	case BlockerValidationEnvironment:
+		return ActionRepairValidationEnvironment
+	case BlockerAcceptanceTraceability:
+		return ActionRepairAcceptanceTraceability
+	case BlockerLocalReadiness:
+		return ActionRestoreLocalReadiness
+	case BlockerNonLocalFreshness:
+		return ActionRestoreNonLocalFreshness
+	case BlockerNonLocalObservation:
+		return ActionRestoreNonLocalObservation
+	case BlockerRemoteBranch:
+		return ActionReconcileRemoteBranch
+	case BlockerPullRequest:
+		return ActionReconcilePullRequest
+	case BlockerCIAttribution:
+		return ActionProvideCIAttribution
+	case BlockerCIObservation:
+		return ActionRestoreCIObservation
+	case BlockerMergeReadiness:
+		return ActionRestoreMergeReadiness
+	case BlockerIntegration:
+		return ActionReconcileIntegration
+	case BlockerRemoteCleanup:
+		return ActionReconcileRemoteCleanup
+	case BlockerWorktreeCleanup:
+		return ActionReconcileWorktreeCleanup
+	case BlockerLocalBranchCleanup:
+		return ActionReconcileLocalBranchCleanup
+	case BlockerMainSynchronization:
+		return ActionReconcileMainSynchronization
+	case BlockerLocalCleanup:
+		return ActionReconcileLocalCleanup
+	default:
+		return ActionInspectBlockedTransition
 	}
 }
 

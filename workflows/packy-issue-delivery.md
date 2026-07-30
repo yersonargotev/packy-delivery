@@ -104,6 +104,26 @@ observes and binds repository, authority, candidate, branch, PR, CI, merge, and
 cleanup identities itself; callers never provide those receipts or select an
 internal phase.
 
+Every normal `Advance` report includes a typed `pause_cause` and exact
+`next_action`. The pause cause is one of `semantic-input`,
+`independent-review`, `external-result`, `non-local-authorization`,
+`invariant-block`, or `completed`; additional causes identify
+`deterministic-advance`, `candidate-repair`, `lock-contention`, and the
+`legacy-workflow` without collapsing any of those six categories. The next
+action identifies the specific typed input, observation, retry, repair, or
+blocked transition needed to resume, such as `provide-decision`,
+`provide-qualification-review`, `provide-candidate-review`, `repair-candidate`,
+`advance`, `retry-advance`, `observe-external-result`, `authorize-non-local`,
+or a phase-specific reconciliation action. A schema v1 readiness pause returns
+`resume-legacy-v1`, never v2 non-local authorization, and completed runs return
+`none`. These fields are derived from persisted or freshly observed outcome
+facts, contain no raw logs or evidence histories, and remain identical when the
+same pause is observed again.
+Blocked reports are classified inside `Advance` from the persisted transition
+and expose a specific reconciliation action. Callers never classify free-form
+reason text. Unknown blocked transitions fail closed with
+`inspect-blocked-transition`.
+
 On every invocation, `Advance`:
 
 1. creates or resumes the run and reacquires observable Git, GitHub, filesystem,
