@@ -629,5 +629,44 @@ func validatePersistedRepairDecision(
 	} else if decision.Class == RepairBounded && !accepted {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
 	}
+	if err := validateLastRepairBatch(schema, candidate); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateLastRepairBatch(schema string, candidate Candidate) error {
+	receipt := candidate.LastRepairBatch
+	if receipt == nil {
+		return nil
+	}
+	if schema == legacyRunSchema || candidate.RepairDecision == nil ||
+		receipt.Decision.CandidateID != candidate.ID ||
+		len(receipt.Decision.Findings) == 0 {
+		return fmt.Errorf("issue delivery candidate contains an invalid last repair batch")
+	}
+	cumulative := make(map[string]FindingDecision, len(candidate.RepairDecision.Findings))
+	for _, item := range candidate.RepairDecision.Findings {
+		cumulative[item.FindingID] = item
+	}
+	accepted := false
+	ids := make([]string, 0, len(receipt.Decision.Findings))
+	for index, item := range receipt.Decision.Findings {
+		if index > 0 && receipt.Decision.Findings[index-1].FindingID >= item.FindingID ||
+			cumulative[item.FindingID] != item {
+			return fmt.Errorf("issue delivery candidate contains an invalid last repair batch")
+		}
+		accepted = accepted || item.Disposition == FindingAccepted
+		ids = append(ids, item.FindingID)
+	}
+	class := receipt.Decision.Class
+	if (class == RepairAdjudicationOnly && accepted) ||
+		(class == RepairBounded && !accepted) ||
+		(class == RepairCandidateChanging && !accepted) ||
+		(class != RepairAdjudicationOnly && class != RepairBounded && class != RepairCandidateChanging) ||
+		strongestRepairClass(candidate.RepairDecision.Class, class) != candidate.RepairDecision.Class ||
+		receipt.RequestID != repairDecisionRequest(schema, candidate.ID, ids).ID {
+		return fmt.Errorf("issue delivery candidate contains an invalid last repair batch")
+	}
 	return nil
 }

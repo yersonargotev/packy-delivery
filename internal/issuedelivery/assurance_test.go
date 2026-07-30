@@ -730,6 +730,113 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 		len(replayed.Timing) != len(readjudicated.Timing) {
 		t.Fatalf("escalated adjudication replay changed persisted history: %#v", replayed)
 	}
+	for _, invalid := range []RepairDecision{
+		{
+			CandidateID: escalatedDecision.CandidateID, Class: RepairAdjudicationOnly,
+			Findings: append(append([]FindingDecision(nil), escalatedDecision.Findings...),
+				escalatedDecision.Findings[0]),
+		},
+		{
+			CandidateID: escalatedDecision.CandidateID, Class: RepairBounded,
+			Findings: escalatedDecision.Findings,
+		},
+		{
+			CandidateID: escalatedDecision.CandidateID, Class: RepairAdjudicationOnly,
+			Findings: []FindingDecision{{
+				FindingID: "S357-escalated", Disposition: FindingAccepted,
+				Evidence: "accepted instead",
+			}},
+		},
+	} {
+		if _, err := module.Advance(context.Background(), Request{
+			RepositoryPath: "/repo", IssueNumber: 357, Repair: &invalid,
+		}); err == nil {
+			t.Fatalf("invalid last-batch replay was admitted: %#v", invalid)
+		}
+	}
+	lastBatchBytes := persistedAssuranceRun(t, module, git)
+	for _, mutate := range []func(*RepairBatchReceipt){
+		func(receipt *RepairBatchReceipt) { receipt.RequestID = "tampered" },
+		func(receipt *RepairBatchReceipt) { receipt.Decision.Class = RepairBounded },
+		func(receipt *RepairBatchReceipt) {
+			receipt.Decision.Findings[0].Evidence = "tampered evidence"
+		},
+	} {
+		record, err := decodeRun(lastBatchBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(record.Candidates[len(record.Candidates)-1].LastRepairBatch)
+		if err := validateRun(record); err == nil {
+			t.Fatal("tampered last repair batch was admitted")
+		}
+	}
+}
+
+func TestProfileEscalationCannotDowngradeAcceptedRepairClass(t *testing.T) {
+	module, git, _, reviewer, _ := assuranceFixture(t)
+	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{{
+			ID: "accepted-first", Axis: deliveryevidence.ReviewStandards,
+			Severity:  deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthorityDocumentedStandard,
+			Citation:  "AGENTS.md", Location: "internal/issuedelivery/assurance.go",
+			Evidence: "bounded repair needed",
+		}},
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	accepted := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357,
+		Repair: &RepairDecision{
+			CandidateID: found.Candidate.ID, Class: RepairBounded,
+			Findings: []FindingDecision{{
+				FindingID: "accepted-first", Disposition: FindingAccepted,
+				Evidence: "repair as bounded batch",
+			}},
+		},
+	})
+	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{{
+			ID: "rejected-second", Axis: deliveryevidence.ReviewSpec,
+			Severity:  deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthoritySpecRequirement,
+			Citation:  "issue#357", Location: "internal/issuedelivery/assurance.go",
+			Evidence: "fresh escalation finding",
+		}},
+	}}
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
+		Effect: EffectOrdinaryBehavior, Evidence: "standard behavior", Complete: true,
+	}}
+	escalated := mustAdvance(t, module, request)
+	if escalated.Candidate.ID != accepted.Candidate.ID {
+		t.Fatalf("profile escalation changed candidate: %#v", escalated)
+	}
+	second := mustAdvance(t, module, request)
+	merged := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357,
+		Repair: &RepairDecision{
+			CandidateID: second.Candidate.ID, Class: RepairAdjudicationOnly,
+			Findings: []FindingDecision{{
+				FindingID: "rejected-second", Disposition: FindingRejected,
+				Evidence: "evidence rejects fresh finding",
+			}},
+		},
+	})
+	if merged.Candidate.RepairDecision.Class != RepairBounded ||
+		!strings.Contains(merged.Reason, "accepted findings") {
+		t.Fatalf("later rejection downgraded accepted repair: %#v", merged)
+	}
+	if _, err := decodeRun(persistedAssuranceRun(t, module, git)); err != nil {
+		t.Fatalf("cumulative accepted repair did not resume: %v", err)
+	}
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+	next := mustAdvance(t, module, request)
+	if next.Candidate.RepairClass != RepairBounded {
+		t.Fatalf("new candidate did not inherit strongest repair class: %#v", next.Candidate)
+	}
 }
 
 func TestAdvanceAdjudicationOnlyFailsClosed(t *testing.T) {

@@ -378,8 +378,7 @@ func (m *Module) applyRepairDecision(
 		return decision.Findings[i].FindingID < decision.Findings[j].FindingID
 	})
 	if record.PendingRepair == nil {
-		if decision.Class == RepairAdjudicationOnly &&
-			matchingRepairDecisionBatch(candidate.RepairDecision, decision) {
+		if decision.Class == RepairAdjudicationOnly && matchingLastRepairBatch(candidate, decision) {
 			return outcomeFromRecord(record), nil
 		}
 		return Outcome{}, errors.New("repair decision does not match the pending candidate")
@@ -416,6 +415,7 @@ func (m *Module) applyRepairDecision(
 	}
 	merged := decision
 	if candidate.RepairDecision != nil {
+		merged.Class = strongestRepairClass(candidate.RepairDecision.Class, decision.Class)
 		merged.Findings = append(
 			append([]FindingDecision(nil), candidate.RepairDecision.Findings...),
 			decision.Findings...,
@@ -425,28 +425,55 @@ func (m *Module) applyRepairDecision(
 		})
 	}
 	candidate.RepairDecision = &merged
+	candidate.LastRepairBatch = &RepairBatchReceipt{
+		RequestID: record.PendingRepair.ID,
+		Decision:  decision,
+	}
 	record.PendingRepair = nil
 	reason := "review findings were adjudicated without an accepted repair"
-	if hasAcceptedFindings(&decision) {
+	if hasAcceptedFindings(&merged) {
 		reason = "accepted findings must be repaired as one candidate batch"
 	}
 	return m.persistAssuranceTransition(store, record, StateNeedsReview, reason, "adjudication")
 }
 
-func matchingRepairDecisionBatch(recorded *RepairDecision, supplied RepairDecision) bool {
-	if recorded == nil || recorded.CandidateID != supplied.CandidateID {
+func matchingLastRepairBatch(candidate *Candidate, supplied RepairDecision) bool {
+	if candidate.LastRepairBatch != nil {
+		return matchingRepairDecision(&candidate.LastRepairBatch.Decision, supplied)
+	}
+	return matchingRepairDecision(candidate.RepairDecision, supplied)
+}
+
+func matchingRepairDecision(recorded *RepairDecision, supplied RepairDecision) bool {
+	if recorded == nil || recorded.CandidateID != supplied.CandidateID ||
+		recorded.Class != supplied.Class || len(recorded.Findings) != len(supplied.Findings) {
 		return false
 	}
-	recordedFindings := make(map[string]FindingDecision, len(recorded.Findings))
-	for _, item := range recorded.Findings {
-		recordedFindings[item.FindingID] = item
-	}
-	for _, item := range supplied.Findings {
-		if recordedFindings[item.FindingID] != item {
+	for index, item := range supplied.Findings {
+		if recorded.Findings[index] != item {
 			return false
 		}
 	}
-	return len(supplied.Findings) > 0
+	return true
+}
+
+func strongestRepairClass(left, right RepairClass) RepairClass {
+	rank := func(class RepairClass) int {
+		switch class {
+		case RepairCandidateChanging:
+			return 3
+		case RepairBounded:
+			return 2
+		case RepairAdjudicationOnly:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(right) > rank(left) {
+		return right
+	}
+	return left
 }
 
 func (m *Module) executeReviews(

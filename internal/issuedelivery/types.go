@@ -504,6 +504,11 @@ type RepairDecisionRequest struct {
 	Options     []RepairClass `json:"options"`
 }
 
+type RepairBatchReceipt struct {
+	RequestID string         `json:"request_id"`
+	Decision  RepairDecision `json:"decision"`
+}
+
 type ValidationProof struct {
 	Kind        string           `json:"kind"`
 	Result      ValidationResult `json:"result"`
@@ -530,6 +535,7 @@ type Candidate struct {
 	Focused             *ValidationProof                     `json:"focused,omitempty"`
 	Exhaustive          *ValidationProof                     `json:"exhaustive,omitempty"`
 	RepairDecision      *RepairDecision                      `json:"repair_decision,omitempty"`
+	LastRepairBatch     *RepairBatchReceipt                  `json:"last_repair_batch,omitempty"`
 }
 
 type ProfileTransition struct {
