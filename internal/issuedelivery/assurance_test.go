@@ -13,10 +13,13 @@ import (
 )
 
 type fakeReviewExecutor struct {
-	mu        sync.Mutex
-	responses map[deliveryevidence.ReviewAxis][]CandidateReview
-	calls     map[deliveryevidence.ReviewAxis]int
-	hook      func(deliveryevidence.ReviewAxis)
+	mu                      sync.Mutex
+	responses               map[deliveryevidence.ReviewAxis][]CandidateReview
+	calls                   map[deliveryevidence.ReviewAxis]int
+	hook                    func(deliveryevidence.ReviewAxis)
+	missingNegative         bool
+	missingMigration        bool
+	checkDeferredValidation bool
 }
 
 type fakeCandidateRiskObserver struct {
@@ -59,6 +62,10 @@ func (f *fakeReviewExecutor) Review(_ context.Context, request ReviewRequest) (C
 	}
 	response.Axis = request.Axis
 	response.CandidateID = request.CandidateID
+	if response.Iteration == 0 && response.CommitSHA == "" && response.TreeSHA == "" {
+		response.Iteration, response.CommitSHA, response.TreeSHA =
+			request.Iteration, request.CommitSHA, request.TreeSHA
+	}
 	if response.Findings == nil {
 		response.Findings = []deliveryevidence.ReviewFinding{}
 	}
@@ -70,23 +77,57 @@ func (f *fakeReviewExecutor) Review(_ context.Context, request ReviewRequest) (C
 				NegativeEvidence: "negative semantic reasoning", FailureEvidence: "failure semantic reasoning",
 				MutationEvidence: "mutation semantic reasoning", CompatibilityEvidence: "compatibility semantic reasoning",
 				PreservationEvidence: "preservation semantic reasoning", MigrationEvidence: "migration semantic reasoning",
+				ReviewReceipt: &ReviewReceiptReference{
+					CandidateID: request.CandidateID, Axis: request.Axis,
+					Iteration: request.Iteration, CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+				},
 			})
+		}
+	}
+	if request.Axis == deliveryevidence.ReviewSpec && f.checkDeferredValidation {
+		for _, row := range request.AcceptanceRows {
+			deferred := false
+			for _, obligation := range row.Obligations {
+				if obligation.Kind == deliveryevidence.EvidenceValidation &&
+					obligation.Phase == deliveryevidence.AssuranceExhaustiveValidation {
+					deferred = true
+				}
+			}
+			if !deferred {
+				response.Findings = append(response.Findings, deliveryevidence.ReviewFinding{
+					ID: "premature-missing-validator", Axis: deliveryevidence.ReviewSpec,
+					Severity: deliveryevidence.SeverityP2, Authority: deliveryevidence.AuthoritySpecRequirement,
+					Citation: row.Identity, Location: "exhaustive-validation",
+					Evidence: "validator receipt is incorrectly required during candidate review",
+				})
+			}
+		}
+	}
+	if request.Axis == deliveryevidence.ReviewSpec {
+		for index := range response.Acceptance {
+			if f.missingNegative {
+				response.Acceptance[index].NegativeEvidence = ""
+			}
+			if f.missingMigration {
+				response.Acceptance[index].MigrationEvidence = ""
+			}
 		}
 	}
 	return response, nil
 }
 
 type fakeValidationExecutor struct {
-	mu                sync.Mutex
-	focusedCalls      int
-	exhaustiveCalls   int
-	invalidSandbox    bool
-	invalidCommand    bool
-	missingAcceptance bool
-	missingNegative   bool
-	missingMigration  bool
-	migrationNA       bool
-	afterExhaustive   func()
+	mu                 sync.Mutex
+	focusedCalls       int
+	exhaustiveCalls    int
+	invalidSandbox     bool
+	invalidCommand     bool
+	missingAcceptance  bool
+	missingNegative    bool
+	missingMigration   bool
+	migrationNA        bool
+	semanticAcceptance bool
+	afterExhaustive    func()
 }
 
 func (f *fakeValidationExecutor) Focused(_ context.Context, request ValidationRequest) (ValidationResult, error) {
@@ -110,7 +151,17 @@ func (f *fakeValidationExecutor) Exhaustive(_ context.Context, request Validatio
 	result.ValidatorSHA256 = strings.Repeat("e", 64)
 	result.ValidatorIdentityExpiresAt = "2030-01-01T00:00:00Z"
 	result.WorkspaceClean = true
+	phaseOwned := false
 	for _, row := range request.AcceptanceRows {
+		if len(row.Obligations) > 0 {
+			phaseOwned = true
+			result.Traceability = append(result.Traceability, ValidationTrace{
+				Identity: row.Identity, CandidateID: request.CandidateID,
+				Phase:     deliveryevidence.AssuranceExhaustiveValidation,
+				CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+			})
+			continue
+		}
 		binding := "candidate " + request.CandidateID
 		proof := AcceptanceProof{
 			Identity: row.Identity, PositiveEvidence: binding + " positive",
@@ -129,8 +180,18 @@ func (f *fakeValidationExecutor) Exhaustive(_ context.Context, request Validatio
 		}
 		result.Acceptance = append(result.Acceptance, proof)
 	}
-	if f.missingAcceptance && len(result.Acceptance) > 0 {
-		result.Acceptance = result.Acceptance[:len(result.Acceptance)-1]
+	if phaseOwned && f.semanticAcceptance && len(request.AcceptanceRows) > 0 {
+		result.Acceptance = []AcceptanceProof{{
+			Identity:         request.AcceptanceRows[0].Identity,
+			PositiveEvidence: "validator-authored semantic prose",
+		}}
+	}
+	if f.missingAcceptance {
+		if phaseOwned && len(result.Traceability) > 0 {
+			result.Traceability = result.Traceability[:len(result.Traceability)-1]
+		} else if len(result.Acceptance) > 0 {
+			result.Acceptance = result.Acceptance[:len(result.Acceptance)-1]
+		}
 	}
 	if f.afterExhaustive != nil {
 		f.afterExhaustive()
@@ -384,8 +445,7 @@ func TestAdvanceBoundedRepairUsesFocusedOriginatingAxisConfirmation(t *testing.T
 		t.Fatalf("bounded candidate=%#v", repaired)
 	}
 	confirmed := mustAdvance(t, module, request)
-	if confirmed.State != StateNeedsReview || len(confirmed.Candidate.Reviews) != 1 ||
-		confirmed.Candidate.Reviews[0].Axis != deliveryevidence.ReviewStandards {
+	if confirmed.State != StateNeedsReview || len(confirmed.Candidate.Reviews) != 2 {
 		t.Fatalf("bounded confirmation=%#v", confirmed)
 	}
 	ready := mustAdvance(t, module, request)
@@ -393,7 +453,7 @@ func TestAdvanceBoundedRepairUsesFocusedOriginatingAxisConfirmation(t *testing.T
 		t.Fatalf("bounded readiness=%#v", ready)
 	}
 	if reviewer.calls[deliveryevidence.ReviewStandards] != 2 ||
-		reviewer.calls[deliveryevidence.ReviewSpec] != 1 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != 2 ||
 		validator.focusedCalls != 2 || validator.exhaustiveCalls != 1 {
 		t.Fatalf("calls reviews=%v focused=%d exhaustive=%d", reviewer.calls, validator.focusedCalls, validator.exhaustiveCalls)
 	}
@@ -812,6 +872,20 @@ func TestAdvanceBlocksIncompleteAcceptanceTraceability(t *testing.T) {
 	}
 }
 
+func TestAdvanceRejectsValidatorAuthoredSemanticAcceptance(t *testing.T) {
+	module, _, _, _, validator := assuranceFixture(t)
+	validator.semanticAcceptance = true
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 3 {
+		mustAdvance(t, module, request)
+	}
+	blocked := mustAdvance(t, module, request)
+	if blocked.State != StateBlocked ||
+		!strings.Contains(blocked.Reason, "forbidden semantic acceptance prose") {
+		t.Fatalf("validator semantic acceptance outcome=%#v", blocked)
+	}
+}
+
 func mustAdvance(t *testing.T, module *Module, request Request) Outcome {
 	t.Helper()
 	outcome, err := module.Advance(context.Background(), request)
@@ -823,6 +897,7 @@ func mustAdvance(t *testing.T, module *Module, request Request) Outcome {
 
 func TestSpecReviewSeesDeferredValidatorObligationWithoutPrematureFinding(t *testing.T) {
 	module, _, _, reviewer, _ := assuranceFixture(t)
+	reviewer.checkDeferredValidation = true
 	var observed bool
 	reviewer.hook = func(axis deliveryevidence.ReviewAxis) {
 		if axis == deliveryevidence.ReviewSpec {
@@ -836,6 +911,115 @@ func TestSpecReviewSeesDeferredValidatorObligationWithoutPrematureFinding(t *tes
 	outcome := mustAdvance(t, module, request)
 	if !observed || outcome.State == StateBlocked || outcome.State == StateNeedsDecision {
 		t.Fatalf("pre-validation Spec review treated deferred validator evidence as missing: %#v", outcome)
+	}
+	for _, review := range outcome.Candidate.Reviews {
+		for _, finding := range review.Findings {
+			if finding.ID == "premature-missing-validator" {
+				t.Fatalf("Spec review manufactured premature validator finding: %#v", review)
+			}
+		}
+	}
+}
+
+func TestValidationTraceabilityRejectsDuplicateForeignAndStaleRows(t *testing.T) {
+	candidate := Candidate{ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40)}
+	rows := []deliveryevidence.AcceptanceRow{{Identity: "AC-1"}, {Identity: "AC-2"}}
+	valid := []ValidationTrace{
+		{Identity: "AC-1", CandidateID: candidate.ID, Phase: deliveryevidence.AssuranceExhaustiveValidation, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA},
+		{Identity: "AC-2", CandidateID: candidate.ID, Phase: deliveryevidence.AssuranceExhaustiveValidation, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA},
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func([]ValidationTrace)
+	}{
+		{"duplicate", func(traces []ValidationTrace) { traces[1].Identity = "AC-1" }},
+		{"foreign", func(traces []ValidationTrace) { traces[1].Identity = "AC-3" }},
+		{"candidate", func(traces []ValidationTrace) { traces[1].CandidateID = "stale" }},
+		{"phase", func(traces []ValidationTrace) { traces[1].Phase = deliveryevidence.AssuranceCandidateReview }},
+		{"commit", func(traces []ValidationTrace) { traces[1].CommitSHA = strings.Repeat("c", 40) }},
+		{"tree", func(traces []ValidationTrace) { traces[1].TreeSHA = strings.Repeat("d", 40) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			traces := append([]ValidationTrace(nil), valid...)
+			test.mutate(traces)
+			if err := validateValidationTraceability(traces, rows, candidate); err == nil {
+				t.Fatal("invalid exhaustive traceability was admitted")
+			}
+		})
+	}
+}
+
+func TestCandidateReviewRejectsStaleReturnedIdentityAndReceipt(t *testing.T) {
+	candidate := Candidate{ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40)}
+	proof := AcceptanceProof{
+		CandidateID: candidate.ID, Phase: deliveryevidence.AssuranceCandidateReview, Identity: "AC-1",
+		PositiveEvidence: "positive", NegativeEvidence: "negative", FailureEvidence: "failure",
+		MutationEvidence: "mutation", CompatibilityEvidence: "compatibility",
+		PreservationEvidence: "preservation", MigrationEvidence: "migration",
+		ReviewReceipt: &ReviewReceiptReference{
+			CandidateID: candidate.ID, Axis: deliveryevidence.ReviewSpec, Iteration: 1,
+			CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+		},
+	}
+	valid := CandidateReview{
+		CandidateID: candidate.ID, Axis: deliveryevidence.ReviewSpec, Iteration: 1,
+		CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+		Findings: []deliveryevidence.ReviewFinding{}, Acceptance: []AcceptanceProof{proof}, Completed: true,
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CandidateReview)
+	}{
+		{"iteration", func(review *CandidateReview) { review.Iteration = 2 }},
+		{"commit", func(review *CandidateReview) { review.CommitSHA = strings.Repeat("c", 40) }},
+		{"tree", func(review *CandidateReview) { review.TreeSHA = strings.Repeat("d", 40) }},
+		{"missing receipt", func(review *CandidateReview) { review.Acceptance[0].ReviewReceipt = nil }},
+		{"tampered receipt", func(review *CandidateReview) { review.Acceptance[0].ReviewReceipt.Iteration = 2 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			review := valid
+			review.Acceptance = append([]AcceptanceProof(nil), valid.Acceptance...)
+			receipt := *valid.Acceptance[0].ReviewReceipt
+			review.Acceptance[0].ReviewReceipt = &receipt
+			test.mutate(&review)
+			if err := validateCandidateReview(
+				review, candidate, []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec}, 1,
+			); err == nil {
+				t.Fatal("stale returned review identity was admitted")
+			}
+		})
+	}
+}
+
+func TestPersistedAcceptanceMustMatchRetainedSpecReview(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	var record runRecord
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, loadErr = decodeRun(data)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &record.Candidates[len(record.Candidates)-1]
+	if len(current.Acceptance) == 0 {
+		t.Fatal("fixture lacks persisted acceptance proof")
+	}
+	current.Acceptance[0].PositiveEvidence = "tampered after Spec review"
+	if err := validateRun(record); err == nil ||
+		!strings.Contains(err.Error(), "does not match its completed Spec review") {
+		t.Fatalf("tampered persisted acceptance validation error=%v", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -289,6 +290,7 @@ func validateCandidates(record runRecord) error {
 			required[axis] = true
 		}
 		findingIDs := make(map[string]bool)
+		var reviewedAcceptance []AcceptanceProof
 		for _, review := range candidate.Reviews {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
@@ -300,6 +302,9 @@ func validateCandidates(record runRecord) error {
 			}
 			if !review.Completed && len(review.Findings) != 0 {
 				return fmt.Errorf("incomplete issue delivery candidate review contains findings")
+			}
+			if !review.Completed && len(review.Acceptance) != 0 {
+				return fmt.Errorf("incomplete issue delivery candidate review contains acceptance proof")
 			}
 			for _, finding := range review.Findings {
 				if findingIDs[finding.ID] || strings.TrimSpace(finding.ID) == "" || finding.Axis != review.Axis {
@@ -318,6 +323,18 @@ func validateCandidates(record runRecord) error {
 					proof.ReviewReceipt.TreeSHA != review.TreeSHA {
 					return fmt.Errorf("issue delivery candidate contains a stale acceptance review reference")
 				}
+			}
+			if review.Axis == deliveryevidence.ReviewSpec && review.Completed {
+				reviewedAcceptance = review.Acceptance
+			}
+		}
+		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) && len(candidate.Acceptance) > 0 {
+			candidateSemantic := append([]AcceptanceProof(nil), candidate.Acceptance...)
+			for proofIndex := range candidateSemantic {
+				candidateSemantic[proofIndex].ValidationReceipt = nil
+			}
+			if !reflect.DeepEqual(candidateSemantic, reviewedAcceptance) {
+				return fmt.Errorf("issue delivery candidate acceptance does not match its completed Spec review")
 			}
 		}
 		for _, proof := range []*ValidationProof{candidate.Focused, candidate.Exhaustive} {
@@ -344,6 +361,16 @@ func validateCandidates(record runRecord) error {
 				!runIDPattern.MatchString(candidate.Exhaustive.Result.ValidatorSHA256) ||
 				!candidate.Exhaustive.Result.WorkspaceClean) {
 			return fmt.Errorf("issue delivery candidate contains an invalid exhaustive proof")
+		}
+		if candidate.Exhaustive != nil && phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			if len(candidate.Exhaustive.Result.Acceptance) != 0 ||
+				validateValidationTraceability(
+					candidate.Exhaustive.Result.Traceability,
+					record.Evidence.AcceptanceMatrix,
+					candidate,
+				) != nil {
+				return fmt.Errorf("issue delivery candidate contains invalid exhaustive acceptance traceability")
+			}
 		}
 		for _, proof := range candidate.Acceptance {
 			if !phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {

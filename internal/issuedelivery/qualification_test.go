@@ -737,6 +737,86 @@ func TestQualificationHistoryRejectsSelfConsistentForgedCompilerRequest(t *testi
 	}
 }
 
+func TestQualificationHistoryPreservesLegacyAndNewCompilerOwnership(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	var record runRecord
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, loadErr = decodeRun(data)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	erased := record
+	erased.QualificationCorrections = append(
+		[]QualificationCorrection(nil), record.QualificationCorrections...,
+	)
+	erased.QualificationCorrections[0].AcceptanceMatrix = append(
+		[]deliveryevidence.AcceptanceRow(nil),
+		record.QualificationCorrections[0].AcceptanceMatrix...,
+	)
+	for index := range erased.QualificationCorrections[0].AcceptanceMatrix {
+		erased.QualificationCorrections[0].AcceptanceMatrix[index].Obligations = nil
+	}
+	if err := validateQualificationHistory(erased); err == nil ||
+		!strings.Contains(err.Error(), "erased or changed phase ownership") {
+		t.Fatalf("new compiler ownership erasure error=%v", err)
+	}
+
+	legacy := record
+	legacyEvidence := *record.Evidence
+	legacyEvidence.AcceptanceMatrix = append(
+		[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
+	)
+	for index := range legacyEvidence.AcceptanceMatrix {
+		legacyEvidence.AcceptanceMatrix[index].Obligations = nil
+	}
+	legacy.Evidence = &legacyEvidence
+	legacy.QualificationCorrections = append(
+		[]QualificationCorrection(nil), record.QualificationCorrections...,
+	)
+	correction := &legacy.QualificationCorrections[0]
+	correction.AcceptanceMatrix = append(
+		[]deliveryevidence.AcceptanceRow(nil), correction.AcceptanceMatrix...,
+	)
+	for index := range correction.AcceptanceMatrix {
+		correction.AcceptanceMatrix[index].Obligations = nil
+	}
+	original, err := originalCompilerQualificationEvidence(record.Evidence, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := compilerQualificationCorrectionRequest(record.AuthoritySHA256, original)
+	if err != nil || expected == nil {
+		t.Fatal(err)
+	}
+	correction.RequestID = expected.ID
+	correction.ReviewedMatrixSHA256 = expected.ReviewedMatrixSHA256
+	correction.FindingIDs = expected.FindingIDs
+	correction.Evidence = "[request:" + expected.ID + "] findings=" +
+		strings.Join(expected.FindingIDs, ",") +
+		"; rationale=preserved historical compiler correction representation"
+	legacy.QualificationReviews = append(
+		[]QualificationReview(nil), record.QualificationReviews...,
+	)
+	legacyDigest, err := acceptanceMatrixDigest(legacy.Evidence.AcceptanceMatrix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.QualificationReviews[len(legacy.QualificationReviews)-1].AcceptanceMatrixSHA256 = legacyDigest
+	if err := validateQualificationHistory(legacy); err != nil {
+		t.Fatalf("historical no-obligations compiler correction is unreadable: %v", err)
+	}
+}
+
 func TestDecodeV2PreservesHistoricalReviewerCorrectionWithPlannedEvidence(t *testing.T) {
 	module, git, _, _, _ := assuranceFixture(t)
 	var record runRecord

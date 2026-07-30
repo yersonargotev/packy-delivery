@@ -176,6 +176,17 @@ phase, review iteration, commit, or tree. Automatic validator facts may attach
 the validation reference, but they never author or replace the Spec review's
 semantic acceptance reasoning.
 
+The Spec reviewer must explicitly return one semantic proof per compiled row,
+bound to the expected review iteration, candidate, commit, and tree supplied in
+its request. The review adapter may fill a wholly absent observable receipt
+tuple from that exact request, but never overwrites a conflicting returned
+identity. Exhaustive validation returns a separate identity-only trace for each
+row (row, candidate, exhaustive phase, commit, and tree); it must not repeat any
+of the seven semantic evidence cells. Duplicate, foreign, missing, or stale
+traces fail closed. A bounded repair receives fresh Standards and Spec review
+and fresh semantic proof for its new candidate rather than relabeling the prior
+candidate's proof.
+
 The compiler treats a row marked `qualification correction required` as a
 known unresolved finding. Before any independent review, it emits one
 structured correction request bound to the exact authority hash and current

@@ -320,6 +320,7 @@ type ReviewRequest struct {
 	BaseSHA        string
 	CommitSHA      string
 	TreeSHA        string
+	Iteration      int
 	AcceptanceRows []deliveryevidence.AcceptanceRow
 }
 
@@ -391,6 +392,15 @@ type ValidationResult struct {
 	Succeeded                  bool              `json:"succeeded"`
 	Completed                  bool              `json:"completed"`
 	Acceptance                 []AcceptanceProof `json:"acceptance,omitempty"`
+	Traceability               []ValidationTrace `json:"traceability,omitempty"`
+}
+
+type ValidationTrace struct {
+	Identity    string                          `json:"identity"`
+	CandidateID string                          `json:"candidate_id"`
+	Phase       deliveryevidence.AssurancePhase `json:"phase"`
+	CommitSHA   string                          `json:"commit_sha"`
+	TreeSHA     string                          `json:"tree_sha"`
 }
 
 type AcceptanceProof struct {

@@ -23,10 +23,33 @@ func (productionPathReviewExecutor) Review(
 	_ context.Context,
 	request issuedelivery.ReviewRequest,
 ) (issuedelivery.CandidateReview, error) {
-	return issuedelivery.CandidateReview{
+	review := issuedelivery.CandidateReview{
 		CandidateID: request.CandidateID, Axis: request.Axis,
+		Iteration: request.Iteration, CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
 		Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
-	}, nil
+	}
+	if request.Axis == deliveryevidence.ReviewSpec {
+		review.Acceptance = productionPathAcceptance(request)
+	}
+	return review, nil
+}
+
+func productionPathAcceptance(request issuedelivery.ReviewRequest) []issuedelivery.AcceptanceProof {
+	proofs := make([]issuedelivery.AcceptanceProof, 0, len(request.AcceptanceRows))
+	for _, row := range request.AcceptanceRows {
+		proofs = append(proofs, issuedelivery.AcceptanceProof{
+			CandidateID: request.CandidateID, Phase: deliveryevidence.AssuranceCandidateReview,
+			Identity: row.Identity, PositiveEvidence: row.PositiveEvidence,
+			NegativeEvidence: row.NegativeEvidence, FailureEvidence: row.FailureEvidence,
+			MutationEvidence: row.MutationEvidence, CompatibilityEvidence: row.CompatibilityEvidence,
+			PreservationEvidence: row.PreservationEvidence, MigrationEvidence: row.MigrationEvidence,
+			ReviewReceipt: &issuedelivery.ReviewReceiptReference{
+				CandidateID: request.CandidateID, Axis: request.Axis, Iteration: request.Iteration,
+				CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+			},
+		})
+	}
+	return proofs
 }
 
 type productionPathRiskObserver struct{}
@@ -312,26 +335,10 @@ func productionReadyModule(
 		t.Fatal(err)
 	}
 	var outcome issuedelivery.Outcome
-	var lastCandidateID, acceptanceID string
-	sawTraceabilityPreflight := false
 	for attempts := 0; attempts < 8; attempts++ {
 		outcome, err = module.Advance(context.Background(), request)
 		if err != nil {
-			if !strings.Contains(err.Error(), "acceptance review content") {
-				t.Fatal(err)
-			}
-			sawTraceabilityPreflight = true
-			validationAdapter.acceptance = []issuedelivery.AcceptanceProof{{
-				Identity:              acceptanceID,
-				PositiveEvidence:      lastCandidateID + ": TestProductionValidationAdapter positive result",
-				NegativeEvidence:      lastCandidateID + ": reviewed negative-path test result",
-				FailureEvidence:       lastCandidateID + ": reviewed failure-path test result",
-				MutationEvidence:      lastCandidateID + ": reviewed persisted-mutation test result",
-				CompatibilityEvidence: lastCandidateID + ": reviewed compatibility test result",
-				PreservationEvidence:  lastCandidateID + ": reviewed preservation test result",
-				MigrationEvidence:     lastCandidateID + ": reviewed non-migration applicability",
-			}}
-			continue
+			t.Fatal(err)
 		}
 		if outcome.LocalReadiness != nil {
 			break
@@ -339,14 +346,8 @@ func productionReadyModule(
 		if stop == "repair-decision" && outcome.Repair != nil {
 			return module, outcome, repository, tracker, clock
 		}
-		if outcome.Candidate != nil {
-			lastCandidateID = outcome.Candidate.ID
-		}
-		if outcome.Evidence != nil && len(outcome.Evidence.AcceptanceMatrix) == 1 {
-			acceptanceID = outcome.Evidence.AcceptanceMatrix[0].Identity
-		}
 	}
-	if !sawTraceabilityPreflight || outcome.LocalReadiness == nil || outcome.State != issuedelivery.StateWaiting ||
+	if outcome.LocalReadiness == nil || outcome.State != issuedelivery.StateWaiting ||
 		outcome.Evidence == nil ||
 		outcome.Evidence.AcceptanceMatrix[0].State != deliveryevidence.AcceptanceProved ||
 		len(focusedRunner.calls) != 1 || len(exhaustiveRunner.calls) != 1 {
@@ -439,10 +440,26 @@ func TestSuppliedReviewExecutorsWaitUntilExactCandidateContentExists(t *testing.
 		t.Fatalf("waiting review = %#v, err=%v", waiting, err)
 	}
 	exact, err := reviewExecutor.Review(context.Background(), issuedelivery.ReviewRequest{
-		CandidateID: "candidate-1", Axis: deliveryevidence.ReviewStandards,
+		CandidateID: "candidate-1", Axis: deliveryevidence.ReviewStandards, Iteration: 2,
+		CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
 	})
-	if err != nil || !exact.Completed || exact.Findings == nil {
+	if err != nil || !exact.Completed || exact.Findings == nil ||
+		exact.Iteration != 2 || exact.CommitSHA != strings.Repeat("a", 40) ||
+		exact.TreeSHA != strings.Repeat("b", 40) {
 		t.Fatalf("exact review = %#v, err=%v", exact, err)
+	}
+
+	conflicting := suppliedReviewExecutor{reviews: []issuedelivery.CandidateReview{{
+		CandidateID: "candidate-1", Axis: deliveryevidence.ReviewStandards,
+		Iteration: 3, CommitSHA: strings.Repeat("c", 40), TreeSHA: strings.Repeat("d", 40),
+		Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+	}}}
+	stale, err := conflicting.Review(context.Background(), issuedelivery.ReviewRequest{
+		CandidateID: "candidate-1", Axis: deliveryevidence.ReviewStandards, Iteration: 2,
+		CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
+	})
+	if err != nil || stale.Iteration != 3 || stale.CommitSHA != strings.Repeat("c", 40) {
+		t.Fatalf("adapter overwrote conflicting returned review identity: %#v, err=%v", stale, err)
 	}
 
 	specialistExecutor := suppliedSpecialistExecutor{}

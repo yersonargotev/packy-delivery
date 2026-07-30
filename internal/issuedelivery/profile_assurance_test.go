@@ -61,39 +61,34 @@ func (f *fakeBoundaryValidationExecutor) ValidateBoundary(
 }
 
 func TestStandardCandidateRequiresBehavioralNegativePreservationAndCompatibilityEvidence(t *testing.T) {
-	module, _, _, _, validator := assuranceFixture(t)
+	module, _, _, reviewer, _ := assuranceFixture(t)
 	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
 		Effect: EffectOrdinaryBehavior, Evidence: "changes command behavior", Complete: true,
 	}}
-	validator.missingNegative = true
+	reviewer.missingNegative = true
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
 
-	for step := 0; step < 3; step++ {
-		if _, err := module.Advance(context.Background(), request); err != nil {
-			t.Fatal(err)
+	var outcome Outcome
+	var err error
+	for step := 0; step < 4; step++ {
+		outcome, err = module.Advance(context.Background(), request)
+		if err != nil {
+			break
 		}
 	}
-	outcome, err := module.Advance(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.State != StateBlocked ||
-		outcome.Candidate == nil ||
-		outcome.Candidate.Profile != deliveryevidence.RiskStandard ||
-		!strings.Contains(outcome.Reason, "acceptance traceability") {
-		t.Fatalf("standard assurance outcome=%#v", outcome)
+	if err == nil || !strings.Contains(err.Error(), "negative evidence") {
+		t.Fatalf("standard assurance outcome=%#v error=%v", outcome, err)
 	}
 }
 
 func TestHighRiskCandidateRequiresSpecialistAndSandboxedBoundaryProof(t *testing.T) {
-	module, _, _, _, validator := assuranceFixture(t)
+	module, _, _, _, _ := assuranceFixture(t)
 	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
 		Effect: EffectSecurity, Evidence: "changes credential handling", Complete: true,
 	}}
 	specialist := &fakeSpecialistReviewExecutor{}
 	boundary := &fakeBoundaryValidationExecutor{}
 	module.specialist, module.boundary = specialist, boundary
-	validator.migrationNA = true
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
 
 	var outcome Outcome
@@ -137,13 +132,13 @@ func TestHighRiskBoundaryProofRejectsOperatorConfigurationMutation(t *testing.T)
 }
 
 func TestMigrationEffectRequiresMigrationEvidence(t *testing.T) {
-	module, _, _, _, validator := assuranceFixture(t)
+	module, _, _, reviewer, _ := assuranceFixture(t)
 	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
 		Effect: EffectMigration, Evidence: "migrates persisted state", Complete: true,
 	}}
 	module.specialist = &fakeSpecialistReviewExecutor{}
 	module.boundary = &fakeBoundaryValidationExecutor{}
-	validator.missingMigration = true
+	reviewer.missingMigration = true
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
 
 	var outcome Outcome
@@ -151,11 +146,11 @@ func TestMigrationEffectRequiresMigrationEvidence(t *testing.T) {
 	for step := 0; step < 6; step++ {
 		outcome, err = module.Advance(context.Background(), request)
 		if err != nil {
-			t.Fatal(err)
+			break
 		}
 	}
-	if outcome.State != StateBlocked || !strings.Contains(outcome.Reason, "acceptance traceability") {
-		t.Fatalf("migration assurance outcome=%#v", outcome)
+	if err == nil || !strings.Contains(err.Error(), "migration evidence") {
+		t.Fatalf("migration assurance outcome=%#v error=%v", outcome, err)
 	}
 }
 
@@ -310,21 +305,25 @@ func TestSpecialistOnlyFindingCanCompleteBoundedRepair(t *testing.T) {
 	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
 	repaired := mustAdvance(t, module, request)
 	if repaired.Candidate.RepairClass != RepairBounded ||
-		len(repaired.Candidate.RequiredReviews) != 0 ||
+		len(repaired.Candidate.RequiredReviews) != 2 ||
 		len(repaired.Candidate.RequiredSpecialists) != 1 {
 		t.Fatalf("specialist bounded candidate=%#v", repaired.Candidate)
 	}
 	confirmed := mustAdvance(t, module, request)
-	if len(confirmed.Candidate.SpecialistReviews) != 1 ||
-		len(confirmed.Candidate.Reviews) != 0 {
+	if len(confirmed.Candidate.Reviews) != 2 {
 		t.Fatalf("specialist confirmation=%#v", confirmed.Candidate)
 	}
-	mustAdvance(t, module, request)
-	ready := mustAdvance(t, module, request)
+	var ready Outcome
+	for range 4 {
+		ready = mustAdvance(t, module, request)
+		if ready.LocalReadiness != nil {
+			break
+		}
+	}
 	if ready.State != StateWaiting || ready.LocalReadiness == nil ||
 		len(specialist.calls) != 2 ||
-		reviewer.calls[deliveryevidence.ReviewStandards] != 1 ||
-		reviewer.calls[deliveryevidence.ReviewSpec] != 1 {
+		reviewer.calls[deliveryevidence.ReviewStandards] != 2 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != 2 {
 		t.Fatalf("specialist bounded readiness=%#v specialist=%v reviews=%v",
 			ready, specialist.calls, reviewer.calls)
 	}

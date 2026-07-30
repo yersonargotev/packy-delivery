@@ -92,10 +92,15 @@ func (commandFindingReviewExecutor) Review(
 			Evidence: "the production-shaped command fixture requires one bounded repair",
 		})
 	}
-	return issuedelivery.CandidateReview{
+	review := issuedelivery.CandidateReview{
 		CandidateID: request.CandidateID, Axis: request.Axis,
+		Iteration: request.Iteration, CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
 		Findings: findings, Completed: true,
-	}, nil
+	}
+	if request.Axis == deliveryevidence.ReviewSpec {
+		review.Acceptance = productionPathAcceptance(request)
+	}
+	return review, nil
 }
 
 func (commandWaitingNonLocalGateway) ObserveNonLocal(

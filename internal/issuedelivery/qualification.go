@@ -355,6 +355,7 @@ func compilerQualificationCorrectionRequest(
 
 func originalCompilerQualificationEvidence(
 	evidence *deliveryevidence.Bundle,
+	phaseOwned bool,
 ) (*deliveryevidence.Bundle, error) {
 	if evidence == nil {
 		return nil, errors.New("compiler qualification evidence is unavailable")
@@ -371,9 +372,11 @@ func originalCompilerQualificationEvidence(
 	original := *evidence
 	original.AcceptanceMatrix = make([]deliveryevidence.AcceptanceRow, len(evidence.Scope.OwnedNow))
 	for index, scope := range evidence.Scope.OwnedNow {
-		original.AcceptanceMatrix[index] = compileAcceptanceRow(
-			scope.Identity, scope.Requirement, migrationEvidence,
-		)
+		compile := compileLegacyAcceptanceRow
+		if phaseOwned {
+			compile = compileAcceptanceRow
+		}
+		original.AcceptanceMatrix[index] = compile(scope.Identity, scope.Requirement, migrationEvidence)
 	}
 	return &original, nil
 }
@@ -390,12 +393,28 @@ func validateCompilerQualificationRequest(
 }
 
 func validateCompilerQualificationCorrection(record runRecord, correction QualificationCorrection) error {
-	original, err := originalCompilerQualificationEvidence(record.Evidence)
+	phaseOwnedOriginal, err := originalCompilerQualificationEvidence(record.Evidence, true)
 	if err != nil {
 		return err
 	}
-	expected, err := compilerQualificationCorrectionRequest(record.AuthoritySHA256, original)
-	if err != nil || expected == nil {
+	legacyOriginal, err := originalCompilerQualificationEvidence(record.Evidence, false)
+	if err != nil {
+		return err
+	}
+	phaseOwnedExpected, phaseErr := compilerQualificationCorrectionRequest(
+		record.AuthoritySHA256, phaseOwnedOriginal,
+	)
+	legacyExpected, legacyErr := compilerQualificationCorrectionRequest(
+		record.AuthoritySHA256, legacyOriginal,
+	)
+	if phaseErr != nil || legacyErr != nil || phaseOwnedExpected == nil || legacyExpected == nil {
+		return errors.New("qualification history contains an invalid compiler correction")
+	}
+	expected := phaseOwnedExpected
+	phaseOwned := correction.ReviewedMatrixSHA256 == phaseOwnedExpected.ReviewedMatrixSHA256
+	if correction.ReviewedMatrixSHA256 == legacyExpected.ReviewedMatrixSHA256 {
+		expected = legacyExpected
+	} else if !phaseOwned {
 		return errors.New("qualification history contains an invalid compiler correction")
 	}
 	if correction.RequestID != expected.ID ||
@@ -407,6 +426,14 @@ func validateCompilerQualificationCorrection(record runRecord, correction Qualif
 	}
 	if validateQualificationMatrixShape(record.Evidence, correction.AcceptanceMatrix) != nil {
 		return errors.New("qualification history contains an invalid compiler correction")
+	}
+	for _, row := range correction.AcceptanceMatrix {
+		if phaseOwned && !reflect.DeepEqual(row.Obligations, deliveryevidence.PhaseOwnedAcceptanceObligations()) {
+			return errors.New("qualification history contains erased or changed phase ownership")
+		}
+		if !phaseOwned && len(row.Obligations) != 0 {
+			return errors.New("historical qualification correction changed legacy phase ownership")
+		}
 	}
 	return nil
 }

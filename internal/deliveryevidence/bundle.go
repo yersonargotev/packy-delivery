@@ -198,13 +198,13 @@ type AcceptanceObligation struct {
 
 func PhaseOwnedAcceptanceObligations() []AcceptanceObligation {
 	return []AcceptanceObligation{
-		{Kind: EvidencePositive, Phase: AssuranceCandidateReview},
-		{Kind: EvidenceNegative, Phase: AssuranceCandidateReview},
-		{Kind: EvidenceFailure, Phase: AssuranceCandidateReview},
-		{Kind: EvidenceMutation, Phase: AssuranceCandidateReview},
 		{Kind: EvidenceCompatibility, Phase: AssuranceCandidateReview},
-		{Kind: EvidencePreservation, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceFailure, Phase: AssuranceCandidateReview},
 		{Kind: EvidenceMigration, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceMutation, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceNegative, Phase: AssuranceCandidateReview},
+		{Kind: EvidencePositive, Phase: AssuranceCandidateReview},
+		{Kind: EvidencePreservation, Phase: AssuranceCandidateReview},
 		{Kind: EvidenceValidation, Phase: AssuranceExhaustiveValidation},
 	}
 }
@@ -270,6 +270,9 @@ func CanonicalJSON(bundle Bundle) ([]byte, error) {
 	bundle.Scope.Forbidden = clone(bundle.Scope.Forbidden)
 	bundle.Scope.Prerequisites = clone(bundle.Scope.Prerequisites)
 	bundle.AcceptanceMatrix = clone(bundle.AcceptanceMatrix)
+	for i := range bundle.AcceptanceMatrix {
+		bundle.AcceptanceMatrix[i].Obligations = clone(bundle.AcceptanceMatrix[i].Obligations)
+	}
 	bundle.Iterations = clone(bundle.Iterations)
 	bundle.ReviewReceipts = clone(bundle.ReviewReceipts)
 	for i := range bundle.ReviewReceipts {
@@ -490,6 +493,12 @@ func Validate(b Bundle) error {
 		if len(r.Obligations) > 0 {
 			seenObligations := map[AcceptanceEvidenceKind]bool{}
 			for _, obligation := range r.Obligations {
+				switch obligation.Kind {
+				case EvidencePositive, EvidenceNegative, EvidenceFailure, EvidenceMutation,
+					EvidenceCompatibility, EvidencePreservation, EvidenceMigration, EvidenceValidation:
+				default:
+					return fmt.Errorf("acceptance row %q has unknown obligation kind %q", r.Identity, obligation.Kind)
+				}
 				if seenObligations[obligation.Kind] {
 					return fmt.Errorf("acceptance row %q has duplicate %s obligation", r.Identity, obligation.Kind)
 				}
@@ -597,6 +606,15 @@ func canonicalize(b *Bundle) {
 	sort.Slice(b.Scope.Forbidden, func(i, j int) bool { return b.Scope.Forbidden[i].Identity < b.Scope.Forbidden[j].Identity })
 	sort.Slice(b.Scope.Prerequisites, func(i, j int) bool { return b.Scope.Prerequisites[i].Identity < b.Scope.Prerequisites[j].Identity })
 	sort.Slice(b.AcceptanceMatrix, func(i, j int) bool { return b.AcceptanceMatrix[i].Identity < b.AcceptanceMatrix[j].Identity })
+	for index := range b.AcceptanceMatrix {
+		sort.Slice(b.AcceptanceMatrix[index].Obligations, func(i, j int) bool {
+			left, right := b.AcceptanceMatrix[index].Obligations[i], b.AcceptanceMatrix[index].Obligations[j]
+			if left.Kind != right.Kind {
+				return left.Kind < right.Kind
+			}
+			return left.Phase < right.Phase
+		})
+	}
 	sort.Slice(b.Iterations, func(i, j int) bool { return b.Iterations[i].Sequence < b.Iterations[j].Sequence })
 	sort.Slice(b.ReviewReceipts, func(i, j int) bool {
 		if b.ReviewReceipts[i].Iteration == b.ReviewReceipts[j].Iteration {

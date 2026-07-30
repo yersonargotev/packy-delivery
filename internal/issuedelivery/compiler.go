@@ -228,6 +228,14 @@ const qualificationPlanRequired = "qualification correction required"
 func compileAcceptanceRow(
 	identity, criterion, migrationEvidence string,
 ) deliveryevidence.AcceptanceRow {
+	row := compileLegacyAcceptanceRow(identity, criterion, migrationEvidence)
+	row.Obligations = deliveryevidence.PhaseOwnedAcceptanceObligations()
+	return row
+}
+
+func compileLegacyAcceptanceRow(
+	identity, criterion, migrationEvidence string,
+) deliveryevidence.AcceptanceRow {
 	return deliveryevidence.AcceptanceRow{
 		Identity: identity, Criterion: criterion,
 		OwningSeam:            qualificationPlanRequired,
@@ -238,7 +246,6 @@ func compileAcceptanceRow(
 		CompatibilityEvidence: "required: compatibility proof or an explicit not-applicable justification",
 		PreservationEvidence:  "required: preservation proof for behavior outside this criterion",
 		MigrationEvidence:     migrationEvidence,
-		Obligations:           deliveryevidence.PhaseOwnedAcceptanceObligations(),
 		State:                 deliveryevidence.AcceptancePlanned,
 	}
 }

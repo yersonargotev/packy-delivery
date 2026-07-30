@@ -16,7 +16,7 @@ type faultFile struct {
 }
 
 func TestAcceptancePhaseOwnershipIsAdditiveAndFailClosed(t *testing.T) {
-	legacyReadable := fixture()
+	legacyReadable := v2Fixture(AuthoritySelfContainedIssue, RiskStandard)
 	if err := Validate(legacyReadable); err != nil {
 		t.Fatalf("pre-phase v2 acceptance row is no longer readable: %v", err)
 	}
@@ -30,6 +30,33 @@ func TestAcceptancePhaseOwnershipIsAdditiveAndFailClosed(t *testing.T) {
 		AssuranceCandidateReview
 	if err := Validate(owned); err == nil {
 		t.Fatal("validation admitted a validator obligation owned by candidate review")
+	}
+}
+
+func TestAcceptanceObligationsCanonicalizeWithoutMutatingCaller(t *testing.T) {
+	bundle := v2Fixture(AuthoritySelfContainedIssue, RiskStandard)
+	obligations := PhaseOwnedAcceptanceObligations()
+	obligations[0], obligations[len(obligations)-1] = obligations[len(obligations)-1], obligations[0]
+	bundle.AcceptanceMatrix[0].Obligations = obligations
+	before := append([]AcceptanceObligation(nil), obligations...)
+	first, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(obligations, before) {
+		t.Fatal("canonicalization mutated caller-owned obligations")
+	}
+	bundle.AcceptanceMatrix[0].Obligations = PhaseOwnedAcceptanceObligations()
+	second, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("obligation permutations produced different canonical JSON")
+	}
+	bundle.AcceptanceMatrix[0].Obligations[0].Kind = "unknown"
+	if _, err := CanonicalJSON(bundle); err == nil {
+		t.Fatal("canonicalization admitted an unknown obligation kind")
 	}
 }
 
