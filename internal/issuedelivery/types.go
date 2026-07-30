@@ -312,20 +312,25 @@ type CandidateRiskObservation struct {
 }
 
 type ReviewRequest struct {
-	RunID       string
-	CandidateID string
-	Repository  deliveryevidence.RepositoryIdentity
-	Issue       deliveryevidence.IssueIdentity
-	Axis        deliveryevidence.ReviewAxis
-	BaseSHA     string
-	CommitSHA   string
-	TreeSHA     string
+	RunID          string
+	CandidateID    string
+	Repository     deliveryevidence.RepositoryIdentity
+	Issue          deliveryevidence.IssueIdentity
+	Axis           deliveryevidence.ReviewAxis
+	BaseSHA        string
+	CommitSHA      string
+	TreeSHA        string
+	AcceptanceRows []deliveryevidence.AcceptanceRow
 }
 
 type CandidateReview struct {
 	CandidateID string                           `json:"candidate_id"`
 	Axis        deliveryevidence.ReviewAxis      `json:"axis"`
+	Iteration   int                              `json:"iteration,omitempty"`
+	CommitSHA   string                           `json:"commit_sha,omitempty"`
+	TreeSHA     string                           `json:"tree_sha,omitempty"`
 	Findings    []deliveryevidence.ReviewFinding `json:"findings"`
+	Acceptance  []AcceptanceProof                `json:"acceptance,omitempty"`
 	Completed   bool                             `json:"completed"`
 }
 
@@ -389,14 +394,34 @@ type ValidationResult struct {
 }
 
 type AcceptanceProof struct {
-	Identity              string `json:"identity"`
-	PositiveEvidence      string `json:"positive_evidence"`
-	NegativeEvidence      string `json:"negative_evidence"`
-	FailureEvidence       string `json:"failure_evidence"`
-	MutationEvidence      string `json:"mutation_evidence"`
-	CompatibilityEvidence string `json:"compatibility_evidence"`
-	PreservationEvidence  string `json:"preservation_evidence"`
-	MigrationEvidence     string `json:"migration_evidence"`
+	CandidateID           string                          `json:"candidate_id,omitempty"`
+	Phase                 deliveryevidence.AssurancePhase `json:"phase,omitempty"`
+	Identity              string                          `json:"identity"`
+	PositiveEvidence      string                          `json:"positive_evidence"`
+	NegativeEvidence      string                          `json:"negative_evidence"`
+	FailureEvidence       string                          `json:"failure_evidence"`
+	MutationEvidence      string                          `json:"mutation_evidence"`
+	CompatibilityEvidence string                          `json:"compatibility_evidence"`
+	PreservationEvidence  string                          `json:"preservation_evidence"`
+	MigrationEvidence     string                          `json:"migration_evidence"`
+	ReviewReceipt         *ReviewReceiptReference         `json:"review_receipt,omitempty"`
+	ValidationReceipt     *ValidationReceiptReference     `json:"validation_receipt,omitempty"`
+}
+
+type ReviewReceiptReference struct {
+	CandidateID string                      `json:"candidate_id"`
+	Axis        deliveryevidence.ReviewAxis `json:"axis"`
+	Iteration   int                         `json:"iteration"`
+	CommitSHA   string                      `json:"commit_sha"`
+	TreeSHA     string                      `json:"tree_sha"`
+}
+
+type ValidationReceiptReference struct {
+	Schema      deliveryevidence.ValidationReceiptSchema `json:"schema"`
+	CandidateID string                                   `json:"candidate_id"`
+	CommitSHA   string                                   `json:"commit_sha"`
+	TreeSHA     string                                   `json:"tree_sha"`
+	CompletedAt string                                   `json:"completed_at"`
 }
 
 type BoundaryValidationRequest struct {

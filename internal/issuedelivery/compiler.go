@@ -238,6 +238,7 @@ func compileAcceptanceRow(
 		CompatibilityEvidence: "required: compatibility proof or an explicit not-applicable justification",
 		PreservationEvidence:  "required: preservation proof for behavior outside this criterion",
 		MigrationEvidence:     migrationEvidence,
+		Obligations:           deliveryevidence.PhaseOwnedAcceptanceObligations(),
 		State:                 deliveryevidence.AcceptancePlanned,
 	}
 }

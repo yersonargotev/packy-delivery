@@ -156,6 +156,26 @@ evidence requirements. Every acceptance obligation must remain traceable to its
 authority and have positive, negative or failure, and preservation or
 compatibility evidence as applicable.
 
+For newly compiled v2 evidence, every acceptance row carries an explicit
+phase-owned obligation set. The Spec candidate-review phase owns the semantic
+positive, negative, failure, mutation, compatibility, preservation, and
+migration reasoning. Exhaustive validation owns only the later observable
+validation obligation. A pre-validation reviewer therefore treats that
+validation obligation as validly deferred, not as missing candidate evidence.
+Rows in existing v2 evidence that predate the obligation set remain readable
+through the explicit legacy-compatible empty representation; new phase-owned
+proofs may not use that representation to bypass typed admission.
+
+Acceptance proof binds its candidate and owning phase structurally rather than
+repeating a candidate hash in every prose cell. A proof may cite the exact
+canonical review tuple (candidate, axis, review iteration, commit, and tree) and,
+after validation, the exact canonical validation tuple (schema, candidate,
+commit, tree, and completion time). Admission compares those tuples with the
+receipts actually retained by the run and fails closed on a stale candidate,
+phase, review iteration, commit, or tree. Automatic validator facts may attach
+the validation reference, but they never author or replace the Spec review's
+semantic acceptance reasoning.
+
 The compiler treats a row marked `qualification correction required` as a
 known unresolved finding. Before any independent review, it emits one
 structured correction request bound to the exact authority hash and current

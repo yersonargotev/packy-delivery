@@ -154,18 +154,61 @@ type ScopeLedger struct {
 	Prerequisites []PrerequisiteEntry `json:"prerequisites"`
 }
 type AcceptanceRow struct {
-	Identity              string          `json:"identity"`
-	Criterion             string          `json:"criterion"`
-	OwningSeam            string          `json:"owning_seam"`
-	PositiveEvidence      string          `json:"positive_evidence"`
-	NegativeEvidence      string          `json:"negative_evidence"`
-	FailureEvidence       string          `json:"failure_evidence"`
-	MutationEvidence      string          `json:"mutation_evidence"`
-	CompatibilityEvidence string          `json:"compatibility_evidence"`
-	PreservationEvidence  string          `json:"preservation_evidence"`
-	MigrationEvidence     string          `json:"migration_evidence"`
-	State                 AcceptanceState `json:"state"`
+	Identity              string                 `json:"identity"`
+	Criterion             string                 `json:"criterion"`
+	OwningSeam            string                 `json:"owning_seam"`
+	PositiveEvidence      string                 `json:"positive_evidence"`
+	NegativeEvidence      string                 `json:"negative_evidence"`
+	FailureEvidence       string                 `json:"failure_evidence"`
+	MutationEvidence      string                 `json:"mutation_evidence"`
+	CompatibilityEvidence string                 `json:"compatibility_evidence"`
+	PreservationEvidence  string                 `json:"preservation_evidence"`
+	MigrationEvidence     string                 `json:"migration_evidence"`
+	Obligations           []AcceptanceObligation `json:"obligations,omitempty"`
+	State                 AcceptanceState        `json:"state"`
 }
+
+type AssurancePhase string
+
+const (
+	AssuranceCandidateReview      AssurancePhase = "candidate-review"
+	AssuranceExhaustiveValidation AssurancePhase = "exhaustive-validation"
+)
+
+type AcceptanceEvidenceKind string
+
+const (
+	EvidencePositive      AcceptanceEvidenceKind = "positive"
+	EvidenceNegative      AcceptanceEvidenceKind = "negative"
+	EvidenceFailure       AcceptanceEvidenceKind = "failure"
+	EvidenceMutation      AcceptanceEvidenceKind = "mutation"
+	EvidenceCompatibility AcceptanceEvidenceKind = "compatibility"
+	EvidencePreservation  AcceptanceEvidenceKind = "preservation"
+	EvidenceMigration     AcceptanceEvidenceKind = "migration"
+	EvidenceValidation    AcceptanceEvidenceKind = "validation"
+)
+
+// AcceptanceObligation says when one remaining proof must be admitted. Rows
+// without obligations are the explicit compatible representation of v2
+// evidence written before phase ownership was introduced.
+type AcceptanceObligation struct {
+	Kind  AcceptanceEvidenceKind `json:"kind"`
+	Phase AssurancePhase         `json:"phase"`
+}
+
+func PhaseOwnedAcceptanceObligations() []AcceptanceObligation {
+	return []AcceptanceObligation{
+		{Kind: EvidencePositive, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceNegative, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceFailure, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceMutation, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceCompatibility, Phase: AssuranceCandidateReview},
+		{Kind: EvidencePreservation, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceMigration, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceValidation, Phase: AssuranceExhaustiveValidation},
+	}
+}
+
 type AcceptanceState string
 
 const (
@@ -443,6 +486,27 @@ func Validate(b Bundle) error {
 		}
 		if r.State != AcceptancePlanned && r.State != AcceptanceImplemented && r.State != AcceptanceProved {
 			return fmt.Errorf("acceptance row %q has invalid state", r.Identity)
+		}
+		if len(r.Obligations) > 0 {
+			seenObligations := map[AcceptanceEvidenceKind]bool{}
+			for _, obligation := range r.Obligations {
+				if seenObligations[obligation.Kind] {
+					return fmt.Errorf("acceptance row %q has duplicate %s obligation", r.Identity, obligation.Kind)
+				}
+				seenObligations[obligation.Kind] = true
+				expected := AssuranceCandidateReview
+				if obligation.Kind == EvidenceValidation {
+					expected = AssuranceExhaustiveValidation
+				}
+				if obligation.Phase != expected {
+					return fmt.Errorf("acceptance row %q has invalid %s phase ownership", r.Identity, obligation.Kind)
+				}
+			}
+			for _, expected := range PhaseOwnedAcceptanceObligations() {
+				if !seenObligations[expected.Kind] {
+					return fmt.Errorf("acceptance row %q lacks %s phase ownership", r.Identity, expected.Kind)
+				}
+			}
 		}
 		if rows[r.Identity] {
 			return fmt.Errorf("duplicate acceptance identity %q", r.Identity)

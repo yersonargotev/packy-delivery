@@ -293,6 +293,11 @@ func validateCandidates(record runRecord) error {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
 			}
+			if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) &&
+				(review.Iteration < 1 || review.CommitSHA != candidate.CommitSHA ||
+					review.TreeSHA != candidate.TreeSHA) {
+				return fmt.Errorf("issue delivery candidate contains a stale review receipt")
+			}
 			if !review.Completed && len(review.Findings) != 0 {
 				return fmt.Errorf("incomplete issue delivery candidate review contains findings")
 			}
@@ -301,6 +306,18 @@ func validateCandidates(record runRecord) error {
 					return fmt.Errorf("issue delivery candidate contains an invalid finding")
 				}
 				findingIDs[finding.ID] = true
+			}
+			for _, proof := range review.Acceptance {
+				if proof.CandidateID != candidate.ID ||
+					proof.Phase != deliveryevidence.AssuranceCandidateReview ||
+					proof.ReviewReceipt == nil ||
+					proof.ReviewReceipt.CandidateID != review.CandidateID ||
+					proof.ReviewReceipt.Axis != review.Axis ||
+					proof.ReviewReceipt.Iteration != review.Iteration ||
+					proof.ReviewReceipt.CommitSHA != review.CommitSHA ||
+					proof.ReviewReceipt.TreeSHA != review.TreeSHA {
+					return fmt.Errorf("issue delivery candidate contains a stale acceptance review reference")
+				}
 			}
 		}
 		for _, proof := range []*ValidationProof{candidate.Focused, candidate.Exhaustive} {
@@ -327,6 +344,31 @@ func validateCandidates(record runRecord) error {
 				!runIDPattern.MatchString(candidate.Exhaustive.Result.ValidatorSHA256) ||
 				!candidate.Exhaustive.Result.WorkspaceClean) {
 			return fmt.Errorf("issue delivery candidate contains an invalid exhaustive proof")
+		}
+		for _, proof := range candidate.Acceptance {
+			if !phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+				break
+			}
+			if proof.CandidateID != candidate.ID ||
+				proof.Phase != deliveryevidence.AssuranceCandidateReview {
+				return fmt.Errorf("issue delivery candidate contains a stale acceptance proof")
+			}
+			if proof.ValidationReceipt != nil && index == len(record.Candidates)-1 {
+				matched := false
+				for _, receipt := range record.Evidence.ValidationReceipts {
+					if receipt.Schema == proof.ValidationReceipt.Schema &&
+						receipt.CommitSHA == proof.ValidationReceipt.CommitSHA &&
+						receipt.TreeSHA == proof.ValidationReceipt.TreeSHA &&
+						receipt.CompletedAt == proof.ValidationReceipt.CompletedAt {
+						matched = true
+					}
+				}
+				if proof.ValidationReceipt.CandidateID != candidate.ID ||
+					proof.ValidationReceipt.CommitSHA != candidate.CommitSHA ||
+					proof.ValidationReceipt.TreeSHA != candidate.TreeSHA || !matched {
+					return fmt.Errorf("issue delivery candidate contains a stale acceptance validation reference")
+				}
+			}
 		}
 		specialists := map[SensitiveBoundary]bool{}
 		for _, review := range candidate.SpecialistReviews {

@@ -62,6 +62,17 @@ func (f *fakeReviewExecutor) Review(_ context.Context, request ReviewRequest) (C
 	if response.Findings == nil {
 		response.Findings = []deliveryevidence.ReviewFinding{}
 	}
+	if request.Axis == deliveryevidence.ReviewSpec && response.Acceptance == nil {
+		for _, row := range request.AcceptanceRows {
+			response.Acceptance = append(response.Acceptance, AcceptanceProof{
+				CandidateID: request.CandidateID, Phase: deliveryevidence.AssuranceCandidateReview,
+				Identity: row.Identity, PositiveEvidence: "positive semantic reasoning",
+				NegativeEvidence: "negative semantic reasoning", FailureEvidence: "failure semantic reasoning",
+				MutationEvidence: "mutation semantic reasoning", CompatibilityEvidence: "compatibility semantic reasoning",
+				PreservationEvidence: "preservation semantic reasoning", MigrationEvidence: "migration semantic reasoning",
+			})
+		}
+	}
 	return response, nil
 }
 
@@ -808,4 +819,45 @@ func mustAdvance(t *testing.T, module *Module, request Request) Outcome {
 		t.Fatal(err)
 	}
 	return outcome
+}
+
+func TestSpecReviewSeesDeferredValidatorObligationWithoutPrematureFinding(t *testing.T) {
+	module, _, _, reviewer, _ := assuranceFixture(t)
+	var observed bool
+	reviewer.hook = func(axis deliveryevidence.ReviewAxis) {
+		if axis == deliveryevidence.ReviewSpec {
+			observed = true
+		}
+	}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 3 {
+		mustAdvance(t, module, request)
+	}
+	outcome := mustAdvance(t, module, request)
+	if !observed || outcome.State == StateBlocked || outcome.State == StateNeedsDecision {
+		t.Fatalf("pre-validation Spec review treated deferred validator evidence as missing: %#v", outcome)
+	}
+}
+
+func TestAcceptanceProofRejectsStaleStructuralReceiptIdentity(t *testing.T) {
+	candidate := Candidate{
+		ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
+	}
+	proof := AcceptanceProof{
+		CandidateID: "candidate", Phase: deliveryevidence.AssuranceCandidateReview, Identity: "AC-1",
+		PositiveEvidence: "positive", NegativeEvidence: "negative", FailureEvidence: "failure",
+		MutationEvidence: "mutation", CompatibilityEvidence: "compatibility",
+		PreservationEvidence: "preservation", MigrationEvidence: "migration",
+		ReviewReceipt: &ReviewReceiptReference{
+			CandidateID: "candidate", Axis: deliveryevidence.ReviewSpec, Iteration: 1,
+			CommitSHA: candidate.CommitSHA, TreeSHA: strings.Repeat("c", 40),
+		},
+	}
+	evidence := &deliveryevidence.Bundle{AcceptanceMatrix: []deliveryevidence.AcceptanceRow{{
+		Identity: "AC-1", Obligations: deliveryevidence.PhaseOwnedAcceptanceObligations(),
+	}}}
+	if err := admitAcceptanceProofs(evidence, &candidate, []AcceptanceProof{proof}); err == nil ||
+		!strings.Contains(err.Error(), "stale review receipt") {
+		t.Fatalf("stale receipt admission error=%v", err)
+	}
 }

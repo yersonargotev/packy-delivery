@@ -15,6 +15,24 @@ type faultFile struct {
 	stage string
 }
 
+func TestAcceptancePhaseOwnershipIsAdditiveAndFailClosed(t *testing.T) {
+	legacyReadable := fixture()
+	if err := Validate(legacyReadable); err != nil {
+		t.Fatalf("pre-phase v2 acceptance row is no longer readable: %v", err)
+	}
+
+	owned := fixture()
+	owned.AcceptanceMatrix[0].Obligations = PhaseOwnedAcceptanceObligations()
+	if err := Validate(owned); err != nil {
+		t.Fatalf("phase-owned acceptance row is invalid: %v", err)
+	}
+	owned.AcceptanceMatrix[0].Obligations[len(owned.AcceptanceMatrix[0].Obligations)-1].Phase =
+		AssuranceCandidateReview
+	if err := Validate(owned); err == nil {
+		t.Fatal("validation admitted a validator obligation owned by candidate review")
+	}
+}
+
 func (f faultFile) Chmod(m os.FileMode) error {
 	if f.stage == "chmod" {
 		return errors.New("fault")
