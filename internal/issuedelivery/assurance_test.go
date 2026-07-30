@@ -584,7 +584,7 @@ func TestAdvanceRejectsRepairDecisionForStaleGitCheckout(t *testing.T) {
 }
 
 func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *testing.T) {
-	module, _, _, reviewer, validator := assuranceFixture(t)
+	module, git, _, reviewer, validator := assuranceFixture(t)
 	standardsFinding := deliveryevidence.ReviewFinding{
 		ID: "S357-4", Axis: deliveryevidence.ReviewStandards, Severity: deliveryevidence.SeverityP2,
 		Authority: deliveryevidence.AuthorityDocumentedStandard, Citation: "AGENTS.md",
@@ -654,6 +654,16 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 	risk.effects = []EffectObservation{{
 		Effect: EffectOrdinaryBehavior, Evidence: "standard behavior", Complete: true,
 	}}
+	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
+		Completed: true,
+		Findings: []deliveryevidence.ReviewFinding{{
+			ID: "S357-escalated", Axis: deliveryevidence.ReviewStandards,
+			Severity:  deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthorityDocumentedStandard,
+			Citation:  "AGENTS.md", Location: "internal/issuedelivery/assurance.go",
+			Evidence: "fresh escalated review finding",
+		}},
+	}}
 	escalated := mustAdvance(t, module, request)
 	if escalated.State != StateNeedsReview ||
 		escalated.Candidate.ReviewIteration != len(before.Reviews)+1 ||
@@ -666,8 +676,59 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 	rereviewed := mustAdvance(t, module, request)
 	if len(rereviewed.Candidate.Reviews) != len(before.Reviews)+2 ||
 		!reflect.DeepEqual(rereviewed.Candidate.Reviews[:len(before.Reviews)], before.Reviews) ||
-		rereviewed.Candidate.RepairDecision == nil {
+		rereviewed.Candidate.RepairDecision == nil || rereviewed.Repair == nil ||
+		!reflect.DeepEqual(rereviewed.Repair.FindingIDs, []string{"S357-escalated"}) {
 		t.Fatalf("profile escalation re-review did not append history: %#v", rereviewed)
+	}
+	resumedFinding := mustAdvance(t, module, request)
+	if !reflect.DeepEqual(resumedFinding.Repair, rereviewed.Repair) ||
+		!reflect.DeepEqual(resumedFinding.Candidate.RepairDecision, rereviewed.Candidate.RepairDecision) {
+		t.Fatalf("pending escalated finding did not resume: %#v", resumedFinding)
+	}
+	pendingBytes := persistedAssuranceRun(t, module, git)
+	for _, test := range []struct {
+		name   string
+		mutate func(*Candidate)
+	}{
+		{"missing historical disposition", func(candidate *Candidate) {
+			candidate.RepairDecision.Findings = candidate.RepairDecision.Findings[1:]
+		}},
+		{"historical disposition claims pending finding", func(candidate *Candidate) {
+			candidate.RepairDecision.Findings[0].FindingID = "S357-escalated"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := decodeRun(pendingBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&record.Candidates[len(record.Candidates)-1])
+			if err := validateRun(record); err == nil {
+				t.Fatal("tampered cumulative historical disposition was admitted")
+			}
+		})
+	}
+	escalatedDecision := RepairDecision{
+		CandidateID: rereviewed.Candidate.ID, Class: RepairAdjudicationOnly,
+		Findings: []FindingDecision{{
+			FindingID: "S357-escalated", Disposition: FindingRejected,
+			Evidence: "escalated evidence disproves finding",
+		}},
+	}
+	readjudicated := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, Repair: &escalatedDecision,
+	})
+	if readjudicated.Candidate.RepairDecision == nil ||
+		len(readjudicated.Candidate.RepairDecision.Findings) != 3 ||
+		unresolvedFindingIDs(readjudicated.Candidate) != nil {
+		t.Fatalf("escalated adjudication was not cumulative: %#v", readjudicated)
+	}
+	replayed := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, Repair: &escalatedDecision,
+	})
+	if !reflect.DeepEqual(replayed.Candidate.RepairDecision, readjudicated.Candidate.RepairDecision) ||
+		len(replayed.Timing) != len(readjudicated.Timing) {
+		t.Fatalf("escalated adjudication replay changed persisted history: %#v", replayed)
 	}
 }
 

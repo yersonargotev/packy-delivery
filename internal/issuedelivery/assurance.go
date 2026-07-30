@@ -379,7 +379,7 @@ func (m *Module) applyRepairDecision(
 	})
 	if record.PendingRepair == nil {
 		if decision.Class == RepairAdjudicationOnly &&
-			matchingRepairDecision(candidate.RepairDecision, decision) {
+			matchingRepairDecisionBatch(candidate.RepairDecision, decision) {
 			return outcomeFromRecord(record), nil
 		}
 		return Outcome{}, errors.New("repair decision does not match the pending candidate")
@@ -414,7 +414,17 @@ func (m *Module) applyRepairDecision(
 	if decision.Class == RepairAdjudicationOnly && hasAcceptedFindings(&decision) {
 		return Outcome{}, errors.New("adjudication-only requires every finding to be rejected with evidence")
 	}
-	candidate.RepairDecision = &decision
+	merged := decision
+	if candidate.RepairDecision != nil {
+		merged.Findings = append(
+			append([]FindingDecision(nil), candidate.RepairDecision.Findings...),
+			decision.Findings...,
+		)
+		sort.Slice(merged.Findings, func(i, j int) bool {
+			return merged.Findings[i].FindingID < merged.Findings[j].FindingID
+		})
+	}
+	candidate.RepairDecision = &merged
 	record.PendingRepair = nil
 	reason := "review findings were adjudicated without an accepted repair"
 	if hasAcceptedFindings(&decision) {
@@ -423,17 +433,20 @@ func (m *Module) applyRepairDecision(
 	return m.persistAssuranceTransition(store, record, StateNeedsReview, reason, "adjudication")
 }
 
-func matchingRepairDecision(recorded *RepairDecision, supplied RepairDecision) bool {
-	if recorded == nil || recorded.CandidateID != supplied.CandidateID ||
-		recorded.Class != supplied.Class || len(recorded.Findings) != len(supplied.Findings) {
+func matchingRepairDecisionBatch(recorded *RepairDecision, supplied RepairDecision) bool {
+	if recorded == nil || recorded.CandidateID != supplied.CandidateID {
 		return false
 	}
-	for i := range recorded.Findings {
-		if recorded.Findings[i] != supplied.Findings[i] {
+	recordedFindings := make(map[string]FindingDecision, len(recorded.Findings))
+	for _, item := range recorded.Findings {
+		recordedFindings[item.FindingID] = item
+	}
+	for _, item := range supplied.Findings {
+		if recordedFindings[item.FindingID] != item {
 			return false
 		}
 	}
-	return true
+	return len(supplied.Findings) > 0
 }
 
 func (m *Module) executeReviews(

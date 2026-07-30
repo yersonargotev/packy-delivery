@@ -486,7 +486,10 @@ func validateCandidates(record runRecord) error {
 			}
 			specialists[review.Boundary] = true
 		}
-		if err := validatePersistedRepairDecision(record.Schema, candidate, findingIDs); err != nil {
+		allowPartialDecision := index == len(record.Candidates)-1 && record.PendingRepair != nil
+		if err := validatePersistedRepairDecision(
+			record.Schema, candidate, findingIDs, allowPartialDecision,
+		); err != nil {
 			return err
 		}
 		proofs := map[SensitiveBoundary]bool{}
@@ -510,6 +513,12 @@ func validateCandidates(record runRecord) error {
 		(record.PendingRepair.CandidateID != current.ID || strings.TrimSpace(record.PendingRepair.ID) == "" ||
 			len(record.PendingRepair.FindingIDs) == 0) {
 		return fmt.Errorf("pending repair does not match the current candidate")
+	}
+	if record.PendingRepair != nil {
+		expected := repairDecisionRequest(record.Schema, current.ID, unresolvedFindingIDs(&current))
+		if !reflect.DeepEqual(record.PendingRepair, expected) {
+			return fmt.Errorf("pending repair does not match unresolved current candidate findings")
+		}
 	}
 	if record.LocalReadiness != nil &&
 		(record.LocalReadiness.CandidateID != current.ID ||
@@ -586,6 +595,7 @@ func validatePersistedRepairDecision(
 	schema string,
 	candidate Candidate,
 	findingIDs map[string]bool,
+	allowPartial bool,
 ) error {
 	decision := candidate.RepairDecision
 	if decision == nil {
@@ -596,13 +606,15 @@ func validatePersistedRepairDecision(
 		(decision.Class != RepairBounded &&
 			decision.Class != RepairCandidateChanging &&
 			decision.Class != RepairAdjudicationOnly) ||
-		len(decision.Findings) != len(findingIDs) {
+		len(decision.Findings) > len(findingIDs) ||
+		(!allowPartial && len(decision.Findings) != len(findingIDs)) {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
 	}
 	seen := make(map[string]bool, len(decision.Findings))
 	accepted := false
-	for _, item := range decision.Findings {
+	for index, item := range decision.Findings {
 		if seen[item.FindingID] || !findingIDs[item.FindingID] ||
+			(index > 0 && decision.Findings[index-1].FindingID >= item.FindingID) ||
 			strings.TrimSpace(item.Evidence) == "" ||
 			(item.Disposition != FindingAccepted && item.Disposition != FindingRejected) {
 			return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
