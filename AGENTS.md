@@ -13,3 +13,17 @@
   non-local Git or GitHub effects during validation.
 - Run `./scripts/validate-packy-delivery.sh` before committing or reporting
   success.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `yersonargotev/packy-delivery`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The repository uses the five default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain documentation uses a single-context layout. See `docs/agents/domain.md`.
