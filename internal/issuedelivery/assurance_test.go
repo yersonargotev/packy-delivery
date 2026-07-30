@@ -650,6 +650,25 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 		validator.focusedCalls != 1 || validator.exhaustiveCalls != 1 {
 		t.Fatalf("adjudication-only readiness=%#v", ready)
 	}
+	risk := module.risk.(*fakeCandidateRiskObserver)
+	risk.effects = []EffectObservation{{
+		Effect: EffectOrdinaryBehavior, Evidence: "standard behavior", Complete: true,
+	}}
+	escalated := mustAdvance(t, module, request)
+	if escalated.State != StateNeedsReview ||
+		escalated.Candidate.ReviewIteration != len(before.Reviews)+1 ||
+		!reflect.DeepEqual(escalated.Candidate.Reviews, before.Reviews) ||
+		escalated.Candidate.RepairDecision == nil ||
+		escalated.Candidate.RepairDecision.Class != RepairAdjudicationOnly ||
+		len(escalated.Candidate.Acceptance) != 0 || escalated.Candidate.Exhaustive != nil {
+		t.Fatalf("adjudicated profile escalation lost review history: %#v", escalated)
+	}
+	rereviewed := mustAdvance(t, module, request)
+	if len(rereviewed.Candidate.Reviews) != len(before.Reviews)+2 ||
+		!reflect.DeepEqual(rereviewed.Candidate.Reviews[:len(before.Reviews)], before.Reviews) ||
+		rereviewed.Candidate.RepairDecision == nil {
+		t.Fatalf("profile escalation re-review did not append history: %#v", rereviewed)
+	}
 }
 
 func TestAdvanceAdjudicationOnlyFailsClosed(t *testing.T) {
@@ -1020,6 +1039,51 @@ func TestPersistedAcceptanceMustMatchRetainedSpecReview(t *testing.T) {
 	if err := validateRun(record); err == nil ||
 		!strings.Contains(err.Error(), "does not match its completed Spec review") {
 		t.Fatalf("tampered persisted acceptance validation error=%v", err)
+	}
+}
+
+func TestPersistedAcceptanceRequiresCurrentSpecReview(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	record, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &record.Candidates[len(record.Candidates)-1]
+	current.ReviewIteration = len(current.Reviews) + 1
+	if err := validateRun(record); err == nil ||
+		!strings.Contains(err.Error(), "lacks a completed current Spec review") {
+		t.Fatalf("fabricated pre-review acceptance validation error=%v", err)
+	}
+}
+
+func TestPersistedReviewIterationsMustFollowCanonicalBatchSequence(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	record, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &record.Candidates[len(record.Candidates)-1]
+	current.ReviewIteration++
+	for reviewIndex := range current.Reviews {
+		current.Reviews[reviewIndex].Iteration++
+		for proofIndex := range current.Reviews[reviewIndex].Acceptance {
+			current.Reviews[reviewIndex].Acceptance[proofIndex].ReviewReceipt.Iteration++
+		}
+	}
+	for proofIndex := range current.Acceptance {
+		current.Acceptance[proofIndex].ReviewReceipt.Iteration++
+	}
+	if err := validateRun(record); err == nil ||
+		!strings.Contains(err.Error(), "review iteration sequence") {
+		t.Fatalf("self-consistent stale review iteration validation error=%v", err)
 	}
 }
 

@@ -293,6 +293,24 @@ func validateCandidates(record runRecord) error {
 		var reviewedAcceptance []AcceptanceProof
 		specReviewCompleted := false
 		completedReviews := make(map[deliveryevidence.ReviewAxis]int, len(candidate.RequiredReviews))
+		currentIteration := currentReviewIteration(&candidate)
+		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			lastIteration := 0
+			for reviewIndex, review := range candidate.Reviews {
+				if review.Iteration != lastIteration {
+					if review.Iteration != reviewIndex+1 {
+						return fmt.Errorf("issue delivery candidate review iteration sequence is invalid")
+					}
+					lastIteration = review.Iteration
+				}
+			}
+			if candidate.ReviewIteration > 0 &&
+				candidate.ReviewIteration != lastIteration &&
+				candidate.ReviewIteration != len(candidate.Reviews)+1 {
+				return fmt.Errorf("issue delivery candidate current review iteration is invalid")
+			}
+		}
+		batchAxes := make(map[int]map[deliveryevidence.ReviewAxis]bool)
 		for _, review := range candidate.Reviews {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
@@ -301,6 +319,15 @@ func validateCandidates(record runRecord) error {
 				(review.Iteration < 1 || review.CommitSHA != candidate.CommitSHA ||
 					review.TreeSHA != candidate.TreeSHA) {
 				return fmt.Errorf("issue delivery candidate contains a stale review receipt")
+			}
+			if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+				if batchAxes[review.Iteration] == nil {
+					batchAxes[review.Iteration] = make(map[deliveryevidence.ReviewAxis]bool)
+				}
+				if batchAxes[review.Iteration][review.Axis] {
+					return fmt.Errorf("issue delivery candidate review iteration contains a duplicate axis")
+				}
+				batchAxes[review.Iteration][review.Axis] = true
 			}
 			if !review.Completed && len(review.Findings) != 0 {
 				return fmt.Errorf("incomplete issue delivery candidate review contains findings")
@@ -326,21 +353,28 @@ func validateCandidates(record runRecord) error {
 					return fmt.Errorf("issue delivery candidate contains a stale acceptance review reference")
 				}
 			}
-			if review.Axis == deliveryevidence.ReviewSpec && review.Completed {
+			if review.Iteration == currentIteration &&
+				review.Axis == deliveryevidence.ReviewSpec && review.Completed {
 				reviewedAcceptance = review.Acceptance
 				specReviewCompleted = true
 			}
-			if review.Completed {
+			if review.Iteration == currentIteration && review.Completed {
 				completedReviews[review.Axis]++
 			}
 		}
-		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) && specReviewCompleted {
-			candidateSemantic := append([]AcceptanceProof(nil), candidate.Acceptance...)
-			for proofIndex := range candidateSemantic {
-				candidateSemantic[proofIndex].ValidationReceipt = nil
-			}
-			if !reflect.DeepEqual(candidateSemantic, reviewedAcceptance) {
-				return fmt.Errorf("issue delivery candidate acceptance does not match its completed Spec review")
+		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			if !specReviewCompleted {
+				if len(candidate.Acceptance) != 0 {
+					return fmt.Errorf("issue delivery candidate acceptance lacks a completed current Spec review")
+				}
+			} else {
+				candidateSemantic := append([]AcceptanceProof(nil), candidate.Acceptance...)
+				for proofIndex := range candidateSemantic {
+					candidateSemantic[proofIndex].ValidationReceipt = nil
+				}
+				if !reflect.DeepEqual(candidateSemantic, reviewedAcceptance) {
+					return fmt.Errorf("issue delivery candidate acceptance does not match its completed Spec review")
+				}
 			}
 		}
 		if candidate.Exhaustive != nil && phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {

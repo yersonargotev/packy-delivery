@@ -521,6 +521,7 @@ type Candidate struct {
 	Effects             []EffectObservation                  `json:"effects"`
 	Boundaries          []SensitiveBoundary                  `json:"boundaries"`
 	RequiredReviews     []deliveryevidence.ReviewAxis        `json:"required_reviews"`
+	ReviewIteration     int                                  `json:"review_iteration,omitempty"`
 	Reviews             []CandidateReview                    `json:"reviews"`
 	RequiredSpecialists []SensitiveBoundary                  `json:"required_specialists"`
 	SpecialistReviews   []SpecialistReview                   `json:"specialist_reviews"`

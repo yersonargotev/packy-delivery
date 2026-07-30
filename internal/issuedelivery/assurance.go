@@ -156,6 +156,9 @@ func (m *Module) advanceAssurance(
 			}
 		}
 		sort.Slice(candidate.Reviews, func(i, j int) bool {
+			if candidate.Reviews[i].Iteration != candidate.Reviews[j].Iteration {
+				return candidate.Reviews[i].Iteration < candidate.Reviews[j].Iteration
+			}
 			return candidate.Reviews[i].Axis < candidate.Reviews[j].Axis
 		})
 		for _, review := range reviews {
@@ -439,6 +442,7 @@ func (m *Module) executeReviews(
 	candidate Candidate,
 	axes []deliveryevidence.ReviewAxis,
 ) ([]CandidateReview, error) {
+	iteration := currentReviewIteration(&candidate)
 	type result struct {
 		review CandidateReview
 		err    error
@@ -453,7 +457,7 @@ func (m *Module) executeReviews(
 			review, err := m.review.Review(ctx, ReviewRequest{
 				RunID: record.ID, CandidateID: candidate.ID, Repository: record.Repository, Issue: record.Issue,
 				Axis: axis, BaseSHA: candidate.BaseSHA, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
-				Iteration:      len(candidate.Reviews) + 1,
+				Iteration:      iteration,
 				AcceptanceRows: append([]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...),
 			})
 			results <- result{review: review, err: err}
@@ -467,7 +471,7 @@ func (m *Module) executeReviews(
 			return nil, fmt.Errorf("execute candidate review: %w", result.err)
 		}
 		if err := validateCandidateReview(
-			result.review, candidate, axes, len(candidate.Reviews)+1,
+			result.review, candidate, axes, iteration,
 		); err != nil {
 			return nil, err
 		}
@@ -558,7 +562,7 @@ func newCandidate(record runRecord, previous *Candidate, git GitObservation) Can
 	next := Candidate{
 		ID:      candidateIdentity(record.ID, base, git.HeadSHA, git.TreeSHA),
 		BaseSHA: base, CommitSHA: git.HeadSHA, TreeSHA: git.TreeSHA, RepairClass: class,
-		RequiredReviews: required, Reviews: []CandidateReview{},
+		RequiredReviews: required, ReviewIteration: 1, Reviews: []CandidateReview{},
 		Effects: []EffectObservation{}, Boundaries: []SensitiveBoundary{},
 		RequiredSpecialists: []SensitiveBoundary{}, SpecialistReviews: []SpecialistReview{},
 		BoundaryProofs: []BoundaryProof{},
@@ -837,8 +841,9 @@ func latestCandidate(record *runRecord) *Candidate {
 
 func missingReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
 	have := map[deliveryevidence.ReviewAxis]bool{}
+	iteration := currentReviewIteration(candidate)
 	for _, review := range candidate.Reviews {
-		if review.Completed {
+		if review.Completed && review.Iteration == iteration {
 			have[review.Axis] = true
 		}
 	}
@@ -849,6 +854,16 @@ func missingReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
 		}
 	}
 	return missing
+}
+
+func currentReviewIteration(candidate *Candidate) int {
+	if candidate.ReviewIteration > 0 {
+		return candidate.ReviewIteration
+	}
+	if len(candidate.Reviews) > 0 {
+		return candidate.Reviews[len(candidate.Reviews)-1].Iteration
+	}
+	return 1
 }
 
 func unresolvedFindingIDs(candidate *Candidate) []string {
