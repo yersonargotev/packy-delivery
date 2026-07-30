@@ -10,6 +10,15 @@ and [repository instructions](../../../AGENTS.md) before mutating project or
 tracker state. The contract owns delivery behavior; keep this skill as its thin
 orchestrator.
 
+Before creating or resuming a run, check `command -v packy-deliver`. If the
+executable is unavailable, stop and tell the user to install it with:
+
+```sh
+brew install yersonargotev/tap/packy-delivery
+```
+
+Never install it silently.
+
 Create or resume the issue's `Delivery Run`, then invoke the contract's
 `packy-deliver advance` repeatedly. Supply genuine decisions,
 review results, and adjudications only when the returned state requires them.
