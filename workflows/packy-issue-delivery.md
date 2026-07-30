@@ -156,6 +156,37 @@ evidence requirements. Every acceptance obligation must remain traceable to its
 authority and have positive, negative or failure, and preservation or
 compatibility evidence as applicable.
 
+For newly compiled v2 evidence, every acceptance row carries an explicit
+phase-owned obligation set. The Spec candidate-review phase owns the semantic
+positive, negative, failure, mutation, compatibility, preservation, and
+migration reasoning. Exhaustive validation owns only the later observable
+validation obligation. A pre-validation reviewer therefore treats that
+validation obligation as validly deferred, not as missing candidate evidence.
+Rows in existing v2 evidence that predate the obligation set remain readable
+through the explicit legacy-compatible empty representation; new phase-owned
+proofs may not use that representation to bypass typed admission.
+
+Acceptance proof binds its candidate and owning phase structurally rather than
+repeating a candidate hash in every prose cell. A proof may cite the exact
+canonical review tuple (candidate, axis, review iteration, commit, and tree) and,
+after validation, the exact canonical validation tuple (schema, candidate,
+commit, tree, and completion time). Admission compares those tuples with the
+receipts actually retained by the run and fails closed on a stale candidate,
+phase, review iteration, commit, or tree. Automatic validator facts may attach
+the validation reference, but they never author or replace the Spec review's
+semantic acceptance reasoning.
+
+The Spec reviewer must explicitly return one semantic proof per compiled row,
+bound to the expected review iteration, candidate, commit, and tree supplied in
+its request. The review adapter may fill a wholly absent observable receipt
+tuple from that exact request, but never overwrites a conflicting returned
+identity. Exhaustive validation returns a separate identity-only trace for each
+row (row, candidate, exhaustive phase, commit, and tree); it must not repeat any
+of the seven semantic evidence cells. Duplicate, foreign, missing, or stale
+traces fail closed. A bounded repair receives fresh Standards and Spec review
+and fresh semantic proof for its new candidate rather than relabeling the prior
+candidate's proof.
+
 The compiler treats a row marked `qualification correction required` as a
 known unresolved finding. Before any independent review, it emits one
 structured correction request bound to the exact authority hash and current
@@ -218,7 +249,23 @@ Adjudicate all findings and repair accepted findings as a batch:
   performs no repair. It preserves the exact candidate, risk observations,
   reviews, and receipts. Mixed, missing, stale, or unsupported adjudications
   fail closed. Resume adopts an already-recorded matching adjudication without
-  duplicating it.
+  duplicating it. When the same candidate receives a later review generation,
+  its persisted repair decision remains one canonical, finding-sorted,
+  cumulative decision. Each new request names only the unresolved findings;
+  applying that exact batch appends its dispositions without replacing prior
+  evidence. A pending request and the retained dispositions must partition the
+  complete finding history exactly. The candidate retains every exact batch
+  request identity and decision as append-only structural history, plus the
+  exact last batch as its replay receipt; only that sorted, unique last batch
+  may be replayed. The cumulative findings must equal the batch union and the
+  cumulative repair class never weakens:
+  candidate-changing outranks bounded, which outranks adjudication-only, so a
+  later rejected batch cannot erase an already-accepted repair obligation.
+  When a compatible older v2 candidate has a cumulative decision but no batch
+  history, applying its next batch first records that old decision as one
+  explicitly marked compatibility prefix with a deterministic request identity.
+  Only this first prefix may retain the historical candidate-changing/all-
+  rejected semantics; the actual new batch remains the final replay receipt.
 - A `Bounded Repair` preserves behavior, contract, scope, architecture, security
   posture, and acceptance meaning. Run focused verification and obtain
   confirmation from the originating review axis.

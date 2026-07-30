@@ -150,9 +150,15 @@ func (m *Module) advanceAssurance(
 		for _, review := range reviews {
 			if review.Completed {
 				candidate.Reviews = append(candidate.Reviews, review)
+				if review.Axis == deliveryevidence.ReviewSpec {
+					candidate.Acceptance = append([]AcceptanceProof(nil), review.Acceptance...)
+				}
 			}
 		}
 		sort.Slice(candidate.Reviews, func(i, j int) bool {
+			if candidate.Reviews[i].Iteration != candidate.Reviews[j].Iteration {
+				return candidate.Reviews[i].Iteration < candidate.Reviews[j].Iteration
+			}
 			return candidate.Reviews[i].Axis < candidate.Reviews[j].Axis
 		})
 		for _, review := range reviews {
@@ -256,7 +262,26 @@ func (m *Module) advanceAssurance(
 		nextEvidence.AcceptanceMatrix = append(
 			[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
 		)
-		if err := admitAcceptanceProofs(&nextEvidence, candidate, result.Acceptance); err != nil {
+		proofs := result.Acceptance
+		if record.Schema != legacyRunSchema && phaseOwnedAcceptance(nextEvidence.AcceptanceMatrix) {
+			if len(result.Acceptance) != 0 {
+				return m.persistAssuranceTransition(
+					store, record, StateBlocked,
+					"exhaustive validator returned forbidden semantic acceptance prose",
+					"exhaustive-validation",
+				)
+			}
+			if err := validateValidationTraceability(
+				result.Traceability, nextEvidence.AcceptanceMatrix, *candidate,
+			); err != nil {
+				return m.persistAssuranceTransition(
+					store, record, StateBlocked, "exhaustive validation lacks exact acceptance traceability",
+					"exhaustive-validation",
+				)
+			}
+			proofs = candidate.Acceptance
+		}
+		if err := admitAcceptanceProofs(&nextEvidence, candidate, proofs); err != nil {
 			return m.persistAssuranceTransition(
 				store, record, StateBlocked, "exhaustive validation lacks exact acceptance traceability",
 				"exhaustive-validation",
@@ -285,10 +310,19 @@ func (m *Module) advanceAssurance(
 				"exhaustive-validation",
 			)
 		}
+		validationReference := &ValidationReceiptReference{
+			Schema: deliveryevidence.ValidationReceiptV1, CandidateID: candidate.ID,
+			CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA, CompletedAt: completedAt,
+		}
+		for index := range candidate.Acceptance {
+			candidate.Acceptance[index].ValidationReceipt = validationReference
+		}
 		candidate.Exhaustive = &ValidationProof{
 			Kind: "exhaustive", Result: result, CompletedAt: completedAt,
 		}
-		candidate.Acceptance = append([]AcceptanceProof(nil), result.Acceptance...)
+		if record.Schema == legacyRunSchema || !phaseOwnedAcceptance(nextEvidence.AcceptanceMatrix) {
+			candidate.Acceptance = append([]AcceptanceProof(nil), result.Acceptance...)
+		}
 		record.Evidence = &nextEvidence
 	}
 	freshGit, err := m.git.ObserveGit(ctx, git.Worktree)
@@ -344,8 +378,7 @@ func (m *Module) applyRepairDecision(
 		return decision.Findings[i].FindingID < decision.Findings[j].FindingID
 	})
 	if record.PendingRepair == nil {
-		if decision.Class == RepairAdjudicationOnly &&
-			matchingRepairDecision(candidate.RepairDecision, decision) {
+		if decision.Class == RepairAdjudicationOnly && matchingLastRepairBatch(candidate, decision) {
 			return outcomeFromRecord(record), nil
 		}
 		return Outcome{}, errors.New("repair decision does not match the pending candidate")
@@ -380,13 +413,56 @@ func (m *Module) applyRepairDecision(
 	if decision.Class == RepairAdjudicationOnly && hasAcceptedFindings(&decision) {
 		return Outcome{}, errors.New("adjudication-only requires every finding to be rejected with evidence")
 	}
-	candidate.RepairDecision = &decision
+	priorDecision := candidate.RepairDecision
+	merged := decision
+	if priorDecision != nil {
+		merged.Class = strongestRepairClass(priorDecision.Class, decision.Class)
+		merged.Findings = append(
+			append([]FindingDecision(nil), priorDecision.Findings...),
+			decision.Findings...,
+		)
+		sort.Slice(merged.Findings, func(i, j int) bool {
+			return merged.Findings[i].FindingID < merged.Findings[j].FindingID
+		})
+	}
+	candidate.RepairDecision = &merged
+	if record.Schema != legacyRunSchema {
+		if len(candidate.RepairBatches) == 0 && candidate.LastRepairBatch == nil &&
+			priorDecision != nil {
+			prefixDecision := *priorDecision
+			prefixDecision.Findings = append(
+				[]FindingDecision(nil), priorDecision.Findings...,
+			)
+			prefixIDs := make([]string, 0, len(prefixDecision.Findings))
+			for _, item := range prefixDecision.Findings {
+				prefixIDs = append(prefixIDs, item.FindingID)
+			}
+			candidate.RepairBatches = append(candidate.RepairBatches, RepairBatchReceipt{
+				RequestID:        repairDecisionRequest(record.Schema, candidate.ID, prefixIDs).ID,
+				CompatiblePrefix: true,
+				Decision:         prefixDecision,
+			})
+		}
+		receipt := RepairBatchReceipt{
+			RequestID: record.PendingRepair.ID,
+			Decision:  decision,
+		}
+		candidate.RepairBatches = append(candidate.RepairBatches, receipt)
+		candidate.LastRepairBatch = &receipt
+	}
 	record.PendingRepair = nil
 	reason := "review findings were adjudicated without an accepted repair"
-	if hasAcceptedFindings(&decision) {
+	if hasAcceptedFindings(&merged) {
 		reason = "accepted findings must be repaired as one candidate batch"
 	}
 	return m.persistAssuranceTransition(store, record, StateNeedsReview, reason, "adjudication")
+}
+
+func matchingLastRepairBatch(candidate *Candidate, supplied RepairDecision) bool {
+	if candidate.LastRepairBatch != nil {
+		return matchingRepairDecision(&candidate.LastRepairBatch.Decision, supplied)
+	}
+	return matchingRepairDecision(candidate.RepairDecision, supplied)
 }
 
 func matchingRepairDecision(recorded *RepairDecision, supplied RepairDecision) bool {
@@ -394,12 +470,31 @@ func matchingRepairDecision(recorded *RepairDecision, supplied RepairDecision) b
 		recorded.Class != supplied.Class || len(recorded.Findings) != len(supplied.Findings) {
 		return false
 	}
-	for i := range recorded.Findings {
-		if recorded.Findings[i] != supplied.Findings[i] {
+	for index, item := range supplied.Findings {
+		if recorded.Findings[index] != item {
 			return false
 		}
 	}
 	return true
+}
+
+func strongestRepairClass(left, right RepairClass) RepairClass {
+	rank := func(class RepairClass) int {
+		switch class {
+		case RepairCandidateChanging:
+			return 3
+		case RepairBounded:
+			return 2
+		case RepairAdjudicationOnly:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(right) > rank(left) {
+		return right
+	}
+	return left
 }
 
 func (m *Module) executeReviews(
@@ -408,6 +503,7 @@ func (m *Module) executeReviews(
 	candidate Candidate,
 	axes []deliveryevidence.ReviewAxis,
 ) ([]CandidateReview, error) {
+	iteration := currentReviewIteration(&candidate)
 	type result struct {
 		review CandidateReview
 		err    error
@@ -422,6 +518,8 @@ func (m *Module) executeReviews(
 			review, err := m.review.Review(ctx, ReviewRequest{
 				RunID: record.ID, CandidateID: candidate.ID, Repository: record.Repository, Issue: record.Issue,
 				Axis: axis, BaseSHA: candidate.BaseSHA, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+				Iteration:      iteration,
+				AcceptanceRows: append([]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...),
 			})
 			results <- result{review: review, err: err}
 		}()
@@ -433,8 +531,26 @@ func (m *Module) executeReviews(
 		if result.err != nil {
 			return nil, fmt.Errorf("execute candidate review: %w", result.err)
 		}
-		if err := validateCandidateReview(result.review, candidate, axes); err != nil {
+		if err := validateCandidateReview(
+			result.review, candidate, axes, iteration,
+		); err != nil {
 			return nil, err
+		}
+		if result.review.Axis == deliveryevidence.ReviewSpec && result.review.Completed &&
+			phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			evidence := *record.Evidence
+			evidence.AcceptanceMatrix = append(
+				[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
+			)
+			reviewedCandidate := candidate
+			reviewedCandidate.Reviews = append(
+				append([]CandidateReview(nil), candidate.Reviews...), result.review,
+			)
+			if err := admitAcceptanceProofs(
+				&evidence, &reviewedCandidate, result.review.Acceptance,
+			); err != nil {
+				return nil, fmt.Errorf("Spec review acceptance proof is invalid: %w", err)
+			}
 		}
 		out = append(out, result.review)
 	}
@@ -500,18 +616,19 @@ func newCandidate(record runRecord, previous *Candidate, git GitObservation) Can
 		if hasAcceptedFindings(previous.RepairDecision) {
 			class = previous.RepairDecision.Class
 			if class == RepairBounded {
-				required = acceptedFindingAxes(*previous)
+				required = bothReviewAxes()
 			}
 		}
 	}
-	return Candidate{
+	next := Candidate{
 		ID:      candidateIdentity(record.ID, base, git.HeadSHA, git.TreeSHA),
 		BaseSHA: base, CommitSHA: git.HeadSHA, TreeSHA: git.TreeSHA, RepairClass: class,
-		RequiredReviews: required, Reviews: []CandidateReview{},
+		RequiredReviews: required, ReviewIteration: 1, Reviews: []CandidateReview{},
 		Effects: []EffectObservation{}, Boundaries: []SensitiveBoundary{},
 		RequiredSpecialists: []SensitiveBoundary{}, SpecialistReviews: []SpecialistReview{},
 		BoundaryProofs: []BoundaryProof{},
 	}
+	return next
 }
 
 func candidateIdentity(runID, base, commit, tree string) string {
@@ -563,16 +680,41 @@ func (m *Module) validateValidationResult(result ValidationResult, candidate Can
 	return nil
 }
 
-func validateCandidateReview(review CandidateReview, candidate Candidate, requested []deliveryevidence.ReviewAxis) error {
-	if review.CandidateID != candidate.ID || !containsAxis(requested, review.Axis) || review.Findings == nil {
+func validateCandidateReview(
+	review CandidateReview,
+	candidate Candidate,
+	requested []deliveryevidence.ReviewAxis,
+	expectedIteration int,
+) error {
+	if review.CandidateID != candidate.ID || !containsAxis(requested, review.Axis) || review.Findings == nil ||
+		review.Iteration != expectedIteration || review.CommitSHA != candidate.CommitSHA ||
+		review.TreeSHA != candidate.TreeSHA {
 		return errors.New("candidate review does not match its exact request")
 	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete candidate review cannot contain findings")
 	}
+	if !review.Completed && len(review.Acceptance) != 0 {
+		return errors.New("incomplete candidate review cannot contain acceptance proof")
+	}
 	for _, finding := range review.Findings {
 		if finding.Axis != review.Axis || strings.TrimSpace(finding.ID) == "" {
 			return errors.New("candidate review contains an invalid finding")
+		}
+	}
+	if review.Axis != deliveryevidence.ReviewSpec && len(review.Acceptance) != 0 {
+		return errors.New("only the Spec review may author semantic acceptance proof")
+	}
+	for _, proof := range review.Acceptance {
+		if proof.CandidateID != candidate.ID ||
+			proof.Phase != deliveryevidence.AssuranceCandidateReview ||
+			proof.ValidationReceipt != nil || proof.ReviewReceipt == nil ||
+			proof.ReviewReceipt.CandidateID != review.CandidateID ||
+			proof.ReviewReceipt.Axis != review.Axis ||
+			proof.ReviewReceipt.Iteration != review.Iteration ||
+			proof.ReviewReceipt.CommitSHA != review.CommitSHA ||
+			proof.ReviewReceipt.TreeSHA != review.TreeSHA {
+			return errors.New("candidate review contains stale or phase-invalid acceptance proof")
 		}
 	}
 	return nil
@@ -641,6 +783,32 @@ func admitAcceptanceProofs(
 		if byID[proof.Identity].Identity != "" {
 			return fmt.Errorf("duplicate acceptance proof %q", proof.Identity)
 		}
+		if proof.CandidateID != "" && proof.CandidateID != candidate.ID {
+			return fmt.Errorf("acceptance proof %q belongs to a stale candidate", proof.Identity)
+		}
+		if proof.Phase != "" && proof.Phase != deliveryevidence.AssuranceCandidateReview {
+			return fmt.Errorf("acceptance proof %q has stale phase ownership", proof.Identity)
+		}
+		if reference := proof.ReviewReceipt; reference != nil {
+			matched := false
+			for _, review := range candidate.Reviews {
+				if review.CandidateID == reference.CandidateID && review.Axis == reference.Axis &&
+					review.Iteration == reference.Iteration && review.CommitSHA == reference.CommitSHA &&
+					review.TreeSHA == reference.TreeSHA && review.Completed {
+					matched = true
+				}
+			}
+			if reference.CandidateID != candidate.ID || reference.CommitSHA != candidate.CommitSHA ||
+				reference.TreeSHA != candidate.TreeSHA || reference.Iteration < 1 || !matched {
+				return fmt.Errorf("acceptance proof %q references a stale review receipt", proof.Identity)
+			}
+		}
+		if reference := proof.ValidationReceipt; reference != nil &&
+			(reference.Schema != deliveryevidence.ValidationReceiptV1 ||
+				reference.CandidateID != candidate.ID || reference.CommitSHA != candidate.CommitSHA ||
+				reference.TreeSHA != candidate.TreeSHA || strings.TrimSpace(reference.CompletedAt) == "") {
+			return fmt.Errorf("acceptance proof %q references a stale validation receipt", proof.Identity)
+		}
 		for name, value := range map[string]string{
 			"positive": proof.PositiveEvidence, "negative": proof.NegativeEvidence,
 			"failure": proof.FailureEvidence, "mutation": proof.MutationEvidence,
@@ -648,10 +816,9 @@ func admitAcceptanceProofs(
 			"migration": proof.MigrationEvidence,
 		} {
 			value = strings.TrimSpace(value)
-			if value == "" ||
-				(required[name] && !strings.Contains(value, candidate.ID)) ||
-				(!required[name] && !strings.Contains(value, candidate.ID) &&
-					!strings.HasPrefix(value, "not-applicable:")) {
+			if value == "" || (!required[name] && !strings.Contains(value, candidate.ID) &&
+				!strings.HasPrefix(value, "not-applicable:") && proof.CandidateID == "") ||
+				(required[name] && proof.CandidateID == "" && !strings.Contains(value, candidate.ID)) {
 				return fmt.Errorf(
 					"acceptance %s evidence is insufficient for %s candidate %s",
 					name, candidate.Profile, candidate.ID,
@@ -680,6 +847,43 @@ func admitAcceptanceProofs(
 	return nil
 }
 
+func phaseOwnedAcceptance(rows []deliveryevidence.AcceptanceRow) bool {
+	for _, row := range rows {
+		if len(row.Obligations) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func validateValidationTraceability(
+	traces []ValidationTrace,
+	rows []deliveryevidence.AcceptanceRow,
+	candidate Candidate,
+) error {
+	if len(traces) != len(rows) {
+		return errors.New("every acceptance row requires one exhaustive validation trace")
+	}
+	required := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if row.Identity == "" || required[row.Identity] {
+			return errors.New("acceptance rows contain an invalid identity")
+		}
+		required[row.Identity] = true
+	}
+	seen := make(map[string]bool, len(traces))
+	for _, trace := range traces {
+		if !required[trace.Identity] || seen[trace.Identity] ||
+			trace.CandidateID != candidate.ID ||
+			trace.Phase != deliveryevidence.AssuranceExhaustiveValidation ||
+			trace.CommitSHA != candidate.CommitSHA || trace.TreeSHA != candidate.TreeSHA {
+			return errors.New("exhaustive validation trace is duplicate, foreign, or stale")
+		}
+		seen[trace.Identity] = true
+	}
+	return nil
+}
+
 func candidateRequiresMigrationEvidence(candidate *Candidate) bool {
 	for _, observation := range candidate.Effects {
 		if observation.Effect == EffectMigration || observation.Effect == EffectPersistentFormat {
@@ -698,8 +902,9 @@ func latestCandidate(record *runRecord) *Candidate {
 
 func missingReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
 	have := map[deliveryevidence.ReviewAxis]bool{}
+	iteration := currentReviewIteration(candidate)
 	for _, review := range candidate.Reviews {
-		if review.Completed {
+		if review.Completed && review.Iteration == iteration {
 			have[review.Axis] = true
 		}
 	}
@@ -710,6 +915,16 @@ func missingReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
 		}
 	}
 	return missing
+}
+
+func currentReviewIteration(candidate *Candidate) int {
+	if candidate.ReviewIteration > 0 {
+		return candidate.ReviewIteration
+	}
+	if len(candidate.Reviews) > 0 {
+		return candidate.Reviews[len(candidate.Reviews)-1].Iteration
+	}
+	return 1
 }
 
 func unresolvedFindingIDs(candidate *Candidate) []string {

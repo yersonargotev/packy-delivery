@@ -3,6 +3,7 @@ package issuedelivery
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -482,9 +483,16 @@ func TestAdvanceCandidateFailureInvalidatesReadinessUntilHeadChanges(t *testing.
 
 	failed := mustAdvance(t, module, request)
 	if failed.State != StateNeedsReview || failed.LocalReadiness != nil ||
-		failed.Candidate.Exhaustive != nil || len(failed.Candidate.Acceptance) != 0 ||
+		failed.Candidate.Exhaustive != nil || len(failed.Candidate.Acceptance) == 0 ||
+		!reflect.DeepEqual(failed.Candidate.Reviews, ready.Candidate.Reviews) ||
+		failed.Candidate.RepairDecision != ready.Candidate.RepairDecision ||
 		failed.NonLocal.CandidateFailure == nil {
 		t.Fatalf("candidate failure outcome=%#v", failed)
+	}
+	for _, proof := range failed.Candidate.Acceptance {
+		if proof.ValidationReceipt != nil {
+			t.Fatalf("candidate failure retained invalidated validation receipt: %#v", proof)
+		}
 	}
 	repairRequest := request
 	repairRequest.NonLocal = nil

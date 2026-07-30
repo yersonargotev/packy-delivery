@@ -131,6 +131,8 @@ func TestDecodeV2RejectsInvalidPersistedRepairDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	historical.Candidates[0].RepairDecision.Class = RepairCandidateChanging
+	historical.Candidates[0].RepairBatches = nil
+	historical.Candidates[0].LastRepairBatch = nil
 	historicalBytes, err := json.Marshal(historical)
 	if err != nil {
 		t.Fatal(err)

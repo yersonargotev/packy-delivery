@@ -13,10 +13,13 @@ import (
 )
 
 type fakeReviewExecutor struct {
-	mu        sync.Mutex
-	responses map[deliveryevidence.ReviewAxis][]CandidateReview
-	calls     map[deliveryevidence.ReviewAxis]int
-	hook      func(deliveryevidence.ReviewAxis)
+	mu                      sync.Mutex
+	responses               map[deliveryevidence.ReviewAxis][]CandidateReview
+	calls                   map[deliveryevidence.ReviewAxis]int
+	hook                    func(deliveryevidence.ReviewAxis)
+	missingNegative         bool
+	missingMigration        bool
+	checkDeferredValidation bool
 }
 
 type fakeCandidateRiskObserver struct {
@@ -59,23 +62,72 @@ func (f *fakeReviewExecutor) Review(_ context.Context, request ReviewRequest) (C
 	}
 	response.Axis = request.Axis
 	response.CandidateID = request.CandidateID
+	if response.Iteration == 0 && response.CommitSHA == "" && response.TreeSHA == "" {
+		response.Iteration, response.CommitSHA, response.TreeSHA =
+			request.Iteration, request.CommitSHA, request.TreeSHA
+	}
 	if response.Findings == nil {
 		response.Findings = []deliveryevidence.ReviewFinding{}
+	}
+	if request.Axis == deliveryevidence.ReviewSpec && response.Acceptance == nil {
+		for _, row := range request.AcceptanceRows {
+			response.Acceptance = append(response.Acceptance, AcceptanceProof{
+				CandidateID: request.CandidateID, Phase: deliveryevidence.AssuranceCandidateReview,
+				Identity: row.Identity, PositiveEvidence: "positive semantic reasoning",
+				NegativeEvidence: "negative semantic reasoning", FailureEvidence: "failure semantic reasoning",
+				MutationEvidence: "mutation semantic reasoning", CompatibilityEvidence: "compatibility semantic reasoning",
+				PreservationEvidence: "preservation semantic reasoning", MigrationEvidence: "migration semantic reasoning",
+				ReviewReceipt: &ReviewReceiptReference{
+					CandidateID: request.CandidateID, Axis: request.Axis,
+					Iteration: request.Iteration, CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+				},
+			})
+		}
+	}
+	if request.Axis == deliveryevidence.ReviewSpec && f.checkDeferredValidation {
+		for _, row := range request.AcceptanceRows {
+			deferred := false
+			for _, obligation := range row.Obligations {
+				if obligation.Kind == deliveryevidence.EvidenceValidation &&
+					obligation.Phase == deliveryevidence.AssuranceExhaustiveValidation {
+					deferred = true
+				}
+			}
+			if !deferred {
+				response.Findings = append(response.Findings, deliveryevidence.ReviewFinding{
+					ID: "premature-missing-validator", Axis: deliveryevidence.ReviewSpec,
+					Severity: deliveryevidence.SeverityP2, Authority: deliveryevidence.AuthoritySpecRequirement,
+					Citation: row.Identity, Location: "exhaustive-validation",
+					Evidence: "validator receipt is incorrectly required during candidate review",
+				})
+			}
+		}
+	}
+	if request.Axis == deliveryevidence.ReviewSpec {
+		for index := range response.Acceptance {
+			if f.missingNegative {
+				response.Acceptance[index].NegativeEvidence = ""
+			}
+			if f.missingMigration {
+				response.Acceptance[index].MigrationEvidence = ""
+			}
+		}
 	}
 	return response, nil
 }
 
 type fakeValidationExecutor struct {
-	mu                sync.Mutex
-	focusedCalls      int
-	exhaustiveCalls   int
-	invalidSandbox    bool
-	invalidCommand    bool
-	missingAcceptance bool
-	missingNegative   bool
-	missingMigration  bool
-	migrationNA       bool
-	afterExhaustive   func()
+	mu                 sync.Mutex
+	focusedCalls       int
+	exhaustiveCalls    int
+	invalidSandbox     bool
+	invalidCommand     bool
+	missingAcceptance  bool
+	missingNegative    bool
+	missingMigration   bool
+	migrationNA        bool
+	semanticAcceptance bool
+	afterExhaustive    func()
 }
 
 func (f *fakeValidationExecutor) Focused(_ context.Context, request ValidationRequest) (ValidationResult, error) {
@@ -99,7 +151,17 @@ func (f *fakeValidationExecutor) Exhaustive(_ context.Context, request Validatio
 	result.ValidatorSHA256 = strings.Repeat("e", 64)
 	result.ValidatorIdentityExpiresAt = "2030-01-01T00:00:00Z"
 	result.WorkspaceClean = true
+	phaseOwned := false
 	for _, row := range request.AcceptanceRows {
+		if len(row.Obligations) > 0 {
+			phaseOwned = true
+			result.Traceability = append(result.Traceability, ValidationTrace{
+				Identity: row.Identity, CandidateID: request.CandidateID,
+				Phase:     deliveryevidence.AssuranceExhaustiveValidation,
+				CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+			})
+			continue
+		}
 		binding := "candidate " + request.CandidateID
 		proof := AcceptanceProof{
 			Identity: row.Identity, PositiveEvidence: binding + " positive",
@@ -118,8 +180,18 @@ func (f *fakeValidationExecutor) Exhaustive(_ context.Context, request Validatio
 		}
 		result.Acceptance = append(result.Acceptance, proof)
 	}
-	if f.missingAcceptance && len(result.Acceptance) > 0 {
-		result.Acceptance = result.Acceptance[:len(result.Acceptance)-1]
+	if phaseOwned && f.semanticAcceptance && len(request.AcceptanceRows) > 0 {
+		result.Acceptance = []AcceptanceProof{{
+			Identity:         request.AcceptanceRows[0].Identity,
+			PositiveEvidence: "validator-authored semantic prose",
+		}}
+	}
+	if f.missingAcceptance {
+		if phaseOwned && len(result.Traceability) > 0 {
+			result.Traceability = result.Traceability[:len(result.Traceability)-1]
+		} else if len(result.Acceptance) > 0 {
+			result.Acceptance = result.Acceptance[:len(result.Acceptance)-1]
+		}
 	}
 	if f.afterExhaustive != nil {
 		f.afterExhaustive()
@@ -373,8 +445,7 @@ func TestAdvanceBoundedRepairUsesFocusedOriginatingAxisConfirmation(t *testing.T
 		t.Fatalf("bounded candidate=%#v", repaired)
 	}
 	confirmed := mustAdvance(t, module, request)
-	if confirmed.State != StateNeedsReview || len(confirmed.Candidate.Reviews) != 1 ||
-		confirmed.Candidate.Reviews[0].Axis != deliveryevidence.ReviewStandards {
+	if confirmed.State != StateNeedsReview || len(confirmed.Candidate.Reviews) != 2 {
 		t.Fatalf("bounded confirmation=%#v", confirmed)
 	}
 	ready := mustAdvance(t, module, request)
@@ -382,7 +453,7 @@ func TestAdvanceBoundedRepairUsesFocusedOriginatingAxisConfirmation(t *testing.T
 		t.Fatalf("bounded readiness=%#v", ready)
 	}
 	if reviewer.calls[deliveryevidence.ReviewStandards] != 2 ||
-		reviewer.calls[deliveryevidence.ReviewSpec] != 1 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != 2 ||
 		validator.focusedCalls != 2 || validator.exhaustiveCalls != 1 {
 		t.Fatalf("calls reviews=%v focused=%d exhaustive=%d", reviewer.calls, validator.focusedCalls, validator.exhaustiveCalls)
 	}
@@ -513,7 +584,7 @@ func TestAdvanceRejectsRepairDecisionForStaleGitCheckout(t *testing.T) {
 }
 
 func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *testing.T) {
-	module, _, _, reviewer, validator := assuranceFixture(t)
+	module, git, _, reviewer, validator := assuranceFixture(t)
 	standardsFinding := deliveryevidence.ReviewFinding{
 		ID: "S357-4", Axis: deliveryevidence.ReviewStandards, Severity: deliveryevidence.SeverityP2,
 		Authority: deliveryevidence.AuthorityDocumentedStandard, Citation: "AGENTS.md",
@@ -578,6 +649,270 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 	if ready.State != StateWaiting || ready.LocalReadiness == nil ||
 		validator.focusedCalls != 1 || validator.exhaustiveCalls != 1 {
 		t.Fatalf("adjudication-only readiness=%#v", ready)
+	}
+	risk := module.risk.(*fakeCandidateRiskObserver)
+	risk.effects = []EffectObservation{{
+		Effect: EffectOrdinaryBehavior, Evidence: "standard behavior", Complete: true,
+	}}
+	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
+		Completed: true,
+		Findings: []deliveryevidence.ReviewFinding{{
+			ID: "S357-escalated", Axis: deliveryevidence.ReviewStandards,
+			Severity:  deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthorityDocumentedStandard,
+			Citation:  "AGENTS.md", Location: "internal/issuedelivery/assurance.go",
+			Evidence: "fresh escalated review finding",
+		}},
+	}}
+	escalated := mustAdvance(t, module, request)
+	if escalated.State != StateNeedsReview ||
+		escalated.Candidate.ReviewIteration != len(before.Reviews)+1 ||
+		!reflect.DeepEqual(escalated.Candidate.Reviews, before.Reviews) ||
+		escalated.Candidate.RepairDecision == nil ||
+		escalated.Candidate.RepairDecision.Class != RepairAdjudicationOnly ||
+		len(escalated.Candidate.Acceptance) != 0 || escalated.Candidate.Exhaustive != nil {
+		t.Fatalf("adjudicated profile escalation lost review history: %#v", escalated)
+	}
+	rereviewed := mustAdvance(t, module, request)
+	if len(rereviewed.Candidate.Reviews) != len(before.Reviews)+2 ||
+		!reflect.DeepEqual(rereviewed.Candidate.Reviews[:len(before.Reviews)], before.Reviews) ||
+		rereviewed.Candidate.RepairDecision == nil || rereviewed.Repair == nil ||
+		!reflect.DeepEqual(rereviewed.Repair.FindingIDs, []string{"S357-escalated"}) {
+		t.Fatalf("profile escalation re-review did not append history: %#v", rereviewed)
+	}
+	resumedFinding := mustAdvance(t, module, request)
+	if !reflect.DeepEqual(resumedFinding.Repair, rereviewed.Repair) ||
+		!reflect.DeepEqual(resumedFinding.Candidate.RepairDecision, rereviewed.Candidate.RepairDecision) {
+		t.Fatalf("pending escalated finding did not resume: %#v", resumedFinding)
+	}
+	pendingBytes := persistedAssuranceRun(t, module, git)
+	for _, test := range []struct {
+		name   string
+		mutate func(*Candidate)
+	}{
+		{"missing historical disposition", func(candidate *Candidate) {
+			candidate.RepairDecision.Findings = candidate.RepairDecision.Findings[1:]
+		}},
+		{"historical disposition claims pending finding", func(candidate *Candidate) {
+			candidate.RepairDecision.Findings[0].FindingID = "S357-escalated"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := decodeRun(pendingBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&record.Candidates[len(record.Candidates)-1])
+			if err := validateRun(record); err == nil {
+				t.Fatal("tampered cumulative historical disposition was admitted")
+			}
+		})
+	}
+	escalatedDecision := RepairDecision{
+		CandidateID: rereviewed.Candidate.ID, Class: RepairAdjudicationOnly,
+		Findings: []FindingDecision{{
+			FindingID: "S357-escalated", Disposition: FindingRejected,
+			Evidence: "escalated evidence disproves finding",
+		}},
+	}
+	readjudicated := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, Repair: &escalatedDecision,
+	})
+	if readjudicated.Candidate.RepairDecision == nil ||
+		len(readjudicated.Candidate.RepairDecision.Findings) != 3 ||
+		unresolvedFindingIDs(readjudicated.Candidate) != nil {
+		t.Fatalf("escalated adjudication was not cumulative: %#v", readjudicated)
+	}
+	replayed := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, Repair: &escalatedDecision,
+	})
+	if !reflect.DeepEqual(replayed.Candidate.RepairDecision, readjudicated.Candidate.RepairDecision) ||
+		len(replayed.Timing) != len(readjudicated.Timing) {
+		t.Fatalf("escalated adjudication replay changed persisted history: %#v", replayed)
+	}
+	for _, invalid := range []RepairDecision{
+		{
+			CandidateID: escalatedDecision.CandidateID, Class: RepairAdjudicationOnly,
+			Findings: append(append([]FindingDecision(nil), escalatedDecision.Findings...),
+				escalatedDecision.Findings[0]),
+		},
+		{
+			CandidateID: escalatedDecision.CandidateID, Class: RepairBounded,
+			Findings: escalatedDecision.Findings,
+		},
+		{
+			CandidateID: escalatedDecision.CandidateID, Class: RepairAdjudicationOnly,
+			Findings: []FindingDecision{{
+				FindingID: "S357-escalated", Disposition: FindingAccepted,
+				Evidence: "accepted instead",
+			}},
+		},
+	} {
+		if _, err := module.Advance(context.Background(), Request{
+			RepositoryPath: "/repo", IssueNumber: 357, Repair: &invalid,
+		}); err == nil {
+			t.Fatalf("invalid last-batch replay was admitted: %#v", invalid)
+		}
+	}
+	lastBatchBytes := persistedAssuranceRun(t, module, git)
+	for _, mutate := range []func(*RepairBatchReceipt){
+		func(receipt *RepairBatchReceipt) { receipt.RequestID = "tampered" },
+		func(receipt *RepairBatchReceipt) { receipt.Decision.Class = RepairBounded },
+		func(receipt *RepairBatchReceipt) {
+			receipt.Decision.Findings[0].Evidence = "tampered evidence"
+		},
+	} {
+		record, err := decodeRun(lastBatchBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(record.Candidates[len(record.Candidates)-1].LastRepairBatch)
+		if err := validateRun(record); err == nil {
+			t.Fatal("tampered last repair batch was admitted")
+		}
+	}
+	orphaned, err := decodeRun(lastBatchBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphaned.Candidates[len(orphaned.Candidates)-1].RepairDecision = nil
+	if err := validateRun(orphaned); err == nil {
+		t.Fatal("orphaned last repair batch was admitted")
+	}
+}
+
+func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing.T) {
+	module, git, _, reviewer, _ := assuranceFixture(t)
+	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{{
+			ID: "accepted-first", Axis: deliveryevidence.ReviewStandards,
+			Severity:  deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthorityDocumentedStandard,
+			Citation:  "AGENTS.md", Location: "internal/issuedelivery/assurance.go",
+			Evidence: "candidate-changing repair needed",
+		}},
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	found := mustAdvance(t, module, request)
+	accepted := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357,
+		Repair: &RepairDecision{
+			CandidateID: found.Candidate.ID, Class: RepairCandidateChanging,
+			Findings: []FindingDecision{{
+				FindingID: "accepted-first", Disposition: FindingAccepted,
+				Evidence: "repair as candidate-changing batch",
+			}},
+		},
+	})
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, decodeErr := decodeRun(data)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			current := &record.Candidates[len(record.Candidates)-1]
+			current.RepairBatches = nil
+			current.LastRepairBatch = nil
+			encoded, encodeErr := encodeRun(record)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			_, storeErr := store.storeRevisionAndActivate(record.ID, encoded)
+			return storeErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
+		Completed: true, Findings: []deliveryevidence.ReviewFinding{{
+			ID: "rejected-second", Axis: deliveryevidence.ReviewSpec,
+			Severity:  deliveryevidence.SeverityP2,
+			Authority: deliveryevidence.AuthoritySpecRequirement,
+			Citation:  "issue#357", Location: "internal/issuedelivery/assurance.go",
+			Evidence: "fresh escalation finding",
+		}},
+	}}
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
+		Effect: EffectOrdinaryBehavior, Evidence: "standard behavior", Complete: true,
+	}}
+	escalated := mustAdvance(t, module, request)
+	if escalated.Candidate.ID != accepted.Candidate.ID {
+		t.Fatalf("profile escalation changed candidate: %#v", escalated)
+	}
+	second := mustAdvance(t, module, request)
+	merged := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357,
+		Repair: &RepairDecision{
+			CandidateID: second.Candidate.ID, Class: RepairAdjudicationOnly,
+			Findings: []FindingDecision{{
+				FindingID: "rejected-second", Disposition: FindingRejected,
+				Evidence: "evidence rejects fresh finding",
+			}},
+		},
+	})
+	if merged.Candidate.RepairDecision.Class != RepairCandidateChanging ||
+		!strings.Contains(merged.Reason, "accepted findings") {
+		t.Fatalf("later rejection downgraded accepted repair: %#v", merged)
+	}
+	persisted := persistedAssuranceRun(t, module, git)
+	resumedRecord, err := decodeRun(persisted)
+	if err != nil {
+		t.Fatalf("cumulative accepted repair did not resume: %v", err)
+	}
+	resumedCandidate := &resumedRecord.Candidates[len(resumedRecord.Candidates)-1]
+	if len(resumedCandidate.RepairBatches) != 2 ||
+		!resumedCandidate.RepairBatches[0].CompatiblePrefix ||
+		resumedCandidate.LastRepairBatch == nil ||
+		resumedCandidate.LastRepairBatch.CompatiblePrefix {
+		t.Fatalf("historyless v2 repair was not bootstrapped: %#v", resumedCandidate)
+	}
+	for _, mutate := range []func(*Candidate){
+		func(candidate *Candidate) { candidate.RepairDecision.Class = RepairBounded },
+		func(candidate *Candidate) {
+			for index := range candidate.RepairDecision.Findings {
+				candidate.RepairDecision.Findings[index].Disposition = FindingRejected
+			}
+		},
+	} {
+		record, err := decodeRun(persisted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(&record.Candidates[len(record.Candidates)-1])
+		if err := validateRun(record); err == nil {
+			t.Fatal("tampered cumulative repair history was admitted")
+		}
+	}
+	compatible, err := decodeRun(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compatibleCandidate := &compatible.Candidates[len(compatible.Candidates)-1]
+	for index := range compatibleCandidate.RepairDecision.Findings {
+		if compatibleCandidate.RepairDecision.Findings[index].FindingID == "accepted-first" {
+			compatibleCandidate.RepairDecision.Findings[index].Disposition = FindingRejected
+		}
+	}
+	compatibleCandidate.RepairBatches[0].Decision.Findings[0].Disposition = FindingRejected
+	if err := validateRun(compatible); err != nil {
+		t.Fatalf("compatible candidate-changing rejected-only prefix failed validation: %v", err)
+	}
+	compatibleCandidate.RepairBatches[0].CompatiblePrefix = false
+	if err := validateRun(compatible); err == nil {
+		t.Fatal("tampered compatible repair prefix was admitted")
+	}
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+	next := mustAdvance(t, module, request)
+	if next.Candidate.RepairClass != RepairCandidateChanging {
+		t.Fatalf("new candidate did not inherit strongest repair class: %#v", next.Candidate)
 	}
 }
 
@@ -801,6 +1136,20 @@ func TestAdvanceBlocksIncompleteAcceptanceTraceability(t *testing.T) {
 	}
 }
 
+func TestAdvanceRejectsValidatorAuthoredSemanticAcceptance(t *testing.T) {
+	module, _, _, _, validator := assuranceFixture(t)
+	validator.semanticAcceptance = true
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 3 {
+		mustAdvance(t, module, request)
+	}
+	blocked := mustAdvance(t, module, request)
+	if blocked.State != StateBlocked ||
+		!strings.Contains(blocked.Reason, "forbidden semantic acceptance prose") {
+		t.Fatalf("validator semantic acceptance outcome=%#v", blocked)
+	}
+}
+
 func mustAdvance(t *testing.T, module *Module, request Request) Outcome {
 	t.Helper()
 	outcome, err := module.Advance(context.Background(), request)
@@ -808,4 +1157,389 @@ func mustAdvance(t *testing.T, module *Module, request Request) Outcome {
 		t.Fatal(err)
 	}
 	return outcome
+}
+
+func TestSpecReviewSeesDeferredValidatorObligationWithoutPrematureFinding(t *testing.T) {
+	module, _, _, reviewer, _ := assuranceFixture(t)
+	reviewer.checkDeferredValidation = true
+	var observed bool
+	reviewer.hook = func(axis deliveryevidence.ReviewAxis) {
+		if axis == deliveryevidence.ReviewSpec {
+			observed = true
+		}
+	}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 3 {
+		mustAdvance(t, module, request)
+	}
+	outcome := mustAdvance(t, module, request)
+	if !observed || outcome.State == StateBlocked || outcome.State == StateNeedsDecision {
+		t.Fatalf("pre-validation Spec review treated deferred validator evidence as missing: %#v", outcome)
+	}
+	for _, review := range outcome.Candidate.Reviews {
+		for _, finding := range review.Findings {
+			if finding.ID == "premature-missing-validator" {
+				t.Fatalf("Spec review manufactured premature validator finding: %#v", review)
+			}
+		}
+	}
+}
+
+func TestValidationTraceabilityRejectsDuplicateForeignAndStaleRows(t *testing.T) {
+	candidate := Candidate{ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40)}
+	rows := []deliveryevidence.AcceptanceRow{{Identity: "AC-1"}, {Identity: "AC-2"}}
+	valid := []ValidationTrace{
+		{Identity: "AC-1", CandidateID: candidate.ID, Phase: deliveryevidence.AssuranceExhaustiveValidation, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA},
+		{Identity: "AC-2", CandidateID: candidate.ID, Phase: deliveryevidence.AssuranceExhaustiveValidation, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA},
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func([]ValidationTrace)
+	}{
+		{"duplicate", func(traces []ValidationTrace) { traces[1].Identity = "AC-1" }},
+		{"foreign", func(traces []ValidationTrace) { traces[1].Identity = "AC-3" }},
+		{"candidate", func(traces []ValidationTrace) { traces[1].CandidateID = "stale" }},
+		{"phase", func(traces []ValidationTrace) { traces[1].Phase = deliveryevidence.AssuranceCandidateReview }},
+		{"commit", func(traces []ValidationTrace) { traces[1].CommitSHA = strings.Repeat("c", 40) }},
+		{"tree", func(traces []ValidationTrace) { traces[1].TreeSHA = strings.Repeat("d", 40) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			traces := append([]ValidationTrace(nil), valid...)
+			test.mutate(traces)
+			if err := validateValidationTraceability(traces, rows, candidate); err == nil {
+				t.Fatal("invalid exhaustive traceability was admitted")
+			}
+		})
+	}
+}
+
+func TestCandidateReviewRejectsStaleReturnedIdentityAndReceipt(t *testing.T) {
+	candidate := Candidate{ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40)}
+	proof := AcceptanceProof{
+		CandidateID: candidate.ID, Phase: deliveryevidence.AssuranceCandidateReview, Identity: "AC-1",
+		PositiveEvidence: "positive", NegativeEvidence: "negative", FailureEvidence: "failure",
+		MutationEvidence: "mutation", CompatibilityEvidence: "compatibility",
+		PreservationEvidence: "preservation", MigrationEvidence: "migration",
+		ReviewReceipt: &ReviewReceiptReference{
+			CandidateID: candidate.ID, Axis: deliveryevidence.ReviewSpec, Iteration: 1,
+			CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+		},
+	}
+	valid := CandidateReview{
+		CandidateID: candidate.ID, Axis: deliveryevidence.ReviewSpec, Iteration: 1,
+		CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+		Findings: []deliveryevidence.ReviewFinding{}, Acceptance: []AcceptanceProof{proof}, Completed: true,
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CandidateReview)
+	}{
+		{"iteration", func(review *CandidateReview) { review.Iteration = 2 }},
+		{"commit", func(review *CandidateReview) { review.CommitSHA = strings.Repeat("c", 40) }},
+		{"tree", func(review *CandidateReview) { review.TreeSHA = strings.Repeat("d", 40) }},
+		{"missing receipt", func(review *CandidateReview) { review.Acceptance[0].ReviewReceipt = nil }},
+		{"tampered receipt", func(review *CandidateReview) { review.Acceptance[0].ReviewReceipt.Iteration = 2 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			review := valid
+			review.Acceptance = append([]AcceptanceProof(nil), valid.Acceptance...)
+			receipt := *valid.Acceptance[0].ReviewReceipt
+			review.Acceptance[0].ReviewReceipt = &receipt
+			test.mutate(&review)
+			if err := validateCandidateReview(
+				review, candidate, []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec}, 1,
+			); err == nil {
+				t.Fatal("stale returned review identity was admitted")
+			}
+		})
+	}
+}
+
+func TestPersistedAcceptanceMustMatchRetainedSpecReview(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	var record runRecord
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, loadErr = decodeRun(data)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &record.Candidates[len(record.Candidates)-1]
+	if len(current.Acceptance) == 0 {
+		t.Fatal("fixture lacks persisted acceptance proof")
+	}
+	current.Acceptance[0].PositiveEvidence = "tampered after Spec review"
+	if err := validateRun(record); err == nil ||
+		!strings.Contains(err.Error(), "does not match its completed Spec review") {
+		t.Fatalf("tampered persisted acceptance validation error=%v", err)
+	}
+}
+
+func TestPersistedAcceptanceRequiresCurrentSpecReview(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	record, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &record.Candidates[len(record.Candidates)-1]
+	current.ReviewIteration = len(current.Reviews) + 1
+	if err := validateRun(record); err == nil ||
+		!strings.Contains(err.Error(), "lacks a completed current Spec review") {
+		t.Fatalf("fabricated pre-review acceptance validation error=%v", err)
+	}
+}
+
+func TestPersistedReviewIterationsMustFollowCanonicalBatchSequence(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	record, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := &record.Candidates[len(record.Candidates)-1]
+	current.ReviewIteration++
+	for reviewIndex := range current.Reviews {
+		current.Reviews[reviewIndex].Iteration++
+		for proofIndex := range current.Reviews[reviewIndex].Acceptance {
+			current.Reviews[reviewIndex].Acceptance[proofIndex].ReviewReceipt.Iteration++
+		}
+	}
+	for proofIndex := range current.Acceptance {
+		current.Acceptance[proofIndex].ReviewReceipt.Iteration++
+	}
+	if err := validateRun(record); err == nil ||
+		!strings.Contains(err.Error(), "review iteration sequence") {
+		t.Fatalf("self-consistent stale review iteration validation error=%v", err)
+	}
+}
+
+func TestSupersededCandidateRequiresExactValidationReceiptReference(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	git.value.TreeSHA = strings.Repeat("e", 40)
+	mustAdvance(t, module, request)
+
+	var persisted []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			persisted = append([]byte(nil), data...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := decodeRun(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseline.Candidates) < 2 || baseline.Candidates[0].Exhaustive == nil ||
+		len(baseline.Candidates[0].Acceptance) == 0 ||
+		baseline.Candidates[0].Acceptance[0].ValidationReceipt == nil {
+		t.Fatalf("fixture lacks superseded exhaustive candidate: %#v", baseline.Candidates)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*AcceptanceProof)
+	}{
+		{"removed", func(proof *AcceptanceProof) { proof.ValidationReceipt = nil }},
+		{"schema", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.Schema = "packy.exhaustive-validation/unknown"
+		}},
+		{"candidate", func(proof *AcceptanceProof) { proof.ValidationReceipt.CandidateID = "stale" }},
+		{"commit", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.CommitSHA = strings.Repeat("f", 40)
+		}},
+		{"tree", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.TreeSHA = strings.Repeat("f", 40)
+		}},
+		{"completedAt", func(proof *AcceptanceProof) {
+			proof.ValidationReceipt.CompletedAt = "2026-07-30T23:59:59Z"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, decodeErr := decodeRun(persisted)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			proof := &record.Candidates[0].Acceptance[0]
+			if proof.ValidationReceipt != nil {
+				reference := *proof.ValidationReceipt
+				proof.ValidationReceipt = &reference
+			}
+			test.mutate(proof)
+			if err := validateRun(record); err == nil {
+				t.Fatalf("superseded %s reference validation error=%v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestPhaseOwnedPersistedCandidateRequiresCompleteExhaustiveAssurance(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	currentBytes := persistedAssuranceRun(t, module, git)
+	t.Run("current acceptance removed", func(t *testing.T) {
+		record, err := decodeRun(currentBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.Candidates[len(record.Candidates)-1].Acceptance = nil
+		if err := validateRun(record); err == nil {
+			t.Fatal("current exhaustive candidate admitted a removed acceptance slice")
+		}
+	})
+
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	git.value.TreeSHA = strings.Repeat("e", 40)
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	supersededBytes := persistedAssuranceRun(t, module, git)
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*runRecord)
+	}{
+		{"superseded acceptance removed", func(record *runRecord) {
+			record.Candidates[0].Acceptance = nil
+		}},
+		{"superseded Standards review removed", func(record *runRecord) {
+			reviews := record.Candidates[0].Reviews[:0]
+			for _, review := range record.Candidates[0].Reviews {
+				if review.Axis != deliveryevidence.ReviewStandards {
+					reviews = append(reviews, review)
+				}
+			}
+			record.Candidates[0].Reviews = reviews
+		}},
+		{"superseded Spec review removed", func(record *runRecord) {
+			reviews := record.Candidates[0].Reviews[:0]
+			for _, review := range record.Candidates[0].Reviews {
+				if review.Axis != deliveryevidence.ReviewSpec {
+					reviews = append(reviews, review)
+				}
+			}
+			record.Candidates[0].Reviews = reviews
+		}},
+		{"superseded proof missing", func(record *runRecord) {
+			record.Candidates[0].Acceptance = record.Candidates[0].Acceptance[:1]
+		}},
+		{"superseded proof duplicate", func(record *runRecord) {
+			record.Candidates[0].Acceptance[1].Identity =
+				record.Candidates[0].Acceptance[0].Identity
+		}},
+		{"superseded proof foreign", func(record *runRecord) {
+			record.Candidates[0].Acceptance[1].Identity = "criterion-foreign"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			record, err := decodeRun(supersededBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&record)
+			if err := validateRun(record); err == nil {
+				t.Fatal("incomplete superseded exhaustive assurance was admitted")
+			}
+		})
+	}
+
+	t.Run("pre-exhaustive validation reference", func(t *testing.T) {
+		record, err := decodeRun(supersededBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		current := &record.Candidates[len(record.Candidates)-1]
+		if current.Exhaustive != nil || len(current.Acceptance) == 0 {
+			t.Fatalf("fixture is not a pre-exhaustive reviewed candidate: %#v", current)
+		}
+		current.Acceptance[0].ValidationReceipt = &ValidationReceiptReference{
+			Schema: deliveryevidence.ValidationReceiptV1, CandidateID: current.ID,
+			CommitSHA: current.CommitSHA, TreeSHA: current.TreeSHA,
+			CompletedAt: "2026-07-30T23:59:59Z",
+		}
+		if err := validateRun(record); err == nil ||
+			!strings.Contains(err.Error(), "premature acceptance validation reference") {
+			t.Fatalf("forged pre-exhaustive reference validation error=%v", err)
+		}
+	})
+}
+
+func persistedAssuranceRun(
+	t *testing.T,
+	module *Module,
+	git *fakeGitObserver,
+) []byte {
+	t.Helper()
+	var persisted []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			persisted = append([]byte(nil), data...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return persisted
+}
+
+func TestAcceptanceProofRejectsStaleStructuralReceiptIdentity(t *testing.T) {
+	candidate := Candidate{
+		ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
+	}
+	proof := AcceptanceProof{
+		CandidateID: "candidate", Phase: deliveryevidence.AssuranceCandidateReview, Identity: "AC-1",
+		PositiveEvidence: "positive", NegativeEvidence: "negative", FailureEvidence: "failure",
+		MutationEvidence: "mutation", CompatibilityEvidence: "compatibility",
+		PreservationEvidence: "preservation", MigrationEvidence: "migration",
+		ReviewReceipt: &ReviewReceiptReference{
+			CandidateID: "candidate", Axis: deliveryevidence.ReviewSpec, Iteration: 1,
+			CommitSHA: candidate.CommitSHA, TreeSHA: strings.Repeat("c", 40),
+		},
+	}
+	evidence := &deliveryevidence.Bundle{AcceptanceMatrix: []deliveryevidence.AcceptanceRow{{
+		Identity: "AC-1", Obligations: deliveryevidence.PhaseOwnedAcceptanceObligations(),
+	}}}
+	if err := admitAcceptanceProofs(evidence, &candidate, []AcceptanceProof{proof}); err == nil ||
+		!strings.Contains(err.Error(), "stale review receipt") {
+		t.Fatalf("stale receipt admission error=%v", err)
+	}
 }

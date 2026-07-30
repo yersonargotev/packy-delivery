@@ -511,6 +511,176 @@ func TestQualificationSeamValidationAllowsProofsButRejectsUnreviewedOwnership(t 
 	if qualificationSeamsMatchCorrection(proved, corrected) {
 		t.Fatal("unreviewed qualification seam was accepted")
 	}
+	proved[0].OwningSeam = corrected[0].OwningSeam
+	proved[0].Obligations = deliveryevidence.PhaseOwnedAcceptanceObligations()
+	if qualificationSeamsMatchCorrection(proved, corrected) {
+		t.Fatal("unreviewed qualification ownership was accepted")
+	}
+}
+
+func TestLiveQualificationCorrectionRejectsOwnershipErasureBeforePersist(t *testing.T) {
+	t.Run("compiler-originated", func(t *testing.T) {
+		fixture := assuranceFixtureWithoutQualification(t)
+		module, git := fixture.module, fixture.git
+		request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+		pending, err := module.Advance(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		correction := compilerQualificationCorrectionForTest(
+			pending.QualificationCorrection,
+			completeCompilerRowsForOwnershipTest(pending.Evidence.AcceptanceMatrix),
+			"mapped compiler findings to exact phase-owned acceptance seams",
+		)
+		correction.AcceptanceMatrix[0].Obligations = nil
+		before, revisions := qualificationActiveSnapshot(t, module, git, 357, pending.RunID)
+		if _, err = module.Advance(context.Background(), Request{
+			RepositoryPath: "/repo", IssueNumber: 357, QualificationCorrection: correction,
+		}); err == nil || !strings.Contains(err.Error(), "preserve traceability") {
+			t.Fatalf("compiler ownership erasure error=%v", err)
+		}
+		assertQualificationSnapshotUnchanged(t, module, git, 357, pending.RunID, before, revisions)
+		resumed, err := module.Advance(context.Background(), request)
+		if err != nil || resumed.QualificationCorrection == nil ||
+			resumed.QualificationCorrection.ID != pending.QualificationCorrection.ID {
+			t.Fatalf("compiler correction did not remain resumable: %#v error=%v", resumed, err)
+		}
+	})
+
+	t.Run("reviewer-originated", func(t *testing.T) {
+		fixture := assuranceFixtureWithoutQualification(t)
+		module, git := fixture.module, fixture.git
+		request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+		pending, err := module.Advance(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		corrected, err := module.Advance(context.Background(), Request{
+			RepositoryPath: "/repo", IssueNumber: 357,
+			QualificationCorrection: compilerQualificationCorrectionForTest(
+				pending.QualificationCorrection,
+				completeCompilerRowsForOwnershipTest(pending.Evidence.AcceptanceMatrix),
+				"mapped compiler findings to exact phase-owned acceptance seams",
+			),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		matrixDigest, err := acceptanceMatrixDigest(corrected.Evidence.AcceptanceMatrix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope := corrected.Evidence.Scope.OwnedNow[0]
+		rejected, err := module.Advance(context.Background(), Request{
+			RepositoryPath: "/repo", IssueNumber: 357,
+			QualificationReview: &QualificationReview{
+				AuthoritySHA256:        corrected.Observations.AuthoritySHA256,
+				AcceptanceMatrixSHA256: matrixDigest,
+				Findings: []deliveryevidence.ReviewFinding{{
+					ID: "reviewer-ownership-finding", Axis: deliveryevidence.ReviewSpec,
+					Severity: deliveryevidence.SeverityP2, Authority: deliveryevidence.AuthoritySpecRequirement,
+					Citation: scope.EvidenceLink, Location: scope.Identity,
+					Evidence: "reviewer requests one exact evidence correction",
+				}},
+				Completed: true,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := append([]deliveryevidence.AcceptanceRow(nil), rejected.Evidence.AcceptanceMatrix...)
+		rows[0].Obligations = nil
+		correction := &QualificationCorrection{
+			AuthoritySHA256:      rejected.Observations.AuthoritySHA256,
+			ReviewedMatrixSHA256: rejected.QualificationCorrection.ReviewedMatrixSHA256,
+			FindingIDs:           append([]string(nil), rejected.QualificationCorrection.FindingIDs...),
+			AcceptanceMatrix:     rows,
+			Evidence:             "reviewer correction preserves the exact acceptance evidence contract",
+		}
+		before, revisions := qualificationActiveSnapshot(t, module, git, 357, rejected.RunID)
+		if _, err = module.Advance(context.Background(), Request{
+			RepositoryPath: "/repo", IssueNumber: 357, QualificationCorrection: correction,
+		}); err == nil || !strings.Contains(err.Error(), "preserve traceability") {
+			t.Fatalf("reviewer ownership erasure error=%v", err)
+		}
+		assertQualificationSnapshotUnchanged(t, module, git, 357, rejected.RunID, before, revisions)
+		resumed, err := module.Advance(context.Background(), request)
+		if err != nil || resumed.QualificationCorrection == nil ||
+			!reflect.DeepEqual(
+				resumed.QualificationCorrection.FindingIDs,
+				rejected.QualificationCorrection.FindingIDs,
+			) {
+			t.Fatalf("reviewer correction did not remain resumable: %#v error=%v", resumed, err)
+		}
+	})
+}
+
+func completeCompilerRowsForOwnershipTest(
+	source []deliveryevidence.AcceptanceRow,
+) []deliveryevidence.AcceptanceRow {
+	rows := append([]deliveryevidence.AcceptanceRow(nil), source...)
+	for index := range rows {
+		rows[index].OwningSeam = "issuedelivery qualification ownership seam"
+		rows[index].PositiveEvidence = "planned observable positive behavior evidence"
+		rows[index].NegativeEvidence = "planned observable negative behavior evidence"
+		rows[index].FailureEvidence = "planned observable failure behavior evidence"
+		rows[index].MutationEvidence = "planned observable mutation boundary evidence"
+		rows[index].CompatibilityEvidence = "planned observable compatibility contract evidence"
+		rows[index].PreservationEvidence = "planned observable preservation contract evidence"
+	}
+	return rows
+}
+
+func qualificationActiveSnapshot(
+	t *testing.T,
+	module *Module,
+	git *fakeGitObserver,
+	issue int,
+	runID string,
+) ([]byte, int) {
+	t.Helper()
+	var active []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, issue,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			active = append([]byte(nil), data...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(module.storePathForTest(t, issue), "revisions", runID))
+	if os.IsNotExist(err) {
+		return active, 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return active, len(entries)
+}
+
+func assertQualificationSnapshotUnchanged(
+	t *testing.T,
+	module *Module,
+	git *fakeGitObserver,
+	issue int,
+	runID string,
+	want []byte,
+	wantRevisions int,
+) {
+	t.Helper()
+	got, revisions := qualificationActiveSnapshot(t, module, git, issue, runID)
+	if !bytes.Equal(got, want) || revisions != wantRevisions {
+		t.Fatalf(
+			"invalid qualification correction mutated active state: bytes_equal=%t revisions=%d want=%d",
+			bytes.Equal(got, want), revisions, wantRevisions,
+		)
+	}
 }
 
 func TestSpecificQualificationTextRejectsGenericAndMarkerVariants(t *testing.T) {
@@ -734,6 +904,85 @@ func TestQualificationHistoryRejectsSelfConsistentForgedCompilerRequest(t *testi
 				t.Fatalf("forged compiler correction validation error = %v", err)
 			}
 		})
+	}
+}
+
+func TestQualificationHistoryPreservesLegacyAndNewCompilerOwnership(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	var record runRecord
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, 357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, loadErr = decodeRun(data)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	erased := record
+	erased.QualificationCorrections = append(
+		[]QualificationCorrection(nil), record.QualificationCorrections...,
+	)
+	erased.QualificationCorrections[0].AcceptanceMatrix = append(
+		[]deliveryevidence.AcceptanceRow(nil),
+		record.QualificationCorrections[0].AcceptanceMatrix...,
+	)
+	for index := range erased.QualificationCorrections[0].AcceptanceMatrix {
+		erased.QualificationCorrections[0].AcceptanceMatrix[index].Obligations = nil
+	}
+	if err := validateQualificationHistory(erased); err == nil {
+		t.Fatalf("new compiler ownership erasure error=%v", err)
+	}
+
+	legacy := record
+	legacyEvidence := *record.Evidence
+	legacyEvidence.AcceptanceMatrix = append(
+		[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
+	)
+	for index := range legacyEvidence.AcceptanceMatrix {
+		legacyEvidence.AcceptanceMatrix[index].Obligations = nil
+	}
+	legacy.Evidence = &legacyEvidence
+	legacy.QualificationCorrections = append(
+		[]QualificationCorrection(nil), record.QualificationCorrections...,
+	)
+	correction := &legacy.QualificationCorrections[0]
+	correction.AcceptanceMatrix = append(
+		[]deliveryevidence.AcceptanceRow(nil), correction.AcceptanceMatrix...,
+	)
+	for index := range correction.AcceptanceMatrix {
+		correction.AcceptanceMatrix[index].Obligations = nil
+	}
+	original, err := originalCompilerQualificationEvidence(record.Evidence, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := compilerQualificationCorrectionRequest(record.AuthoritySHA256, original)
+	if err != nil || expected == nil {
+		t.Fatal(err)
+	}
+	correction.RequestID = expected.ID
+	correction.ReviewedMatrixSHA256 = expected.ReviewedMatrixSHA256
+	correction.FindingIDs = expected.FindingIDs
+	correction.Evidence = "[request:" + expected.ID + "] findings=" +
+		strings.Join(expected.FindingIDs, ",") +
+		"; rationale=preserved historical compiler correction representation"
+	legacy.QualificationReviews = append(
+		[]QualificationReview(nil), record.QualificationReviews...,
+	)
+	legacyDigest, err := acceptanceMatrixDigest(legacy.Evidence.AcceptanceMatrix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.QualificationReviews[len(legacy.QualificationReviews)-1].AcceptanceMatrixSHA256 = legacyDigest
+	if err := validateQualificationHistory(legacy); err != nil {
+		t.Fatalf("historical no-obligations compiler correction is unreadable: %v", err)
 	}
 }
 

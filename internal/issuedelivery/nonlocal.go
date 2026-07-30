@@ -446,8 +446,10 @@ func alreadyRetried(retries []CIRetry, failure CICheckObservation) bool {
 
 func invalidateForCandidateCIFailure(record *runRecord, candidate *Candidate) {
 	record.LocalReadiness = nil
-	candidate.Acceptance = nil
 	candidate.Exhaustive = nil
+	for index := range candidate.Acceptance {
+		candidate.Acceptance[index].ValidationReceipt = nil
+	}
 	record.Evidence.ValidationReceipts = []deliveryevidence.ValidationReceipt{}
 	invalidateAcceptance(record.Evidence, record.QualificationCorrections)
 }
@@ -633,7 +635,7 @@ func validateNonLocalRecord(record runRecord, candidate Candidate) error {
 	}
 	if remote.CandidateFailure != nil {
 		failure := remote.CandidateFailure
-		if record.LocalReadiness != nil || candidate.Exhaustive != nil || len(candidate.Acceptance) != 0 ||
+		if record.LocalReadiness != nil || candidate.Exhaustive != nil ||
 			!containsCandidateFailure(remote.Checks, *failure) {
 			return errors.New("candidate-attributable CI failure did not invalidate stale readiness")
 		}

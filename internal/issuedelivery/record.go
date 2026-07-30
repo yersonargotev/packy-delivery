@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -289,18 +290,107 @@ func validateCandidates(record runRecord) error {
 			required[axis] = true
 		}
 		findingIDs := make(map[string]bool)
+		var reviewedAcceptance []AcceptanceProof
+		specReviewCompleted := false
+		completedReviews := make(map[deliveryevidence.ReviewAxis]int, len(candidate.RequiredReviews))
+		currentIteration := currentReviewIteration(&candidate)
+		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			lastIteration := 0
+			for reviewIndex, review := range candidate.Reviews {
+				if review.Iteration != lastIteration {
+					if review.Iteration != reviewIndex+1 {
+						return fmt.Errorf("issue delivery candidate review iteration sequence is invalid")
+					}
+					lastIteration = review.Iteration
+				}
+			}
+			if candidate.ReviewIteration > 0 &&
+				candidate.ReviewIteration != lastIteration &&
+				candidate.ReviewIteration != len(candidate.Reviews)+1 {
+				return fmt.Errorf("issue delivery candidate current review iteration is invalid")
+			}
+		}
+		batchAxes := make(map[int]map[deliveryevidence.ReviewAxis]bool)
 		for _, review := range candidate.Reviews {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
 			}
+			if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) &&
+				(review.Iteration < 1 || review.CommitSHA != candidate.CommitSHA ||
+					review.TreeSHA != candidate.TreeSHA) {
+				return fmt.Errorf("issue delivery candidate contains a stale review receipt")
+			}
+			if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+				if batchAxes[review.Iteration] == nil {
+					batchAxes[review.Iteration] = make(map[deliveryevidence.ReviewAxis]bool)
+				}
+				if batchAxes[review.Iteration][review.Axis] {
+					return fmt.Errorf("issue delivery candidate review iteration contains a duplicate axis")
+				}
+				batchAxes[review.Iteration][review.Axis] = true
+			}
 			if !review.Completed && len(review.Findings) != 0 {
 				return fmt.Errorf("incomplete issue delivery candidate review contains findings")
+			}
+			if !review.Completed && len(review.Acceptance) != 0 {
+				return fmt.Errorf("incomplete issue delivery candidate review contains acceptance proof")
 			}
 			for _, finding := range review.Findings {
 				if findingIDs[finding.ID] || strings.TrimSpace(finding.ID) == "" || finding.Axis != review.Axis {
 					return fmt.Errorf("issue delivery candidate contains an invalid finding")
 				}
 				findingIDs[finding.ID] = true
+			}
+			for _, proof := range review.Acceptance {
+				if proof.CandidateID != candidate.ID ||
+					proof.Phase != deliveryevidence.AssuranceCandidateReview ||
+					proof.ReviewReceipt == nil ||
+					proof.ReviewReceipt.CandidateID != review.CandidateID ||
+					proof.ReviewReceipt.Axis != review.Axis ||
+					proof.ReviewReceipt.Iteration != review.Iteration ||
+					proof.ReviewReceipt.CommitSHA != review.CommitSHA ||
+					proof.ReviewReceipt.TreeSHA != review.TreeSHA {
+					return fmt.Errorf("issue delivery candidate contains a stale acceptance review reference")
+				}
+			}
+			if review.Iteration == currentIteration &&
+				review.Axis == deliveryevidence.ReviewSpec && review.Completed {
+				reviewedAcceptance = review.Acceptance
+				specReviewCompleted = true
+			}
+			if review.Iteration == currentIteration && review.Completed {
+				completedReviews[review.Axis]++
+			}
+		}
+		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			if !specReviewCompleted {
+				if len(candidate.Acceptance) != 0 {
+					return fmt.Errorf("issue delivery candidate acceptance lacks a completed current Spec review")
+				}
+			} else {
+				candidateSemantic := append([]AcceptanceProof(nil), candidate.Acceptance...)
+				for proofIndex := range candidateSemantic {
+					candidateSemantic[proofIndex].ValidationReceipt = nil
+				}
+				if !reflect.DeepEqual(candidateSemantic, reviewedAcceptance) {
+					return fmt.Errorf("issue delivery candidate acceptance does not match its completed Spec review")
+				}
+			}
+		}
+		if candidate.Exhaustive != nil && phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			for axis := range required {
+				if completedReviews[axis] != 1 {
+					return fmt.Errorf("issue delivery exhaustive candidate lacks exactly one completed required review")
+				}
+			}
+			acceptanceEvidence := *record.Evidence
+			acceptanceEvidence.AcceptanceMatrix = append(
+				[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
+			)
+			if err := admitAcceptanceProofs(
+				&acceptanceEvidence, &candidate, candidate.Acceptance,
+			); err != nil {
+				return fmt.Errorf("issue delivery exhaustive candidate acceptance is incomplete: %w", err)
 			}
 		}
 		for _, proof := range []*ValidationProof{candidate.Focused, candidate.Exhaustive} {
@@ -328,6 +418,56 @@ func validateCandidates(record runRecord) error {
 				!candidate.Exhaustive.Result.WorkspaceClean) {
 			return fmt.Errorf("issue delivery candidate contains an invalid exhaustive proof")
 		}
+		if candidate.Exhaustive != nil && phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			if len(candidate.Exhaustive.Result.Acceptance) != 0 ||
+				validateValidationTraceability(
+					candidate.Exhaustive.Result.Traceability,
+					record.Evidence.AcceptanceMatrix,
+					candidate,
+				) != nil {
+				return fmt.Errorf("issue delivery candidate contains invalid exhaustive acceptance traceability")
+			}
+		}
+		for _, proof := range candidate.Acceptance {
+			if !phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+				break
+			}
+			if proof.CandidateID != candidate.ID ||
+				proof.Phase != deliveryevidence.AssuranceCandidateReview {
+				return fmt.Errorf("issue delivery candidate contains a stale acceptance proof")
+			}
+			if candidate.Exhaustive == nil && proof.ValidationReceipt != nil {
+				return fmt.Errorf("issue delivery candidate contains a premature acceptance validation reference")
+			}
+			if candidate.Exhaustive != nil {
+				reference := proof.ValidationReceipt
+				if reference == nil ||
+					reference.Schema != deliveryevidence.ValidationReceiptV1 ||
+					reference.CandidateID != candidate.ID ||
+					reference.CommitSHA != candidate.CommitSHA ||
+					reference.CommitSHA != candidate.Exhaustive.Result.CommitSHA ||
+					reference.TreeSHA != candidate.TreeSHA ||
+					reference.TreeSHA != candidate.Exhaustive.Result.TreeSHA ||
+					reference.CompletedAt != candidate.Exhaustive.CompletedAt {
+					return fmt.Errorf("issue delivery candidate contains a stale acceptance validation reference")
+				}
+			}
+			if candidate.Exhaustive != nil && index == len(record.Candidates)-1 {
+				reference := proof.ValidationReceipt
+				matched := false
+				for _, receipt := range record.Evidence.ValidationReceipts {
+					if receipt.Schema == reference.Schema &&
+						receipt.CommitSHA == reference.CommitSHA &&
+						receipt.TreeSHA == reference.TreeSHA &&
+						receipt.CompletedAt == reference.CompletedAt {
+						matched = true
+					}
+				}
+				if !matched {
+					return fmt.Errorf("issue delivery candidate contains a stale acceptance validation reference")
+				}
+			}
+		}
 		specialists := map[SensitiveBoundary]bool{}
 		for _, review := range candidate.SpecialistReviews {
 			if specialists[review.Boundary] || review.CandidateID != candidate.ID ||
@@ -346,7 +486,10 @@ func validateCandidates(record runRecord) error {
 			}
 			specialists[review.Boundary] = true
 		}
-		if err := validatePersistedRepairDecision(record.Schema, candidate, findingIDs); err != nil {
+		allowPartialDecision := index == len(record.Candidates)-1 && record.PendingRepair != nil
+		if err := validatePersistedRepairDecision(
+			record.Schema, candidate, findingIDs, allowPartialDecision,
+		); err != nil {
 			return err
 		}
 		proofs := map[SensitiveBoundary]bool{}
@@ -370,6 +513,12 @@ func validateCandidates(record runRecord) error {
 		(record.PendingRepair.CandidateID != current.ID || strings.TrimSpace(record.PendingRepair.ID) == "" ||
 			len(record.PendingRepair.FindingIDs) == 0) {
 		return fmt.Errorf("pending repair does not match the current candidate")
+	}
+	if record.PendingRepair != nil {
+		expected := repairDecisionRequest(record.Schema, current.ID, unresolvedFindingIDs(&current))
+		if !reflect.DeepEqual(record.PendingRepair, expected) {
+			return fmt.Errorf("pending repair does not match unresolved current candidate findings")
+		}
 	}
 	if record.LocalReadiness != nil &&
 		(record.LocalReadiness.CandidateID != current.ID ||
@@ -446,8 +595,12 @@ func validatePersistedRepairDecision(
 	schema string,
 	candidate Candidate,
 	findingIDs map[string]bool,
+	allowPartial bool,
 ) error {
 	decision := candidate.RepairDecision
+	if err := validateLastRepairBatch(schema, candidate); err != nil {
+		return err
+	}
 	if decision == nil {
 		return nil
 	}
@@ -456,13 +609,15 @@ func validatePersistedRepairDecision(
 		(decision.Class != RepairBounded &&
 			decision.Class != RepairCandidateChanging &&
 			decision.Class != RepairAdjudicationOnly) ||
-		len(decision.Findings) != len(findingIDs) {
+		len(decision.Findings) > len(findingIDs) ||
+		(!allowPartial && len(decision.Findings) != len(findingIDs)) {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
 	}
 	seen := make(map[string]bool, len(decision.Findings))
 	accepted := false
-	for _, item := range decision.Findings {
+	for index, item := range decision.Findings {
 		if seen[item.FindingID] || !findingIDs[item.FindingID] ||
+			(index > 0 && decision.Findings[index-1].FindingID >= item.FindingID) ||
 			strings.TrimSpace(item.Evidence) == "" ||
 			(item.Disposition != FindingAccepted && item.Disposition != FindingRejected) {
 			return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
@@ -476,6 +631,61 @@ func validatePersistedRepairDecision(
 		}
 	} else if decision.Class == RepairBounded && !accepted {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
+	}
+	return nil
+}
+
+func validateLastRepairBatch(schema string, candidate Candidate) error {
+	receipt := candidate.LastRepairBatch
+	if len(candidate.RepairBatches) == 0 {
+		if receipt != nil {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
+		return nil
+	}
+	if schema == legacyRunSchema || candidate.RepairDecision == nil || receipt == nil ||
+		!reflect.DeepEqual(*receipt, candidate.RepairBatches[len(candidate.RepairBatches)-1]) {
+		return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+	}
+	cumulative := make(map[string]FindingDecision, len(candidate.RepairDecision.Findings))
+	for _, item := range candidate.RepairDecision.Findings {
+		cumulative[item.FindingID] = item
+	}
+	history := make(map[string]FindingDecision, len(cumulative))
+	strongest := RepairAdjudicationOnly
+	for batchIndex, batch := range candidate.RepairBatches {
+		if batch.Decision.CandidateID != candidate.ID || len(batch.Decision.Findings) == 0 {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
+		if batch.CompatiblePrefix &&
+			(batchIndex != 0 || len(candidate.RepairBatches) < 2) {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
+		accepted := false
+		ids := make([]string, 0, len(batch.Decision.Findings))
+		for index, item := range batch.Decision.Findings {
+			if index > 0 && batch.Decision.Findings[index-1].FindingID >= item.FindingID ||
+				history[item.FindingID].FindingID != "" || cumulative[item.FindingID] != item {
+				return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+			}
+			accepted = accepted || item.Disposition == FindingAccepted
+			history[item.FindingID] = item
+			ids = append(ids, item.FindingID)
+		}
+		class := batch.Decision.Class
+		if (class == RepairAdjudicationOnly && accepted) ||
+			(class == RepairBounded && !accepted) ||
+			(class == RepairCandidateChanging && !accepted && !batch.CompatiblePrefix) ||
+			(class != RepairAdjudicationOnly && class != RepairBounded &&
+				class != RepairCandidateChanging) ||
+			batch.RequestID != repairDecisionRequest(schema, candidate.ID, ids).ID {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
+		strongest = strongestRepairClass(strongest, class)
+	}
+	if len(history) != len(cumulative) ||
+		strongest != candidate.RepairDecision.Class {
+		return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
 	}
 	return nil
 }

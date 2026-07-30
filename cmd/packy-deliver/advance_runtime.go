@@ -25,7 +25,8 @@ type productionTrackerObserver struct {
 }
 
 type suppliedReviewExecutor struct {
-	reviews []issuedelivery.CandidateReview
+	reviews    []issuedelivery.CandidateReview
+	acceptance []issuedelivery.AcceptanceProof
 }
 
 type suppliedSpecialistExecutor struct {
@@ -64,7 +65,9 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 		GitHub: productionTrackerObserver{
 			runner: runner, specificationNumber: options.SpecificationNumber,
 		},
-		Review: suppliedReviewExecutor{reviews: options.Reviews},
+		Review: suppliedReviewExecutor{
+			reviews: options.Reviews, acceptance: append([]issuedelivery.AcceptanceProof(nil), options.Acceptance...),
+		},
 		Validation: productionValidationExecutor{
 			repository: options.RepositoryPath, runner: runner,
 			focused: execFocusedValidationRunner{}, exhaustive: validation, now: time.Now,
@@ -325,6 +328,24 @@ func (e suppliedReviewExecutor) Review(
 			if review.Findings == nil {
 				review.Findings = []deliveryevidence.ReviewFinding{}
 			}
+			if review.Iteration == 0 && review.CommitSHA == "" && review.TreeSHA == "" {
+				review.Iteration, review.CommitSHA, review.TreeSHA =
+					request.Iteration, request.CommitSHA, request.TreeSHA
+			}
+			if request.Axis == deliveryevidence.ReviewSpec && review.Acceptance == nil {
+				review.Acceptance = append([]issuedelivery.AcceptanceProof(nil), e.acceptance...)
+			}
+			for index := range review.Acceptance {
+				proof := &review.Acceptance[index]
+				if proof.CandidateID == "" && proof.Phase == "" && proof.ReviewReceipt == nil {
+					proof.CandidateID = request.CandidateID
+					proof.Phase = deliveryevidence.AssuranceCandidateReview
+					proof.ReviewReceipt = &issuedelivery.ReviewReceiptReference{
+						CandidateID: request.CandidateID, Axis: request.Axis,
+						Iteration: request.Iteration, CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+					}
+				}
+			}
 			return review, nil
 		}
 	}
@@ -384,53 +405,12 @@ func (e productionValidationExecutor) Exhaustive(
 	ctx context.Context,
 	request issuedelivery.ValidationRequest,
 ) (issuedelivery.ValidationResult, error) {
-	if err := validateAcceptanceReviewContent(request, e.acceptance); err != nil {
-		return issuedelivery.ValidationResult{}, err
-	}
 	if err := e.exhaustive.Run(ctx, e.repository, deliveryevidence.SandboxFacts{
 		HomeRoot: request.HomeRoot, ConfigHomeRoot: request.ConfigRoot, Sandboxed: true,
 	}); err != nil {
 		return issuedelivery.ValidationResult{}, fmt.Errorf("run repository validation authority: %w", err)
 	}
 	return e.result(ctx, request, "./scripts/validate-packy.sh", true)
-}
-
-func validateAcceptanceReviewContent(
-	request issuedelivery.ValidationRequest,
-	proofs []issuedelivery.AcceptanceProof,
-) error {
-	if len(proofs) != len(request.AcceptanceRows) {
-		return errors.New("acceptance review content must prove every compiled row before exhaustive validation")
-	}
-	rows := make(map[string]bool, len(request.AcceptanceRows))
-	for _, row := range request.AcceptanceRows {
-		if row.Identity == "" || rows[row.Identity] {
-			return errors.New("compiled acceptance rows are incomplete or duplicated")
-		}
-		rows[row.Identity] = true
-	}
-	seen := make(map[string]bool, len(proofs))
-	for _, proof := range proofs {
-		if !rows[proof.Identity] || seen[proof.Identity] {
-			return errors.New("acceptance review content has a foreign or duplicate row")
-		}
-		seen[proof.Identity] = true
-		for name, evidence := range map[string]string{
-			"positive": proof.PositiveEvidence, "negative": proof.NegativeEvidence,
-			"failure": proof.FailureEvidence, "mutation": proof.MutationEvidence,
-			"compatibility": proof.CompatibilityEvidence,
-			"preservation":  proof.PreservationEvidence,
-			"migration":     proof.MigrationEvidence,
-		} {
-			if !strings.Contains(strings.TrimSpace(evidence), request.CandidateID) {
-				return fmt.Errorf(
-					"acceptance review %s evidence must bind candidate %s before exhaustive validation",
-					name, request.CandidateID,
-				)
-			}
-		}
-	}
-	return nil
 }
 
 func (e productionValidationExecutor) result(
@@ -476,7 +456,20 @@ func (e productionValidationExecutor) result(
 	result.ValidatorIdentity = "scripts/validate-packy.sh"
 	result.ValidatorSHA256 = fmt.Sprintf("%x", validatorDigest)
 	result.ValidatorIdentityExpiresAt = e.now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
-	result.Acceptance = append([]issuedelivery.AcceptanceProof(nil), e.acceptance...)
+	phaseOwned := false
+	for _, row := range request.AcceptanceRows {
+		if len(row.Obligations) > 0 {
+			phaseOwned = true
+			result.Traceability = append(result.Traceability, issuedelivery.ValidationTrace{
+				Identity: row.Identity, CandidateID: request.CandidateID,
+				Phase:     deliveryevidence.AssuranceExhaustiveValidation,
+				CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+			})
+		}
+	}
+	if !phaseOwned {
+		result.Acceptance = append([]issuedelivery.AcceptanceProof(nil), e.acceptance...)
+	}
 	return result, nil
 }
 

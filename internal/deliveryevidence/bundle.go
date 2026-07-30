@@ -154,18 +154,61 @@ type ScopeLedger struct {
 	Prerequisites []PrerequisiteEntry `json:"prerequisites"`
 }
 type AcceptanceRow struct {
-	Identity              string          `json:"identity"`
-	Criterion             string          `json:"criterion"`
-	OwningSeam            string          `json:"owning_seam"`
-	PositiveEvidence      string          `json:"positive_evidence"`
-	NegativeEvidence      string          `json:"negative_evidence"`
-	FailureEvidence       string          `json:"failure_evidence"`
-	MutationEvidence      string          `json:"mutation_evidence"`
-	CompatibilityEvidence string          `json:"compatibility_evidence"`
-	PreservationEvidence  string          `json:"preservation_evidence"`
-	MigrationEvidence     string          `json:"migration_evidence"`
-	State                 AcceptanceState `json:"state"`
+	Identity              string                 `json:"identity"`
+	Criterion             string                 `json:"criterion"`
+	OwningSeam            string                 `json:"owning_seam"`
+	PositiveEvidence      string                 `json:"positive_evidence"`
+	NegativeEvidence      string                 `json:"negative_evidence"`
+	FailureEvidence       string                 `json:"failure_evidence"`
+	MutationEvidence      string                 `json:"mutation_evidence"`
+	CompatibilityEvidence string                 `json:"compatibility_evidence"`
+	PreservationEvidence  string                 `json:"preservation_evidence"`
+	MigrationEvidence     string                 `json:"migration_evidence"`
+	Obligations           []AcceptanceObligation `json:"obligations,omitempty"`
+	State                 AcceptanceState        `json:"state"`
 }
+
+type AssurancePhase string
+
+const (
+	AssuranceCandidateReview      AssurancePhase = "candidate-review"
+	AssuranceExhaustiveValidation AssurancePhase = "exhaustive-validation"
+)
+
+type AcceptanceEvidenceKind string
+
+const (
+	EvidencePositive      AcceptanceEvidenceKind = "positive"
+	EvidenceNegative      AcceptanceEvidenceKind = "negative"
+	EvidenceFailure       AcceptanceEvidenceKind = "failure"
+	EvidenceMutation      AcceptanceEvidenceKind = "mutation"
+	EvidenceCompatibility AcceptanceEvidenceKind = "compatibility"
+	EvidencePreservation  AcceptanceEvidenceKind = "preservation"
+	EvidenceMigration     AcceptanceEvidenceKind = "migration"
+	EvidenceValidation    AcceptanceEvidenceKind = "validation"
+)
+
+// AcceptanceObligation says when one remaining proof must be admitted. Rows
+// without obligations are the explicit compatible representation of v2
+// evidence written before phase ownership was introduced.
+type AcceptanceObligation struct {
+	Kind  AcceptanceEvidenceKind `json:"kind"`
+	Phase AssurancePhase         `json:"phase"`
+}
+
+func PhaseOwnedAcceptanceObligations() []AcceptanceObligation {
+	return []AcceptanceObligation{
+		{Kind: EvidenceCompatibility, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceFailure, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceMigration, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceMutation, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceNegative, Phase: AssuranceCandidateReview},
+		{Kind: EvidencePositive, Phase: AssuranceCandidateReview},
+		{Kind: EvidencePreservation, Phase: AssuranceCandidateReview},
+		{Kind: EvidenceValidation, Phase: AssuranceExhaustiveValidation},
+	}
+}
+
 type AcceptanceState string
 
 const (
@@ -227,6 +270,9 @@ func CanonicalJSON(bundle Bundle) ([]byte, error) {
 	bundle.Scope.Forbidden = clone(bundle.Scope.Forbidden)
 	bundle.Scope.Prerequisites = clone(bundle.Scope.Prerequisites)
 	bundle.AcceptanceMatrix = clone(bundle.AcceptanceMatrix)
+	for i := range bundle.AcceptanceMatrix {
+		bundle.AcceptanceMatrix[i].Obligations = clone(bundle.AcceptanceMatrix[i].Obligations)
+	}
 	bundle.Iterations = clone(bundle.Iterations)
 	bundle.ReviewReceipts = clone(bundle.ReviewReceipts)
 	for i := range bundle.ReviewReceipts {
@@ -444,6 +490,33 @@ func Validate(b Bundle) error {
 		if r.State != AcceptancePlanned && r.State != AcceptanceImplemented && r.State != AcceptanceProved {
 			return fmt.Errorf("acceptance row %q has invalid state", r.Identity)
 		}
+		if len(r.Obligations) > 0 {
+			seenObligations := map[AcceptanceEvidenceKind]bool{}
+			for _, obligation := range r.Obligations {
+				switch obligation.Kind {
+				case EvidencePositive, EvidenceNegative, EvidenceFailure, EvidenceMutation,
+					EvidenceCompatibility, EvidencePreservation, EvidenceMigration, EvidenceValidation:
+				default:
+					return fmt.Errorf("acceptance row %q has unknown obligation kind %q", r.Identity, obligation.Kind)
+				}
+				if seenObligations[obligation.Kind] {
+					return fmt.Errorf("acceptance row %q has duplicate %s obligation", r.Identity, obligation.Kind)
+				}
+				seenObligations[obligation.Kind] = true
+				expected := AssuranceCandidateReview
+				if obligation.Kind == EvidenceValidation {
+					expected = AssuranceExhaustiveValidation
+				}
+				if obligation.Phase != expected {
+					return fmt.Errorf("acceptance row %q has invalid %s phase ownership", r.Identity, obligation.Kind)
+				}
+			}
+			for _, expected := range PhaseOwnedAcceptanceObligations() {
+				if !seenObligations[expected.Kind] {
+					return fmt.Errorf("acceptance row %q lacks %s phase ownership", r.Identity, expected.Kind)
+				}
+			}
+		}
 		if rows[r.Identity] {
 			return fmt.Errorf("duplicate acceptance identity %q", r.Identity)
 		}
@@ -533,6 +606,15 @@ func canonicalize(b *Bundle) {
 	sort.Slice(b.Scope.Forbidden, func(i, j int) bool { return b.Scope.Forbidden[i].Identity < b.Scope.Forbidden[j].Identity })
 	sort.Slice(b.Scope.Prerequisites, func(i, j int) bool { return b.Scope.Prerequisites[i].Identity < b.Scope.Prerequisites[j].Identity })
 	sort.Slice(b.AcceptanceMatrix, func(i, j int) bool { return b.AcceptanceMatrix[i].Identity < b.AcceptanceMatrix[j].Identity })
+	for index := range b.AcceptanceMatrix {
+		sort.Slice(b.AcceptanceMatrix[index].Obligations, func(i, j int) bool {
+			left, right := b.AcceptanceMatrix[index].Obligations[i], b.AcceptanceMatrix[index].Obligations[j]
+			if left.Kind != right.Kind {
+				return left.Kind < right.Kind
+			}
+			return left.Phase < right.Phase
+		})
+	}
 	sort.Slice(b.Iterations, func(i, j int) bool { return b.Iterations[i].Sequence < b.Iterations[j].Sequence })
 	sort.Slice(b.ReviewReceipts, func(i, j int) bool {
 		if b.ReviewReceipts[i].Iteration == b.ReviewReceipts[j].Iteration {
