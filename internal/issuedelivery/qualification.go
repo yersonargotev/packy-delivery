@@ -482,7 +482,8 @@ func qualificationSeamsMatchCorrection(
 	for index := range corrected {
 		if current[index].Identity != corrected[index].Identity ||
 			current[index].Criterion != corrected[index].Criterion ||
-			current[index].OwningSeam != corrected[index].OwningSeam {
+			current[index].OwningSeam != corrected[index].OwningSeam ||
+			!reflect.DeepEqual(current[index].Obligations, corrected[index].Obligations) {
 			return false
 		}
 	}
@@ -579,13 +580,15 @@ func validateQualificationMatrixShape(
 	evidence *deliveryevidence.Bundle,
 	rows []deliveryevidence.AcceptanceRow,
 ) error {
-	if evidence == nil || len(rows) != len(evidence.Scope.OwnedNow) {
+	if evidence == nil || len(rows) != len(evidence.Scope.OwnedNow) ||
+		len(evidence.AcceptanceMatrix) != len(rows) {
 		return errors.New("qualification correction must preserve every acceptance criterion")
 	}
 	for index, row := range rows {
 		scope := evidence.Scope.OwnedNow[index]
 		if row.Identity != scope.Identity || row.Criterion != scope.Requirement ||
-			row.State != deliveryevidence.AcceptancePlanned {
+			row.State != deliveryevidence.AcceptancePlanned ||
+			!reflect.DeepEqual(row.Obligations, evidence.AcceptanceMatrix[index].Obligations) {
 			return errors.New("qualification correction must preserve traceability and complete every evidence row")
 		}
 	}
