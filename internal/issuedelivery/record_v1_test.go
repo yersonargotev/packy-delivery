@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -281,7 +282,30 @@ func TestLegacyCandidateChangingRejectedOnlyDecisionRetainsRuntimeSemantics(t *t
 	}
 	if outcome.State != StateNeedsReview || outcome.Candidate == nil ||
 		outcome.Candidate.RepairDecision == nil ||
-		outcome.Candidate.RepairDecision.Class != RepairCandidateChanging {
+		outcome.Candidate.RepairDecision.Class != RepairCandidateChanging ||
+		len(outcome.Candidate.RepairBatches) != 0 ||
+		outcome.Candidate.LastRepairBatch != nil {
 		t.Fatalf("legacy candidate-changing rejected-only outcome=%#v", outcome)
+	}
+	err = module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			resumed, decodeErr := decodeRun(data)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			if len(resumed.Candidates[len(resumed.Candidates)-1].RepairBatches) != 0 ||
+				resumed.Candidates[len(resumed.Candidates)-1].LastRepairBatch != nil {
+				return errors.New("legacy persisted candidate contains a last repair batch")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

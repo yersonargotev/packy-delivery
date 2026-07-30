@@ -598,6 +598,9 @@ func validatePersistedRepairDecision(
 	allowPartial bool,
 ) error {
 	decision := candidate.RepairDecision
+	if err := validateLastRepairBatch(schema, candidate); err != nil {
+		return err
+	}
 	if decision == nil {
 		return nil
 	}
@@ -629,44 +632,56 @@ func validatePersistedRepairDecision(
 	} else if decision.Class == RepairBounded && !accepted {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
 	}
-	if err := validateLastRepairBatch(schema, candidate); err != nil {
-		return err
-	}
 	return nil
 }
 
 func validateLastRepairBatch(schema string, candidate Candidate) error {
 	receipt := candidate.LastRepairBatch
-	if receipt == nil {
+	if len(candidate.RepairBatches) == 0 {
+		if receipt != nil {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
 		return nil
 	}
-	if schema == legacyRunSchema || candidate.RepairDecision == nil ||
-		receipt.Decision.CandidateID != candidate.ID ||
-		len(receipt.Decision.Findings) == 0 {
-		return fmt.Errorf("issue delivery candidate contains an invalid last repair batch")
+	if schema == legacyRunSchema || candidate.RepairDecision == nil || receipt == nil ||
+		!reflect.DeepEqual(*receipt, candidate.RepairBatches[len(candidate.RepairBatches)-1]) {
+		return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
 	}
 	cumulative := make(map[string]FindingDecision, len(candidate.RepairDecision.Findings))
 	for _, item := range candidate.RepairDecision.Findings {
 		cumulative[item.FindingID] = item
 	}
-	accepted := false
-	ids := make([]string, 0, len(receipt.Decision.Findings))
-	for index, item := range receipt.Decision.Findings {
-		if index > 0 && receipt.Decision.Findings[index-1].FindingID >= item.FindingID ||
-			cumulative[item.FindingID] != item {
-			return fmt.Errorf("issue delivery candidate contains an invalid last repair batch")
+	history := make(map[string]FindingDecision, len(cumulative))
+	strongest := RepairAdjudicationOnly
+	for _, batch := range candidate.RepairBatches {
+		if batch.Decision.CandidateID != candidate.ID || len(batch.Decision.Findings) == 0 {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
 		}
-		accepted = accepted || item.Disposition == FindingAccepted
-		ids = append(ids, item.FindingID)
+		accepted := false
+		ids := make([]string, 0, len(batch.Decision.Findings))
+		for index, item := range batch.Decision.Findings {
+			if index > 0 && batch.Decision.Findings[index-1].FindingID >= item.FindingID ||
+				history[item.FindingID].FindingID != "" || cumulative[item.FindingID] != item {
+				return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+			}
+			accepted = accepted || item.Disposition == FindingAccepted
+			history[item.FindingID] = item
+			ids = append(ids, item.FindingID)
+		}
+		class := batch.Decision.Class
+		if (class == RepairAdjudicationOnly && accepted) ||
+			(class == RepairBounded && !accepted) ||
+			(class == RepairCandidateChanging && !accepted) ||
+			(class != RepairAdjudicationOnly && class != RepairBounded &&
+				class != RepairCandidateChanging) ||
+			batch.RequestID != repairDecisionRequest(schema, candidate.ID, ids).ID {
+			return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
+		}
+		strongest = strongestRepairClass(strongest, class)
 	}
-	class := receipt.Decision.Class
-	if (class == RepairAdjudicationOnly && accepted) ||
-		(class == RepairBounded && !accepted) ||
-		(class == RepairCandidateChanging && !accepted) ||
-		(class != RepairAdjudicationOnly && class != RepairBounded && class != RepairCandidateChanging) ||
-		strongestRepairClass(candidate.RepairDecision.Class, class) != candidate.RepairDecision.Class ||
-		receipt.RequestID != repairDecisionRequest(schema, candidate.ID, ids).ID {
-		return fmt.Errorf("issue delivery candidate contains an invalid last repair batch")
+	if len(history) != len(cumulative) ||
+		strongest != candidate.RepairDecision.Class {
+		return fmt.Errorf("issue delivery candidate contains an invalid repair decision batch history")
 	}
 	return nil
 }

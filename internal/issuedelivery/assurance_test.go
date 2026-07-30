@@ -771,9 +771,17 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 			t.Fatal("tampered last repair batch was admitted")
 		}
 	}
+	orphaned, err := decodeRun(lastBatchBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphaned.Candidates[len(orphaned.Candidates)-1].RepairDecision = nil
+	if err := validateRun(orphaned); err == nil {
+		t.Fatal("orphaned last repair batch was admitted")
+	}
 }
 
-func TestProfileEscalationCannotDowngradeAcceptedRepairClass(t *testing.T) {
+func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing.T) {
 	module, git, _, reviewer, _ := assuranceFixture(t)
 	reviewer.responses[deliveryevidence.ReviewStandards] = []CandidateReview{{
 		Completed: true, Findings: []deliveryevidence.ReviewFinding{{
@@ -781,7 +789,7 @@ func TestProfileEscalationCannotDowngradeAcceptedRepairClass(t *testing.T) {
 			Severity:  deliveryevidence.SeverityP2,
 			Authority: deliveryevidence.AuthorityDocumentedStandard,
 			Citation:  "AGENTS.md", Location: "internal/issuedelivery/assurance.go",
-			Evidence: "bounded repair needed",
+			Evidence: "candidate-changing repair needed",
 		}},
 	}}
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
@@ -791,10 +799,10 @@ func TestProfileEscalationCannotDowngradeAcceptedRepairClass(t *testing.T) {
 	accepted := mustAdvance(t, module, Request{
 		RepositoryPath: "/repo", IssueNumber: 357,
 		Repair: &RepairDecision{
-			CandidateID: found.Candidate.ID, Class: RepairBounded,
+			CandidateID: found.Candidate.ID, Class: RepairCandidateChanging,
 			Findings: []FindingDecision{{
 				FindingID: "accepted-first", Disposition: FindingAccepted,
-				Evidence: "repair as bounded batch",
+				Evidence: "repair as candidate-changing batch",
 			}},
 		},
 	})
@@ -825,16 +833,34 @@ func TestProfileEscalationCannotDowngradeAcceptedRepairClass(t *testing.T) {
 			}},
 		},
 	})
-	if merged.Candidate.RepairDecision.Class != RepairBounded ||
+	if merged.Candidate.RepairDecision.Class != RepairCandidateChanging ||
 		!strings.Contains(merged.Reason, "accepted findings") {
 		t.Fatalf("later rejection downgraded accepted repair: %#v", merged)
 	}
-	if _, err := decodeRun(persistedAssuranceRun(t, module, git)); err != nil {
+	persisted := persistedAssuranceRun(t, module, git)
+	if _, err := decodeRun(persisted); err != nil {
 		t.Fatalf("cumulative accepted repair did not resume: %v", err)
+	}
+	for _, mutate := range []func(*Candidate){
+		func(candidate *Candidate) { candidate.RepairDecision.Class = RepairBounded },
+		func(candidate *Candidate) {
+			for index := range candidate.RepairDecision.Findings {
+				candidate.RepairDecision.Findings[index].Disposition = FindingRejected
+			}
+		},
+	} {
+		record, err := decodeRun(persisted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutate(&record.Candidates[len(record.Candidates)-1])
+		if err := validateRun(record); err == nil {
+			t.Fatal("tampered cumulative repair history was admitted")
+		}
 	}
 	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
 	next := mustAdvance(t, module, request)
-	if next.Candidate.RepairClass != RepairBounded {
+	if next.Candidate.RepairClass != RepairCandidateChanging {
 		t.Fatalf("new candidate did not inherit strongest repair class: %#v", next.Candidate)
 	}
 }

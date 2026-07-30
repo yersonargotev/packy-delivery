@@ -254,9 +254,11 @@ Adjudicate all findings and repair accepted findings as a batch:
   cumulative decision. Each new request names only the unresolved findings;
   applying that exact batch appends its dispositions without replacing prior
   evidence. A pending request and the retained dispositions must partition the
-  complete finding history exactly. The candidate also retains the exact last
-  batch request identity and decision as its replay receipt; only that sorted,
-  unique batch may be replayed. The cumulative repair class never weakens:
+  complete finding history exactly. The candidate retains every exact batch
+  request identity and decision as append-only structural history, plus the
+  exact last batch as its replay receipt; only that sorted, unique last batch
+  may be replayed. The cumulative findings must equal the batch union and the
+  cumulative repair class never weakens:
   candidate-changing outranks bounded, which outranks adjudication-only, so a
   later rejected batch cannot erase an already-accepted repair obligation.
 - A `Bounded Repair` preserves behavior, contract, scope, architecture, security

@@ -425,9 +425,13 @@ func (m *Module) applyRepairDecision(
 		})
 	}
 	candidate.RepairDecision = &merged
-	candidate.LastRepairBatch = &RepairBatchReceipt{
-		RequestID: record.PendingRepair.ID,
-		Decision:  decision,
+	if record.Schema != legacyRunSchema {
+		receipt := RepairBatchReceipt{
+			RequestID: record.PendingRepair.ID,
+			Decision:  decision,
+		}
+		candidate.RepairBatches = append(candidate.RepairBatches, receipt)
+		candidate.LastRepairBatch = &receipt
 	}
 	record.PendingRepair = nil
 	reason := "review findings were adjudicated without an accepted repair"

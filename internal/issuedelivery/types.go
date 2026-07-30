@@ -535,6 +535,7 @@ type Candidate struct {
 	Focused             *ValidationProof                     `json:"focused,omitempty"`
 	Exhaustive          *ValidationProof                     `json:"exhaustive,omitempty"`
 	RepairDecision      *RepairDecision                      `json:"repair_decision,omitempty"`
+	RepairBatches       []RepairBatchReceipt                 `json:"repair_batches,omitempty"`
 	LastRepairBatch     *RepairBatchReceipt                  `json:"last_repair_batch,omitempty"`
 }
 
