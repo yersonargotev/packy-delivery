@@ -64,6 +64,7 @@ const (
 	BlockerLocalBranchCleanup      BlockerKind = "local-branch-cleanup"
 	BlockerMainSynchronization     BlockerKind = "main-synchronization"
 	BlockerLocalCleanup            BlockerKind = "local-cleanup"
+	BlockerAdvanceConvergence      BlockerKind = "advance-convergence"
 )
 
 const (

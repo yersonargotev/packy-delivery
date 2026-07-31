@@ -280,10 +280,32 @@ func outcomeWithPause(outcome Outcome) Outcome {
 		} else {
 			outcome.PauseCause, outcome.NextAction = PauseNonLocalAuthorization, ActionAuthorizeNonLocal
 		}
+	case deterministicWaitingTransition(outcome):
+		outcome.PauseCause, outcome.NextAction = PauseDeterministicAdvance, ActionAdvance
 	default:
 		outcome.PauseCause, outcome.NextAction = PauseExternalResult, ActionObserveExternalResult
 	}
 	return outcome
+}
+
+func deterministicWaitingTransition(outcome Outcome) bool {
+	switch outcome.Reason {
+	case "exact non-local delivery authority is recorded",
+		"exact remote issue branch is proved",
+		"exact pull-request creation intent is recorded before mutation",
+		"one exact-head pull request is proved",
+		"required CI is green for the exact candidate HEAD; awaiting merge authority",
+		"exact merge intent is recorded before mutation",
+		"exact completed merge is adopted; only verification and cleanup may continue",
+		"post-merge operator-state baseline is recorded before cleanup",
+		"remote issue branch absence was requested by exact identity",
+		"one exact workflow-owned worktree absence was requested",
+		"local issue branch absence was requested after worktree cleanup",
+		"local main fast-forward was requested by compare-and-swap":
+		return true
+	default:
+		return false
+	}
 }
 
 func reviewPause(outcome Outcome) (PauseCause, NextAction) {

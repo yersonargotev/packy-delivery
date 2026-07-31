@@ -144,6 +144,19 @@ On every invocation, `Advance`:
 4. performs all currently safe deterministic work; and
 5. persists the resulting state and automatic phase timing before returning.
 
+The CLI converges consecutive `deterministic-advance` results in the same
+invocation. Each iteration calls the public `Advance` operation again, so it
+reloads the persisted run and reobserves repository and GitHub facts through the
+normal boundaries; no transition is hidden or combined before persistence.
+Typed decisions, repairs, reviews, corrections, CI attribution, and explicit
+non-local authorization are consumed once and are not replayed on later
+iterations. Convergence stops before semantic input, independent review,
+external result, non-local authorization (unless explicitly authorized),
+candidate repair, lock contention, legacy-v1 handling, invariant block, or
+completion. A repeated outcome signature or 32 deterministic transitions fails
+closed as an `advance-convergence` invariant block with
+`inspect-blocked-transition`; it does not rewrite the persisted run.
+
 The caller supplies only genuine judgment: ambiguous scope classification,
 exceptions, profile decisions not settled mechanically, and review or
 adjudication content. It does not assemble phase receipts or caller-authored JSON

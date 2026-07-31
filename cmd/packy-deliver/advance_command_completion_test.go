@@ -198,19 +198,48 @@ func TestAdvanceCommandRealModuleReportsCompletion(t *testing.T) {
 			Relation: issuedelivery.LocalMainSynced, Clean: true,
 		},
 	}
+	authorization := issuedelivery.NonLocalAuthorization{
+		RunID: ready.RunID, CandidateID: ready.Candidate.ID,
+		CommitSHA: ready.Candidate.CommitSHA, TreeSHA: ready.Candidate.TreeSHA,
+		Branch: ready.LocalReadiness.Branch, LocalReadyAt: ready.LocalReadiness.ReadyAt,
+	}
+	if _, err := module.Advance(context.Background(), issuedelivery.Request{
+		RepositoryPath: repository, IssueNumber: 361, NonLocal: &authorization,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var merged issuedelivery.Outcome
+	for attempts := 0; attempts < 16; attempts++ {
+		var err error
+		merged, err = module.Advance(context.Background(), issuedelivery.Request{
+			RepositoryPath: repository, IssueNumber: 361,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if merged.NonLocal != nil && merged.NonLocal.Merge != nil {
+			break
+		}
+	}
+	if merged.NonLocal == nil || merged.NonLocal.Merge == nil {
+		t.Fatalf("fixture did not reach an adopted merge: %#v", merged)
+	}
 	cmd := command{
 		Now: func() time.Time { return time.Date(2026, 7, 30, 11, 0, 0, 0, time.UTC) },
 		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
 			return module, nil
 		},
 	}
-	report := runAdvanceCommandReport(t, cmd, repository, "--authorize-non-local")
-	for attempts := 0; attempts < 24 && report.State != issuedelivery.StateCompleted; attempts++ {
-		report = runAdvanceCommandReport(t, cmd, repository)
-	}
+	report := runAdvanceCommandReport(t, cmd, repository)
 	if report.State != issuedelivery.StateCompleted ||
 		report.PauseCause != issuedelivery.PauseCompleted ||
 		report.NextAction != issuedelivery.ActionNone {
 		t.Fatalf("real Module completion report = %#v", report)
+	}
+	resumed := runAdvanceCommandReport(t, cmd, repository)
+	if resumed.State != issuedelivery.StateCompleted ||
+		resumed.RunID != report.RunID ||
+		resumed.NonLocal == nil || resumed.NonLocal.Merge == nil {
+		t.Fatalf("completed effects were not adopted on resume: %#v", resumed)
 	}
 }
