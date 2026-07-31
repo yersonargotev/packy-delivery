@@ -26,9 +26,21 @@ func TestHelpCommandsAsProcess(t *testing.T) {
 			if exitCode != 0 {
 				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
 			}
-			for _, command := range []string{"advance", "status", "watch", "version", "legacy-v1"} {
+			for _, command := range []string{
+				"advance", "input-template", "review-packets", "status", "watch",
+				"version", "legacy-v1",
+			} {
 				if !strings.Contains(stdout, command) {
 					t.Errorf("stdout does not list %q:\n%s", command, stdout)
+				}
+			}
+			for _, guidance := range []string{
+				"status -> input-template -> advance -> review-packets -> advance -> watch -> advance",
+				"Advance alone adopts results",
+				"--full-report only for judgment or audit",
+			} {
+				if !strings.Contains(stdout, guidance) {
+					t.Errorf("stdout does not contain operator guidance %q:\n%s", guidance, stdout)
 				}
 			}
 			if stderr != "" {
@@ -143,7 +155,11 @@ func TestAdvanceHelpCommandsAsProcess(t *testing.T) {
 			if exitCode != 0 {
 				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
 			}
-			for _, option := range []string{"--repository", "--issue", "--risk-profile", "--authorize-non-local", "--output"} {
+			for _, option := range []string{
+				"--repository", "--issue", "--risk-profile", "--authorize-non-local",
+				"--output", "only lifecycle operation", "without translating their",
+				"telemetry, never correctness",
+			} {
 				if !strings.Contains(stdout, option) {
 					t.Errorf("stdout does not list %q:\n%s", option, stdout)
 				}
@@ -197,8 +213,19 @@ func TestLegacyStatusHelpCommandsAsProcess(t *testing.T) {
 			if exitCode != 0 {
 				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
 			}
-			if !strings.Contains(stdout, "status") || !strings.Contains(stdout, "--bundle") {
-				t.Errorf("stdout does not document legacy bundle status:\n%s", stdout)
+			commands := []string{"status", "--bundle"}
+			if args[0] == "help" {
+				commands = append(commands,
+					"initialize", "record-iteration", "record-review",
+					"record-adjudication", "review-status", "record-focused-validation",
+					"record-exhaustive-validation", "validation-status", "local-gate",
+					"non-local-readiness", "final-outcome",
+				)
+			}
+			for _, command := range commands {
+				if !strings.Contains(stdout, command) {
+					t.Errorf("stdout does not document legacy command %q:\n%s", command, stdout)
+				}
 			}
 			if stderr != "" {
 				t.Errorf("stderr = %q", stderr)
