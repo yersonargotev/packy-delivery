@@ -246,16 +246,8 @@ func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceRepor
 		Decision: outcome.Decision, Repair: outcome.Repair,
 		QualificationCorrection: outcome.QualificationCorrection,
 	}
-	if outcome.Candidate != nil {
-		report.Candidate = &compactCandidateIdentity{
-			ID: outcome.Candidate.ID, CommitSHA: outcome.Candidate.CommitSHA,
-			TreeSHA: outcome.Candidate.TreeSHA,
-		}
-	}
-	if outcome.LocalReadiness != nil {
-		report.Branch = &issuedelivery.RemoteBranchObservation{
-			Name: outcome.LocalReadiness.Branch, HeadSHA: outcome.LocalReadiness.CommitSHA,
-		}
+	if outcome.BlockerKind != "" {
+		return report
 	}
 	if remote := outcome.NonLocal; remote != nil {
 		switch {
@@ -280,7 +272,27 @@ func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceRepor
 				HeadSHA: remote.PullRequest.HeadSHA,
 			}
 		default:
-			report.Branch = remote.Branch
+			if remote.Branch != nil {
+				report.Branch = remote.Branch
+			} else if outcome.LocalReadiness != nil {
+				report.Branch = &issuedelivery.RemoteBranchObservation{
+					Name:    outcome.LocalReadiness.Branch,
+					HeadSHA: outcome.LocalReadiness.CommitSHA,
+				}
+			}
+		}
+		return report
+	}
+	if outcome.LocalReadiness != nil {
+		report.Branch = &issuedelivery.RemoteBranchObservation{
+			Name: outcome.LocalReadiness.Branch, HeadSHA: outcome.LocalReadiness.CommitSHA,
+		}
+		return report
+	}
+	if outcome.Candidate != nil {
+		report.Candidate = &compactCandidateIdentity{
+			ID: outcome.Candidate.ID, CommitSHA: outcome.Candidate.CommitSHA,
+			TreeSHA: outcome.Candidate.TreeSHA,
 		}
 	}
 	return report

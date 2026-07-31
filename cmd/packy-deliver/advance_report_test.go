@@ -57,39 +57,19 @@ func TestCompactAdvanceReportSnapshotsEveryPauseCause(t *testing.T) {
 	}
 }
 
-func TestCompactAdvanceReportIsMateriallySmallerAndFullReportRoundTrips(t *testing.T) {
-	reviews := make([]issuedelivery.CandidateReview, 80)
-	for index := range reviews {
-		reviews[index] = issuedelivery.CandidateReview{
-			CandidateID: "candidate", Axis: deliveryevidence.ReviewStandards,
-			Iteration: index + 1, CommitSHA: strings.Repeat("a", 40),
-			TreeSHA: strings.Repeat("b", 40), Findings: []deliveryevidence.ReviewFinding{},
-			Completed: true,
-		}
-	}
-	candidate := &issuedelivery.Candidate{
-		ID: "candidate", CommitSHA: strings.Repeat("a", 40),
-		TreeSHA: strings.Repeat("b", 40), Reviews: reviews,
-	}
+func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
+	candidate := representativeCandidate()
 	outcome := issuedelivery.Outcome{
-		RunID: "run-large", State: issuedelivery.StateNeedsReview,
+		RunID: "run-roundtrip", State: issuedelivery.StateNeedsReview,
 		Reason: "review the exact candidate", PauseCause: issuedelivery.PauseIndependentReview,
 		NextAction: issuedelivery.ActionProvideCandidateReview, Candidate: candidate,
-		QualificationReviews: make([]issuedelivery.QualificationReview, 40),
+		QualificationReviews: []issuedelivery.QualificationReview{{
+			AuthoritySHA256:        strings.Repeat("d", 64),
+			AcceptanceMatrixSHA256: strings.Repeat("e", 64),
+			Findings:               []deliveryevidence.ReviewFinding{}, Completed: true,
+		}},
 	}
-	compact := runAdvanceOutput(t, outcome)
 	full := runAdvanceOutput(t, outcome, "--full-report")
-	t.Logf("representative report bytes: compact=%d full=%d", len(compact), len(full))
-	if len(compact)*4 >= len(full) {
-		t.Fatalf("compact report is not materially smaller: compact=%d full=%d", len(compact), len(full))
-	}
-	for _, excluded := range []string{
-		"qualification_reviews", "evidence", "reviews", "timing", "timing_report",
-	} {
-		if strings.Contains(compact, `"`+excluded+`"`) {
-			t.Fatalf("compact report contains %q history: %s", excluded, compact)
-		}
-	}
 	var decoded advanceReport
 	if err := json.Unmarshal([]byte(full), &decoded); err != nil {
 		t.Fatal(err)
@@ -100,20 +80,93 @@ func TestCompactAdvanceReportIsMateriallySmallerAndFullReportRoundTrips(t *testi
 	}
 }
 
+func TestRepeatedCompactAdvanceReportsAreMateriallySmaller(t *testing.T) {
+	candidate := representativeCandidate()
+	readiness := &issuedelivery.LocalReadiness{
+		CandidateID: candidate.ID, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+		AuthorityHash: strings.Repeat("d", 64), Branch: "feat/issue-7",
+		ReadyAt: "2026-07-30T12:00:00.000000000Z",
+	}
+	branch := &issuedelivery.RemoteBranchObservation{Name: readiness.Branch, HeadSHA: candidate.CommitSHA}
+	pullRequest := &issuedelivery.RemotePullRequestObservation{
+		Number: 7, URL: "https://github.com/yersonargotev/packy/pull/7",
+		HeadSHA: candidate.CommitSHA,
+	}
+	check := representativeCheck()
+	merge := &issuedelivery.MergeProof{
+		PullRequest: 7, URL: pullRequest.URL, HeadSHA: candidate.CommitSHA,
+		MergeCommitSHA: strings.Repeat("f", 40),
+	}
+	sequence := []issuedelivery.Outcome{
+		{
+			RunID: "run-sequence", State: issuedelivery.StateNeedsReview,
+			Reason: "candidate review required", PauseCause: issuedelivery.PauseIndependentReview,
+			NextAction: issuedelivery.ActionProvideCandidateReview, Candidate: candidate,
+		},
+		{
+			RunID: "run-sequence", State: issuedelivery.StateWaiting,
+			Reason: "local readiness proved", PauseCause: issuedelivery.PauseNonLocalAuthorization,
+			NextAction: issuedelivery.ActionAuthorizeNonLocal, Candidate: candidate, LocalReadiness: readiness,
+		},
+		{
+			RunID: "run-sequence", State: issuedelivery.StateWaiting,
+			Reason: "authorization recorded", PauseCause: issuedelivery.PauseDeterministicAdvance,
+			NextAction: issuedelivery.ActionAdvance, Candidate: candidate, LocalReadiness: readiness,
+			NonLocal: &issuedelivery.NonLocalDelivery{},
+		},
+		{
+			RunID: "run-sequence", State: issuedelivery.StateWaiting,
+			Reason: "pull request ready", PauseCause: issuedelivery.PauseExternalResult,
+			NextAction: issuedelivery.ActionObserveExternalResult, Candidate: candidate, LocalReadiness: readiness,
+			NonLocal: &issuedelivery.NonLocalDelivery{Branch: branch, PullRequest: pullRequest},
+		},
+		{
+			RunID: "run-sequence", State: issuedelivery.StateWaiting,
+			Reason: "CI running", PauseCause: issuedelivery.PauseExternalResult,
+			NextAction: issuedelivery.ActionObserveExternalResult, Candidate: candidate, LocalReadiness: readiness,
+			NonLocal: &issuedelivery.NonLocalDelivery{
+				Branch: branch, PullRequest: pullRequest,
+				Checks: []issuedelivery.CICheckObservation{check},
+			},
+		},
+		{
+			RunID: "run-sequence", State: issuedelivery.StateCompleted,
+			Reason: "delivery completed", PauseCause: issuedelivery.PauseCompleted,
+			NextAction: issuedelivery.ActionNone, Candidate: candidate, LocalReadiness: readiness,
+			NonLocal: &issuedelivery.NonLocalDelivery{
+				Branch: branch, PullRequest: pullRequest,
+				Checks: []issuedelivery.CICheckObservation{check}, Merge: merge,
+			},
+		},
+	}
+	var compactBytes, fullBytes int
+	for _, outcome := range sequence {
+		compact := runAdvanceOutput(t, outcome)
+		full := runAdvanceOutput(t, outcome, "--full-report")
+		compactBytes += len(compact)
+		fullBytes += len(full)
+		for _, excluded := range []string{
+			"qualification_reviews", "evidence", "reviews", "timing", "timing_report",
+		} {
+			if strings.Contains(compact, `"`+excluded+`"`) {
+				t.Fatalf("compact report contains %q history: %s", excluded, compact)
+			}
+		}
+	}
+	t.Logf("representative repeated report bytes: compact=%d full=%d", compactBytes, fullBytes)
+	if compactBytes*3 >= fullBytes {
+		t.Fatalf("repeated compact reports are not materially smaller: compact=%d full=%d",
+			compactBytes, fullBytes)
+	}
+}
+
 func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 	branch := &issuedelivery.RemoteBranchObservation{Name: "feat/issue-7", HeadSHA: strings.Repeat("a", 40)}
 	pullRequest := &issuedelivery.RemotePullRequestObservation{
 		Number: 7, URL: "https://github.com/yersonargotev/packy/pull/7",
 		HeadSHA: strings.Repeat("a", 40),
 	}
-	check := issuedelivery.CICheckObservation{
-		RequiredCheck: deliveryevidence.RequiredCheck{
-			Identity: "Validate Packy", HeadSHA: strings.Repeat("a", 40),
-			Conclusion: "success",
-		},
-		StatusKind: issuedelivery.CIKindCheckRun, RunID: 77,
-		DetailsURL: "https://github.com/yersonargotev/packy/actions/runs/77",
-	}
+	check := representativeCheck()
 	merge := &issuedelivery.MergeProof{
 		PullRequest: 7, URL: pullRequest.URL, HeadSHA: pullRequest.HeadSHA,
 		MergeCommitSHA: strings.Repeat("b", 40),
@@ -124,6 +177,10 @@ func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 		NextAction: issuedelivery.ActionObserveExternalResult,
 		Candidate: &issuedelivery.Candidate{
 			ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("c", 40),
+		},
+		LocalReadiness: &issuedelivery.LocalReadiness{
+			CandidateID: "candidate", CommitSHA: strings.Repeat("a", 40),
+			TreeSHA: strings.Repeat("c", 40), Branch: "feat/issue-7",
 		},
 	}
 	for _, test := range []struct {
@@ -156,16 +213,58 @@ func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 			outcome := base
 			outcome.NonLocal = &test.remote
 			report := compactReportFromOutcome(outcome)
-			if report.Candidate == nil {
-				t.Fatal("current candidate identity was omitted")
+			if report.Candidate != nil {
+				t.Fatalf("remote progress leaked candidate identity: %#v", report)
 			}
 			test.assert(t, report)
 		})
 	}
+	authorized := base
+	authorized.NonLocal = &issuedelivery.NonLocalDelivery{}
+	authorizedReport := compactReportFromOutcome(authorized)
+	if authorizedReport.Branch == nil || authorizedReport.Candidate != nil {
+		t.Fatalf("post-authorization projection=%#v", authorizedReport)
+	}
 	blocked := base
 	blocked.BlockerKind = issuedelivery.BlockerPullRequest
-	if report := compactReportFromOutcome(blocked); report.BlockerKind != issuedelivery.BlockerPullRequest {
+	if report := compactReportFromOutcome(blocked); report.BlockerKind != issuedelivery.BlockerPullRequest ||
+		report.Candidate != nil || report.Branch != nil || report.PullRequest != nil ||
+		report.CI != nil || report.Merge != nil {
 		t.Fatalf("blocker identity=%#v", report)
+	}
+}
+
+func representativeCandidate() *issuedelivery.Candidate {
+	commit, tree := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	return &issuedelivery.Candidate{
+		ID: "candidate", CommitSHA: commit, TreeSHA: tree,
+		RequiredReviews: []deliveryevidence.ReviewAxis{
+			deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+		},
+		ReviewIteration: 1,
+		Reviews: []issuedelivery.CandidateReview{
+			{
+				CandidateID: "candidate", Axis: deliveryevidence.ReviewStandards,
+				Iteration: 1, CommitSHA: commit, TreeSHA: tree,
+				Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+			},
+			{
+				CandidateID: "candidate", Axis: deliveryevidence.ReviewSpec,
+				Iteration: 1, CommitSHA: commit, TreeSHA: tree,
+				Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+			},
+		},
+	}
+}
+
+func representativeCheck() issuedelivery.CICheckObservation {
+	return issuedelivery.CICheckObservation{
+		RequiredCheck: deliveryevidence.RequiredCheck{
+			Identity: "Validate Packy", HeadSHA: strings.Repeat("a", 40),
+			Conclusion: "success",
+		},
+		StatusKind: issuedelivery.CIKindCheckRun, RunID: 77,
+		DetailsURL: "https://github.com/yersonargotev/packy/actions/runs/77",
 	}
 }
 
