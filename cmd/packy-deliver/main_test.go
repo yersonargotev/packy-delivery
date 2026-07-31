@@ -42,7 +42,6 @@ func TestCommandRejectionClassificationUsesExitAndHTTPStatus(t *testing.T) {
 		transient bool
 	}{
 		{"git local rejection", "git", []string{"rev-parse", "origin/main"}, "exit 1", false},
-		{"git remote read", "git", []string{"ls-remote", "origin"}, "exit 1", true},
 		{"gh no response", "gh", nil, "exit 1", true},
 		{"gh not found", "gh", nil, "echo 'gh: Not Found (HTTP 404)' >&2; exit 1", false},
 		{"gh service unavailable", "gh", nil, "echo 'gh: unavailable (HTTP 503)' >&2; exit 1", true},

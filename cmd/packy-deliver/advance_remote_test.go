@@ -64,8 +64,8 @@ func TestProductionNonLocalObservationRefreshesAndBindsOriginMain(t *testing.T) 
 	runner := &fakeRemoteRunner{outputs: [][]byte{
 		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
 		nil,
-		[]byte(head + "\trefs/heads/chore/issue-361-remote-adapter\n" +
-			main + "\trefs/heads/main\n"),
+		remoteRefFixture("chore/issue-361-remote-adapter", head),
+		remoteRefFixture("main", main),
 		[]byte(main + "\n"),
 		[]byte(`[]`),
 	}}
@@ -90,7 +90,7 @@ func TestProductionNonLocalObservationRefreshesAndBindsOriginMain(t *testing.T) 
 	}) {
 		t.Fatalf("origin/main refresh = %#v", got)
 	}
-	if got := runner.calls[4]; got.name != "gh" || !reflect.DeepEqual(got.args, []string{
+	if got := runner.calls[5]; got.name != "gh" || !reflect.DeepEqual(got.args, []string{
 		"pr", "list", "--repo", "yersonargotev/packy", "--state", "all",
 		"--head", "chore/issue-361-remote-adapter", "--json",
 		"number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,closingIssuesReferences,mergedAt,mergeCommit",
@@ -104,8 +104,8 @@ func TestProductionStatusNonLocalObservationUsesOnlyReadCommands(t *testing.T) {
 	head, main := strings.Repeat("b", 40), strings.Repeat("a", 40)
 	runner := &fakeRemoteRunner{outputs: [][]byte{
 		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
-		[]byte(head + "\trefs/heads/chore/issue-361-remote-adapter\n" +
-			main + "\trefs/heads/main\n"),
+		remoteRefFixture("chore/issue-361-remote-adapter", head),
+		remoteRefFixture("main", main),
 		[]byte(`[]`),
 	}}
 	observer := productionStatusNonLocalObserver{
@@ -215,8 +215,8 @@ func TestProductionStatusNonLocalObservationClassifiesMalformedJSONAsCorruption(
 	head, main := strings.Repeat("b", 40), strings.Repeat("a", 40)
 	runner := &fakeRemoteRunner{outputs: [][]byte{
 		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
-		[]byte(head + "\trefs/heads/chore/issue-361-remote-adapter\n" +
-			main + "\trefs/heads/main\n"),
+		remoteRefFixture("chore/issue-361-remote-adapter", head),
+		remoteRefFixture("main", main),
 		[]byte(`[{"number":`),
 	}}
 	observer := productionStatusNonLocalObserver{
@@ -236,6 +236,13 @@ func TestProductionStatusNonLocalObservationClassifiesMalformedJSONAsCorruption(
 	if !ok || class != issuedelivery.StatusErrorCorruption || transient {
 		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
 	}
+}
+
+func remoteRefFixture(branch string, sha string) []byte {
+	return []byte(
+		`[{"ref":"refs/heads/` + branch +
+			`","object":{"type":"commit","sha":"` + sha + `"}}]`,
+	)
 }
 
 func TestProductionNonLocalChecksProjectGitHubResponsesBeforeStrictDecode(t *testing.T) {
