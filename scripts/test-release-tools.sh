@@ -7,6 +7,21 @@ sandbox="$(mktemp -d "${TMPDIR:-/tmp}/packy-delivery-release-test.XXXXXX")"
 cleanup() { rm -rf "$sandbox"; }
 trap cleanup EXIT
 
+contract_version="$(
+  sed -nE 's/^Release: v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' \
+    "$root/workflows/packy-issue-delivery.md"
+)"
+skill_version="$(
+  sed -nE 's/^Compatible release: v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' \
+    "$root/.agents/skills/deliver-packy-issue/SKILL.md"
+)"
+[[ -n "$contract_version" && "$contract_version" == "$skill_version" ]]
+grep -F 'packy-deliver version' "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
+grep -F 'qualification is approved; awaiting candidate development' \
+  "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
+grep -F 'Except for the recognized candidate-development handoff above' \
+  "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
+
 version="1.2.3"
 checksums="$sandbox/SHA256SUMS"
 formula="$sandbox/packy-delivery.rb"

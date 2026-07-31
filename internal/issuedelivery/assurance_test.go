@@ -299,11 +299,51 @@ func TestAdvanceWaitsForFirstCandidateAfterQualificationApproval(t *testing.T) {
 	fixture.git.value.HeadSHA = fixture.git.value.StartingBaseSHA
 	approveQualificationFixture(t, fixture.module, 357)
 
+	var blockedRunID string
+	var qualifiedEvidence deliveryevidence.Bundle
+	var qualificationReviews []QualificationReview
+	var qualificationCorrections []QualificationCorrection
+	err := fixture.module.store.withIssueLock(
+		context.Background(),
+		fixture.git.value.CommonDir,
+		357,
+		func(store lockedIssueStore) error {
+			_, data, found, loadErr := store.loadActive()
+			if loadErr != nil || !found {
+				return loadErr
+			}
+			record, loadErr := decodeRun(data)
+			if loadErr != nil {
+				return loadErr
+			}
+			snapshot, loadErr := decodeRun(data)
+			if loadErr != nil {
+				return loadErr
+			}
+			qualifiedEvidence = *snapshot.Evidence
+			qualificationReviews = snapshot.QualificationReviews
+			qualificationCorrections = snapshot.QualificationCorrections
+			blocked, loadErr := fixture.module.persistAssuranceTransition(
+				store,
+				record,
+				StateBlocked,
+				"candidate risk observation is incomplete or invalid",
+				"risk-observation",
+			)
+			blockedRunID = blocked.RunID
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	waiting := mustAdvance(t, fixture.module, Request{
 		RepositoryPath: "/repo",
 		IssueNumber:    357,
 	})
-	if waiting.State != StateWaiting || waiting.Candidate != nil ||
+	if waiting.RunID != blockedRunID || !waiting.QualificationApproved ||
+		waiting.State != StateWaiting || waiting.Candidate != nil ||
 		waiting.PauseCause != PauseExternalResult ||
 		waiting.NextAction != ActionObserveExternalResult {
 		t.Fatalf("unchanged baseline outcome = %#v", waiting)
@@ -320,7 +360,24 @@ func TestAdvanceWaitsForFirstCandidateAfterQualificationApproval(t *testing.T) {
 	}
 	if record.State != StateWaiting || len(record.Candidates) != 0 ||
 		len(record.ProfileHistory) != 0 ||
-		record.Timing[len(record.Timing)-1].Phase != "candidate-development" {
+		record.Timing[len(record.Timing)-2].Phase != "risk-observation" ||
+		record.Timing[len(record.Timing)-1].Phase != "candidate-development" ||
+		record.Evidence.Schema != qualifiedEvidence.Schema ||
+		record.Evidence.Repository != qualifiedEvidence.Repository ||
+		record.Evidence.Issue != qualifiedEvidence.Issue ||
+		record.Evidence.Spec != qualifiedEvidence.Spec ||
+		!reflect.DeepEqual(record.Evidence.Authority, qualifiedEvidence.Authority) ||
+		record.Evidence.RiskProfile != qualifiedEvidence.RiskProfile ||
+		record.Evidence.StartingBaseSHA != qualifiedEvidence.StartingBaseSHA ||
+		!reflect.DeepEqual(record.Evidence.Scope, qualifiedEvidence.Scope) ||
+		!reflect.DeepEqual(record.Evidence.AcceptanceMatrix, qualifiedEvidence.AcceptanceMatrix) ||
+		!reflect.DeepEqual(record.Evidence.Iterations, qualifiedEvidence.Iterations) ||
+		!reflect.DeepEqual(record.Evidence.ReviewReceipts, qualifiedEvidence.ReviewReceipts) ||
+		!reflect.DeepEqual(record.Evidence.Adjudications, qualifiedEvidence.Adjudications) ||
+		!reflect.DeepEqual(record.Evidence.ValidationReceipts, qualifiedEvidence.ValidationReceipts) ||
+		!reflect.DeepEqual(record.Evidence.FocusedValidation, qualifiedEvidence.FocusedValidation) ||
+		!reflect.DeepEqual(record.QualificationReviews, qualificationReviews) ||
+		!reflect.DeepEqual(record.QualificationCorrections, qualificationCorrections) {
 		t.Fatalf("unchanged baseline persisted assurance = %#v", record)
 	}
 	waitingRevision := persistedAssuranceRun(t, fixture.module, fixture.git)
