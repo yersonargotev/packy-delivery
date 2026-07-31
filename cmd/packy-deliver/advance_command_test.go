@@ -200,6 +200,8 @@ func TestAdvanceCommandCallsDeepModuleAndSynthesizesOnlyExactRemoteAuthorization
 		{
 			RunID: "run-1", State: issuedelivery.StateWaiting, Reason: "local ready",
 			Candidate: candidate, LocalReadiness: readiness,
+			PauseCause: issuedelivery.PauseNonLocalAuthorization,
+			NextAction: issuedelivery.ActionAuthorizeNonLocal,
 		},
 		{
 			RunID: "run-1", State: issuedelivery.StateWaiting,
@@ -567,7 +569,7 @@ func runAdvanceCommandReport(
 	return report
 }
 
-func TestAdvanceCommandRealModuleReportsDeterministicAdvance(t *testing.T) {
+func TestAdvanceCommandRealModuleConvergesPastDeterministicAdvance(t *testing.T) {
 	module, corrected, repository, _, _ := productionReadyModule(
 		t, nil, nil, nil, "before-qualification-approval",
 	)
@@ -588,9 +590,10 @@ func TestAdvanceCommandRealModuleReportsDeterministicAdvance(t *testing.T) {
 		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) { return module, nil },
 	}
 	report := runAdvanceCommandReport(t, cmd, repository, "--review-content", path)
-	if report.PauseCause != issuedelivery.PauseDeterministicAdvance ||
-		report.NextAction != issuedelivery.ActionAdvance {
-		t.Fatalf("deterministic advance report = %#v", report)
+	if report.PauseCause != issuedelivery.PauseIndependentReview ||
+		report.NextAction != issuedelivery.ActionProvideCandidateReview ||
+		report.Candidate == nil {
+		t.Fatalf("converged advance report = %#v", report)
 	}
 }
 

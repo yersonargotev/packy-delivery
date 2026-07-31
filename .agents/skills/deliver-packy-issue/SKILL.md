@@ -25,6 +25,11 @@ review results, and adjudications only when the returned state requires them.
 Otherwise let `Advance` reacquire facts, perform deterministic work, persist
 evidence, and recover idempotently.
 
+One CLI invocation already converges consecutive safe deterministic
+transitions. Do not repeat a typed decision, repair, review, correction, CI
+attribution, or authorization merely because several internal transitions
+completed before the returned genuine pause.
+
 Use the default compact JSON report during normal advancement. Request
 `--full-report` only when the current decision requires complete evidence or
 when performing an explicit audit; do not carry full qualification, review, or

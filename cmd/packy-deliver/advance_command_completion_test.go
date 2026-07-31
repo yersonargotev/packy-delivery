@@ -11,7 +11,8 @@ import (
 )
 
 type commandCompletionLocal struct {
-	observation issuedelivery.LocalCompletionObservation
+	observation      issuedelivery.LocalCompletionObservation
+	removedWorktrees []string
 }
 
 func (l *commandCompletionLocal) ObserveLocalCompletion(
@@ -21,10 +22,18 @@ func (l *commandCompletionLocal) ObserveLocalCompletion(
 	return l.observation, nil
 }
 
-func (*commandCompletionLocal) EnsureManagedWorktreeAbsent(
-	context.Context,
-	issuedelivery.RemoveManagedWorktreeRequest,
+func (l *commandCompletionLocal) EnsureManagedWorktreeAbsent(
+	_ context.Context,
+	request issuedelivery.RemoveManagedWorktreeRequest,
 ) error {
+	l.removedWorktrees = append(l.removedWorktrees, request.Path)
+	remaining := l.observation.Worktrees[:0]
+	for _, worktree := range l.observation.Worktrees {
+		if worktree.Path != request.Path {
+			remaining = append(remaining, worktree)
+		}
+	}
+	l.observation.Worktrees = remaining
 	return nil
 }
 
@@ -198,19 +207,67 @@ func TestAdvanceCommandRealModuleReportsCompletion(t *testing.T) {
 			Relation: issuedelivery.LocalMainSynced, Clean: true,
 		},
 	}
+	authorization := issuedelivery.NonLocalAuthorization{
+		RunID: ready.RunID, CandidateID: ready.Candidate.ID,
+		CommitSHA: ready.Candidate.CommitSHA, TreeSHA: ready.Candidate.TreeSHA,
+		Branch: ready.LocalReadiness.Branch, LocalReadyAt: ready.LocalReadiness.ReadyAt,
+	}
+	if _, err := module.Advance(context.Background(), issuedelivery.Request{
+		RepositoryPath: repository, IssueNumber: 361, NonLocal: &authorization,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var merged issuedelivery.Outcome
+	for attempts := 0; attempts < 16; attempts++ {
+		var err error
+		merged, err = module.Advance(context.Background(), issuedelivery.Request{
+			RepositoryPath: repository, IssueNumber: 361,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if merged.NonLocal != nil && merged.NonLocal.Merge != nil {
+			break
+		}
+	}
+	if merged.NonLocal == nil || merged.NonLocal.Merge == nil {
+		t.Fatalf("fixture did not reach an adopted merge: %#v", merged)
+	}
+	local.observation.Worktrees = []issuedelivery.ManagedWorktreeObservation{
+		{
+			Path: t.TempDir(), Branch: ready.LocalReadiness.Branch,
+			HeadSHA: ready.Candidate.CommitSHA, RunID: ready.RunID,
+			CandidateID: ready.Candidate.ID, Clean: true,
+		},
+		{
+			Path: t.TempDir(), Branch: ready.LocalReadiness.Branch,
+			HeadSHA: ready.Candidate.CommitSHA, RunID: ready.RunID,
+			CandidateID: ready.Candidate.ID, Clean: true,
+		},
+	}
 	cmd := command{
 		Now: func() time.Time { return time.Date(2026, 7, 30, 11, 0, 0, 0, time.UTC) },
 		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
 			return module, nil
 		},
 	}
-	report := runAdvanceCommandReport(t, cmd, repository, "--authorize-non-local")
-	for attempts := 0; attempts < 24 && report.State != issuedelivery.StateCompleted; attempts++ {
-		report = runAdvanceCommandReport(t, cmd, repository)
-	}
+	report := runAdvanceCommandReport(t, cmd, repository)
 	if report.State != issuedelivery.StateCompleted ||
 		report.PauseCause != issuedelivery.PauseCompleted ||
 		report.NextAction != issuedelivery.ActionNone {
 		t.Fatalf("real Module completion report = %#v", report)
+	}
+	if len(local.removedWorktrees) != 2 ||
+		local.removedWorktrees[0] == local.removedWorktrees[1] {
+		t.Fatalf("managed worktree effects=%#v", local.removedWorktrees)
+	}
+	resumed := runAdvanceCommandReport(t, cmd, repository)
+	if resumed.State != issuedelivery.StateCompleted ||
+		resumed.RunID != report.RunID ||
+		resumed.NonLocal == nil || resumed.NonLocal.Merge == nil {
+		t.Fatalf("completed effects were not adopted on resume: %#v", resumed)
+	}
+	if len(local.removedWorktrees) != 2 {
+		t.Fatalf("completed resume duplicated cleanup: %#v", local.removedWorktrees)
 	}
 }

@@ -26,7 +26,6 @@ func TestCompactAdvanceReportSnapshotsEveryPauseCause(t *testing.T) {
 		{"non-local authorization", issuedelivery.StateWaiting, issuedelivery.PauseNonLocalAuthorization, issuedelivery.ActionAuthorizeNonLocal},
 		{"invariant block", issuedelivery.StateBlocked, issuedelivery.PauseInvariantBlock, issuedelivery.ActionResolveAuthorityBlock},
 		{"completed", issuedelivery.StateCompleted, issuedelivery.PauseCompleted, issuedelivery.ActionNone},
-		{"deterministic advance", issuedelivery.StateNeedsReview, issuedelivery.PauseDeterministicAdvance, issuedelivery.ActionAdvance},
 		{"candidate repair", issuedelivery.StateNeedsReview, issuedelivery.PauseCandidateRepair, issuedelivery.ActionRepairCandidate},
 		{"lock contention", issuedelivery.StateWaiting, issuedelivery.PauseLockContention, issuedelivery.ActionRetryAdvance},
 		{"legacy workflow", issuedelivery.StateWaiting, issuedelivery.PauseLegacyWorkflow, issuedelivery.ActionResumeLegacyV1},
@@ -107,12 +106,6 @@ func TestRepeatedCompactAdvanceReportsAreMateriallySmaller(t *testing.T) {
 			RunID: "run-sequence", State: issuedelivery.StateWaiting,
 			Reason: "local readiness proved", PauseCause: issuedelivery.PauseNonLocalAuthorization,
 			NextAction: issuedelivery.ActionAuthorizeNonLocal, Candidate: candidate, LocalReadiness: readiness,
-		},
-		{
-			RunID: "run-sequence", State: issuedelivery.StateWaiting,
-			Reason: "authorization recorded", PauseCause: issuedelivery.PauseDeterministicAdvance,
-			NextAction: issuedelivery.ActionAdvance, Candidate: candidate, LocalReadiness: readiness,
-			NonLocal: &issuedelivery.NonLocalDelivery{},
 		},
 		{
 			RunID: "run-sequence", State: issuedelivery.StateWaiting,

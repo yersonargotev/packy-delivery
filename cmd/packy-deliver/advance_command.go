@@ -114,6 +114,8 @@ type compactCIIdentity struct {
 	DetailsURL string                     `json:"details_url"`
 }
 
+const maxConvergentAdvanceTransitions = 32
+
 func (c command) advance(ctx context.Context, args []string, stdout io.Writer) error {
 	f := flag.NewFlagSet("deliveryevidence advance", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
@@ -203,18 +205,9 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 		QualificationReview:     options.QualificationReview,
 		QualificationCorrection: options.QualificationCorrection,
 	}
-	outcome, err := advancer.Advance(ctx, request)
+	outcome, err := convergeAdvance(ctx, advancer, request, options.AuthorizeRemote)
 	if err != nil {
 		return err
-	}
-	if options.AuthorizeRemote && outcome.LocalReadiness != nil && outcome.NonLocal == nil {
-		request.Decision, request.Repair = nil, nil
-		request.QualificationReview, request.QualificationCorrection = nil, nil
-		request.NonLocal = nonLocalAuthorization(outcome)
-		outcome, err = advancer.Advance(ctx, request)
-		if err != nil {
-			return err
-		}
 	}
 	var report any
 	if options.FullReport {
@@ -236,6 +229,94 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	raw = append(raw, '\n')
 	_, err = stdout.Write(raw)
 	return err
+}
+
+func convergeAdvance(
+	ctx context.Context,
+	advancer issueDeliveryAdvancer,
+	request issuedelivery.Request,
+	authorizeRemote bool,
+) (issuedelivery.Outcome, error) {
+	authorizationAvailable := authorizeRemote
+	seen := map[string]bool{}
+	var last issuedelivery.Outcome
+	deterministicTransitions := 0
+	for {
+		outcome, err := advancer.Advance(ctx, request)
+		if err != nil {
+			return issuedelivery.Outcome{}, err
+		}
+		last = outcome
+		request.Decision, request.Repair = nil, nil
+		request.QualificationReview, request.QualificationCorrection = nil, nil
+		request.NonLocal = nil
+
+		if authorizationAvailable &&
+			outcome.PauseCause == issuedelivery.PauseNonLocalAuthorization &&
+			outcome.NextAction == issuedelivery.ActionAuthorizeNonLocal &&
+			outcome.LocalReadiness != nil && outcome.NonLocal == nil {
+			request.NonLocal = nonLocalAuthorization(outcome)
+			authorizationAvailable = false
+			continue
+		}
+		if outcome.PauseCause != issuedelivery.PauseDeterministicAdvance {
+			return outcome, nil
+		}
+		signature := advanceOutcomeSignature(outcome)
+		if seen[signature] {
+			return convergenceBlockedOutcome(outcome, "deterministic Advance repeated the same state signature"), nil
+		}
+		seen[signature] = true
+		deterministicTransitions++
+		if deterministicTransitions >= maxConvergentAdvanceTransitions {
+			return convergenceBlockedOutcome(
+				last,
+				fmt.Sprintf("deterministic Advance reached its %d-transition limit", maxConvergentAdvanceTransitions),
+			), nil
+		}
+	}
+}
+
+func advanceOutcomeSignature(outcome issuedelivery.Outcome) string {
+	candidateID := ""
+	if outcome.Candidate != nil {
+		candidateID = outcome.Candidate.ID
+	}
+	remoteStage := ""
+	if outcome.NonLocal != nil {
+		switch {
+		case outcome.NonLocal.Merge != nil:
+			remoteStage = "merge:" + outcome.NonLocal.Merge.MergeCommitSHA
+		case len(outcome.NonLocal.Checks) > 0:
+			remoteStage = fmt.Sprintf("ci:%d", len(outcome.NonLocal.Checks))
+		case outcome.NonLocal.PullRequest != nil:
+			remoteStage = fmt.Sprintf("pr:%d", outcome.NonLocal.PullRequest.Number)
+		case outcome.NonLocal.Branch != nil:
+			remoteStage = "branch:" + outcome.NonLocal.Branch.HeadSHA
+		default:
+			remoteStage = "authorized"
+		}
+	}
+	persistedProgress := ""
+	if len(outcome.Timing) > 0 {
+		latest := outcome.Timing[len(outcome.Timing)-1]
+		persistedProgress = fmt.Sprintf(
+			"%d:%s:%s", latest.Sequence, latest.Phase, latest.CompletedAt,
+		)
+	}
+	return strings.Join([]string{
+		outcome.RunID, string(outcome.State), outcome.Reason, string(outcome.PauseCause),
+		string(outcome.NextAction), candidateID, remoteStage, persistedProgress,
+	}, "\x00")
+}
+
+func convergenceBlockedOutcome(outcome issuedelivery.Outcome, reason string) issuedelivery.Outcome {
+	outcome.State = issuedelivery.StateBlocked
+	outcome.Reason = reason
+	outcome.PauseCause = issuedelivery.PauseInvariantBlock
+	outcome.NextAction = issuedelivery.ActionInspectBlockedTransition
+	outcome.BlockerKind = issuedelivery.BlockerAdvanceConvergence
+	return outcome
 }
 
 func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceReport {
