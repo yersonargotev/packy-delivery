@@ -186,6 +186,9 @@ func TestStatusFailsForMissingCorruptAndMismatchedRuns(t *testing.T) {
 			RepositoryPath: "/repo", IssueNumber: 356,
 		}); err == nil {
 			t.Fatal("corrupt run was observed successfully")
+		} else if class, transient, ok := StatusErrorDetails(err); !ok ||
+			transient || class != StatusErrorCorruption {
+			t.Fatalf("corrupt run classification = %q transient=%t ok=%t", class, transient, ok)
 		}
 	})
 }

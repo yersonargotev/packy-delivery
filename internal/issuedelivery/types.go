@@ -319,6 +319,10 @@ type Clock interface {
 	Now() time.Time
 }
 
+type Waiter interface {
+	Wait(context.Context, time.Duration) error
+}
+
 type ReviewExecutor interface {
 	Review(context.Context, ReviewRequest) (CandidateReview, error)
 }
@@ -883,6 +887,7 @@ type Config struct {
 	Git               GitObserver
 	GitHub            GitHubObserver
 	Clock             Clock
+	Waiter            Waiter
 	Review            ReviewExecutor
 	Validation        ValidationExecutor
 	Risk              CandidateRiskObserver
@@ -901,6 +906,7 @@ type Module struct {
 	git               GitObserver
 	github            GitHubObserver
 	clock             Clock
+	waiter            Waiter
 	review            ReviewExecutor
 	validation        ValidationExecutor
 	risk              CandidateRiskObserver
@@ -922,6 +928,9 @@ func New(config Config) (*Module, error) {
 	}
 	if config.Clock == nil {
 		config.Clock = systemClock{}
+	}
+	if config.Waiter == nil {
+		config.Waiter = systemWaiter{}
 	}
 	if config.DeclaredProfile == "" {
 		config.DeclaredProfile = deliveryevidence.RiskStandard
@@ -960,7 +969,7 @@ func New(config Config) (*Module, error) {
 		}
 	}
 	return &Module{
-		git: config.Git, github: config.GitHub, clock: config.Clock,
+		git: config.Git, github: config.GitHub, clock: config.Clock, waiter: config.Waiter,
 		review: config.Review, validation: config.Validation, sandboxRoot: config.SandboxRoot,
 		risk: config.Risk, specialist: config.Specialist, boundary: config.Boundary,
 		validationSession: config.ValidationSession,

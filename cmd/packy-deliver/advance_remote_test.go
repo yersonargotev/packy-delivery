@@ -162,6 +162,30 @@ func TestProductionStatusNonLocalObservationClassifiesCommandFailureAsTransient(
 	}
 }
 
+func TestProductionStatusNonLocalObservationClassifiesAuthorizationFailureAsPermanent(t *testing.T) {
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil},
+		errs:    []error{errors.New("HTTP 403: forbidden")},
+	}
+	observer := productionStatusNonLocalObserver{
+		gateway: productionNonLocalGateway{runner: runner},
+	}
+	_, err := observer.ObserveNonLocal(
+		context.Background(),
+		issuedelivery.NonLocalObserveRequest{
+			Repository: packyRemoteRepository(),
+			Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+			Branch:     "chore/issue-361-remote-adapter",
+			BaseRef:    "main",
+			HeadSHA:    strings.Repeat("b", 40),
+		},
+	)
+	class, transient, ok := issuedelivery.StatusErrorDetails(err)
+	if !ok || class != issuedelivery.StatusErrorAuthority || transient {
+		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+	}
+}
+
 func TestProductionStatusNonLocalObservationClassifiesInvalidIdentityAsPermanent(t *testing.T) {
 	runner := &fakeRemoteRunner{
 		outputs: [][]byte{[]byte(`{"id":"unexpected","nameWithOwner":"another/repository"}`)},

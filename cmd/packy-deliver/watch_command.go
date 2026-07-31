@@ -14,13 +14,7 @@ import (
 	"github.com/yersonargotev/packy-delivery/internal/issuedelivery"
 )
 
-const (
-	watchEventSchema = "packy.watch-event/v1"
-	minWatchInterval = 100 * time.Millisecond
-	maxWatchInterval = 5 * time.Minute
-	minWatchTimeout  = time.Second
-	maxWatchTimeout  = 24 * time.Hour
-)
+const watchEventSchema = "packy.watch-event/v1"
 
 type watchOptions struct {
 	RepositoryPath string
@@ -29,6 +23,12 @@ type watchOptions struct {
 	Timeout        time.Duration
 	Output         string
 }
+
+type issueDeliveryWatcher interface {
+	Watch(context.Context, issuedelivery.WatchRequest, issuedelivery.WatchEmitter) error
+}
+
+type watchFactory func(statusOptions) (issueDeliveryWatcher, error)
 
 type watchEvent struct {
 	Schema           string                                `json:"schema"`
@@ -43,14 +43,12 @@ type watchEvent struct {
 }
 
 type watchTimeoutError struct {
-	timeout time.Duration
+	err error
 }
 
-func (e *watchTimeoutError) Error() string {
-	return fmt.Sprintf("watch timed out after %s", e.timeout)
-}
-
-func (*watchTimeoutError) ExitCode() int { return 2 }
+func (e *watchTimeoutError) Error() string { return e.err.Error() }
+func (e *watchTimeoutError) Unwrap() error { return e.err }
+func (*watchTimeoutError) ExitCode() int   { return 2 }
 
 func (c command) watch(ctx context.Context, args []string, stdout io.Writer) error {
 	if ctx == nil {
@@ -60,107 +58,29 @@ func (c command) watch(ctx context.Context, args []string, stdout io.Writer) err
 	if err != nil {
 		return err
 	}
-	if c.StatusFactory == nil {
-		return errors.New("Status adapter is unavailable")
+	if c.WatchFactory == nil {
+		return errors.New("Watch adapter is unavailable")
 	}
-	observer, err := c.StatusFactory(statusOptions{
+	watcher, err := c.WatchFactory(statusOptions{
 		RepositoryPath: options.RepositoryPath,
 		IssueNumber:    options.IssueNumber,
 	})
 	if err != nil {
-		return fmt.Errorf("configure Status: %w", err)
+		return fmt.Errorf("configure Watch: %w", err)
 	}
-	started := c.now()
-	deadline := started.Add(options.Timeout)
-	request := issuedelivery.StatusRequest{
+	err = watcher.Watch(ctx, issuedelivery.WatchRequest{
 		RepositoryPath: options.RepositoryPath,
 		IssueNumber:    options.IssueNumber,
+		Interval:       options.Interval,
+		Timeout:        options.Timeout,
+	}, func(event issuedelivery.WatchEvent) error {
+		return emitWatchEvent(stdout, options.Output, watchEventFromDomain(event))
+	})
+	var timeout *issuedelivery.WatchTimeoutError
+	if errors.As(err, &timeout) {
+		return &watchTimeoutError{err: err}
 	}
-	var (
-		sequence       int
-		lastEmitted    *watchEvent
-		lastSuccessful *issuedelivery.Outcome
-	)
-	for {
-		if sequence > 0 && !c.now().Before(deadline) {
-			return &watchTimeoutError{timeout: options.Timeout}
-		}
-		outcome, observeErr := observer.Status(ctx, request)
-		observedAt := c.now()
-		if observeErr != nil {
-			if errors.Is(observeErr, context.Canceled) ||
-				errors.Is(observeErr, context.DeadlineExceeded) {
-				return observeErr
-			}
-			class, transient, typed := issuedelivery.StatusErrorDetails(observeErr)
-			if !typed {
-				class = issuedelivery.StatusErrorRunState
-			}
-			event := watchErrorEvent(sequence+1, observedAt, lastSuccessful, class)
-			if lastEmitted == nil || !sameWatchEvent(*lastEmitted, event) {
-				sequence++
-				event.Sequence = sequence
-				if err := emitWatchEvent(stdout, options.Output, event); err != nil {
-					return err
-				}
-				copy := event
-				lastEmitted = &copy
-			}
-			if !typed || !transient {
-				return fmt.Errorf("watch observation failed (%s): %w", class, observeErr)
-			}
-			if err := c.waitForWatchPoll(ctx, options.Interval, deadline); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err
-				}
-				return &watchTimeoutError{timeout: options.Timeout}
-			}
-			continue
-		}
-
-		event := watchOutcomeEvent(sequence+1, observedAt, outcome)
-		lockAvailable := lastSuccessful != nil &&
-			lastSuccessful.IssueLockContended &&
-			!outcome.IssueLockContended
-		externalChanged := outcome.PauseCause == issuedelivery.PauseExternalResult &&
-			outcome.StatusObservation != nil &&
-			outcome.StatusObservation.Changed
-		if externalChanged {
-			event.NextAction = issuedelivery.ActionAdvance
-		}
-		if lockAvailable {
-			event.NextAction = issuedelivery.ActionRetryAdvance
-		}
-		recovered := lastEmitted != nil && lastEmitted.ErrorClass != ""
-		meaningfulChange := lastEmitted == nil || !sameWatchEvent(*lastEmitted, event)
-		if meaningfulChange {
-			sequence++
-			event.Sequence = sequence
-			if err := emitWatchEvent(stdout, options.Output, event); err != nil {
-				return err
-			}
-			copy := event
-			lastEmitted = &copy
-		}
-		if lockAvailable || externalChanged {
-			return nil
-		}
-		if !watchPollable(outcome) {
-			return nil
-		}
-		if lastSuccessful != nil && meaningfulChange && !recovered &&
-			!lastSuccessful.IssueLockContended {
-			return nil
-		}
-		copy := outcome
-		lastSuccessful = &copy
-		if err := c.waitForWatchPoll(ctx, options.Interval, deadline); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			return &watchTimeoutError{timeout: options.Timeout}
-		}
-	}
+	return err
 }
 
 func parseWatchOptions(args []string) (watchOptions, error) {
@@ -181,22 +101,14 @@ func parseWatchOptions(args []string) (watchOptions, error) {
 	if !filepath.IsAbs(options.RepositoryPath) {
 		return watchOptions{}, errors.New("repository must be an absolute path")
 	}
-	if options.Interval < minWatchInterval || options.Interval > maxWatchInterval {
-		return watchOptions{}, fmt.Errorf(
-			"interval must be from %s through %s",
-			minWatchInterval,
-			maxWatchInterval,
-		)
+	request := issuedelivery.WatchRequest{
+		RepositoryPath: options.RepositoryPath,
+		IssueNumber:    options.IssueNumber,
+		Interval:       options.Interval,
+		Timeout:        options.Timeout,
 	}
-	if options.Timeout < minWatchTimeout || options.Timeout > maxWatchTimeout {
-		return watchOptions{}, fmt.Errorf(
-			"timeout must be from %s through %s",
-			minWatchTimeout,
-			maxWatchTimeout,
-		)
-	}
-	if options.Timeout < options.Interval {
-		return watchOptions{}, errors.New("timeout must be at least the polling interval")
+	if err := issuedelivery.ValidateWatchRequest(request); err != nil {
+		return watchOptions{}, err
 	}
 	if options.Output != "text" && options.Output != "jsonl" {
 		return watchOptions{}, fmt.Errorf("output %q is invalid; use text or jsonl", options.Output)
@@ -221,63 +133,20 @@ func containsWatchHelpFlag(args []string) bool {
 	})
 }
 
-func watchOutcomeEvent(
-	sequence int,
-	observedAt time.Time,
-	outcome issuedelivery.Outcome,
-) watchEvent {
+func watchEventFromDomain(observed issuedelivery.WatchEvent) watchEvent {
+	outcome := observed.Outcome
 	event := watchEvent{
-		Schema: watchEventSchema, Sequence: sequence,
-		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
+		Schema: watchEventSchema, Sequence: observed.Sequence,
+		ObservedAt: observed.ObservedAt.UTC().Format(time.RFC3339Nano),
 		RunID:      outcome.RunID, State: outcome.State,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
+		ErrorClass: observed.ErrorClass,
 	}
 	if outcome.StatusObservation != nil {
 		identity := outcome.StatusObservation.Current
 		event.RelevantIdentity = &identity
 	}
 	return event
-}
-
-func watchErrorEvent(
-	sequence int,
-	observedAt time.Time,
-	last *issuedelivery.Outcome,
-	class issuedelivery.StatusErrorClass,
-) watchEvent {
-	if last == nil {
-		return watchEvent{
-			Schema: watchEventSchema, Sequence: sequence,
-			ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
-			ErrorClass: class,
-		}
-	}
-	event := watchOutcomeEvent(sequence, observedAt, *last)
-	event.ErrorClass = class
-	return event
-}
-
-func watchPollable(outcome issuedelivery.Outcome) bool {
-	return outcome.PauseCause == issuedelivery.PauseExternalResult ||
-		outcome.PauseCause == issuedelivery.PauseLockContention
-}
-
-func sameWatchEvent(left, right watchEvent) bool {
-	if left.RunID != right.RunID ||
-		left.State != right.State ||
-		left.PauseCause != right.PauseCause ||
-		left.NextAction != right.NextAction ||
-		left.ErrorClass != right.ErrorClass {
-		return false
-	}
-	switch {
-	case left.RelevantIdentity == nil && right.RelevantIdentity == nil:
-		return true
-	case left.RelevantIdentity == nil || right.RelevantIdentity == nil:
-		return false
-	default:
-		return *left.RelevantIdentity == *right.RelevantIdentity
-	}
 }
 
 func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
@@ -318,25 +187,4 @@ func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
 		errorClass,
 	)
 	return err
-}
-
-func (c command) waitForWatchPoll(
-	ctx context.Context,
-	interval time.Duration,
-	deadline time.Time,
-) error {
-	remaining := deadline.Sub(c.now())
-	if remaining <= 0 {
-		return &watchTimeoutError{timeout: 0}
-	}
-	if interval > remaining {
-		interval = remaining
-	}
-	if err := c.wait(ctx, interval); err != nil {
-		return err
-	}
-	if !c.now().Before(deadline) {
-		return &watchTimeoutError{timeout: 0}
-	}
-	return nil
 }

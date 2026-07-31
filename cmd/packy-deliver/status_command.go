@@ -35,11 +35,10 @@ func (observer productionStatusNonLocalObserver) ObserveNonLocal(
 ) (issuedelivery.NonLocalObservation, error) {
 	observation, err := observer.gateway.observeNonLocal(ctx, request, false)
 	if err != nil {
-		var commandError *remoteObservationCommandError
+		var commandError *remoteCommandError
 		if errors.As(err, &commandError) {
-			return issuedelivery.NonLocalObservation{}, issuedelivery.NewStatusError(
+			return issuedelivery.NonLocalObservation{}, classifyStatusCommandError(
 				issuedelivery.StatusErrorExternalRead,
-				true,
 				err,
 			)
 		}
@@ -50,6 +49,29 @@ func (observer productionStatusNonLocalObserver) ObserveNonLocal(
 		)
 	}
 	return observation, nil
+}
+
+func classifyStatusCommandError(class issuedelivery.StatusErrorClass, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if _, _, typed := issuedelivery.StatusErrorDetails(err); typed {
+		return err
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"authentication", "unauthorized", "forbidden", "http 401", "http 403",
+		"not authorized", "permission denied",
+	} {
+		if strings.Contains(message, marker) {
+			return issuedelivery.NewStatusError(
+				issuedelivery.StatusErrorAuthority,
+				false,
+				err,
+			)
+		}
+	}
+	return issuedelivery.NewStatusError(class, true, err)
 }
 
 func (c command) status(ctx context.Context, args []string, stdout io.Writer) error {
@@ -120,6 +142,14 @@ func containsStatusHelpFlag(args []string) bool {
 }
 
 func newProductionStatuser(options statusOptions) (issueDeliveryStatuser, error) {
+	return newProductionObservationModule(options)
+}
+
+func newProductionWatcher(options statusOptions) (issueDeliveryWatcher, error) {
+	return newProductionObservationModule(options)
+}
+
+func newProductionObservationModule(options statusOptions) (*issuedelivery.Module, error) {
 	runner := execRunner{}
 	return issuedelivery.New(issuedelivery.Config{
 		Git:    productionGitObserver{runner: runner},

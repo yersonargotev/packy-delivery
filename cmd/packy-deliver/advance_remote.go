@@ -22,12 +22,12 @@ type productionNonLocalGateway struct {
 	attributions []advanceCIFailureAttribution
 }
 
-type remoteObservationCommandError struct {
+type remoteCommandError struct {
 	err error
 }
 
-func (e *remoteObservationCommandError) Error() string { return e.err.Error() }
-func (e *remoteObservationCommandError) Unwrap() error { return e.err }
+func (e *remoteCommandError) Error() string { return e.err.Error() }
+func (e *remoteCommandError) Unwrap() error { return e.err }
 
 type remoteRepository struct {
 	ID            string `json:"id"`
@@ -587,7 +587,7 @@ func (gateway productionNonLocalGateway) output(ctx context.Context, name string
 	}
 	output, err := gateway.runner.Output(ctx, name, args...)
 	if err != nil {
-		return output, &remoteObservationCommandError{err: err}
+		return output, &remoteCommandError{err: err}
 	}
 	return output, nil
 }

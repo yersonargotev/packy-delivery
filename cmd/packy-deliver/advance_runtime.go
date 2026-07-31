@@ -320,21 +320,35 @@ func (o productionTrackerObserver) ObserveIssue(
 	slug := git.Owner + "/" + git.Name
 	repositoryRaw, err := o.runner.Output(ctx, "gh", "repo", "view", slug, "--json", "nameWithOwner,id")
 	if err != nil {
-		return issuedelivery.TrackerObservation{}, fmt.Errorf("observe GitHub repository: %w", err)
+		return issuedelivery.TrackerObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitHubRead,
+			fmt.Errorf("observe GitHub repository: %w", err),
+		)
 	}
 	var repository repoObservation
 	if err = json.Unmarshal(repositoryRaw, &repository); err != nil {
-		return issuedelivery.TrackerObservation{}, fmt.Errorf("decode GitHub repository: %w", err)
+		return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorCorruption,
+			false,
+			fmt.Errorf("decode GitHub repository: %w", err),
+		)
 	}
 	if repository.NameWithOwner != slug || repository.ID == "" {
-		return issuedelivery.TrackerObservation{}, errors.New("GitHub repository identity is incompatible with origin")
+		return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorAuthority,
+			false,
+			errors.New("GitHub repository identity is incompatible with origin"),
+		)
 	}
 	issueRaw, err := o.runner.Output(
 		ctx, "gh", "issue", "view", fmt.Sprint(number), "--repo", slug,
 		"--json", "number,id,title,body,state,url,labels,blockedBy",
 	)
 	if err != nil {
-		return issuedelivery.TrackerObservation{}, fmt.Errorf("observe GitHub issue: %w", err)
+		return issuedelivery.TrackerObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitHubRead,
+			fmt.Errorf("observe GitHub issue: %w", err),
+		)
 	}
 	var issue struct {
 		Number    int                `json:"number"`
@@ -350,10 +364,18 @@ func (o productionTrackerObserver) ObserveIssue(
 		} `json:"blockedBy"`
 	}
 	if err = json.Unmarshal(issueRaw, &issue); err != nil {
-		return issuedelivery.TrackerObservation{}, fmt.Errorf("decode GitHub issue: %w", err)
+		return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorCorruption,
+			false,
+			fmt.Errorf("decode GitHub issue: %w", err),
+		)
 	}
 	if issue.Number != number || issue.ID == "" || issue.URL != "https://github.com/"+slug+"/issues/"+fmt.Sprint(number) {
-		return issuedelivery.TrackerObservation{}, errors.New("GitHub issue identity is incompatible with the requested Packy issue")
+		return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorAuthority,
+			false,
+			errors.New("GitHub issue identity is incompatible with the requested Packy issue"),
+		)
 	}
 	criteria, exclusions, ambiguities, references := parseIssueAuthority(issue.Body, issue.URL, slug)
 	labels := make([]string, 0, len(issue.Labels))
@@ -363,7 +385,11 @@ func (o productionTrackerObserver) ObserveIssue(
 	sort.Strings(labels)
 	dependencies := make([]issuedelivery.DependencyObservation, 0, len(issue.BlockedBy.Nodes))
 	if issue.BlockedBy.TotalCount != len(issue.BlockedBy.Nodes) {
-		return issuedelivery.TrackerObservation{}, errors.New("GitHub issue dependency observation is incomplete")
+		return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorCorruption,
+			false,
+			errors.New("GitHub issue dependency observation is incomplete"),
+		)
 	}
 	for _, dependency := range issue.BlockedBy.Nodes {
 		dependencies = append(dependencies, issuedelivery.DependencyObservation{
@@ -380,7 +406,10 @@ func (o productionTrackerObserver) ObserveIssue(
 			"--json", "number,id,title,body,state,url,labels",
 		)
 		if observeErr != nil {
-			return issuedelivery.TrackerObservation{}, fmt.Errorf("observe GitHub specification: %w", observeErr)
+			return issuedelivery.TrackerObservation{}, classifyStatusCommandError(
+				issuedelivery.StatusErrorGitHubRead,
+				fmt.Errorf("observe GitHub specification: %w", observeErr),
+			)
 		}
 		var observed struct {
 			Number int                `json:"number"`
@@ -392,14 +421,22 @@ func (o productionTrackerObserver) ObserveIssue(
 			Labels []labelObservation `json:"labels"`
 		}
 		if err = json.Unmarshal(specificationRaw, &observed); err != nil {
-			return issuedelivery.TrackerObservation{}, fmt.Errorf("decode GitHub specification: %w", err)
+			return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+				issuedelivery.StatusErrorCorruption,
+				false,
+				fmt.Errorf("decode GitHub specification: %w", err),
+			)
 		}
 		expectedURL := fmt.Sprintf(
 			"https://github.com/%s/issues/%d", slug, o.specificationNumber,
 		)
 		if observed.Number != o.specificationNumber || observed.ID == "" || observed.URL != expectedURL {
-			return issuedelivery.TrackerObservation{}, errors.New(
-				"GitHub specification identity is incompatible with the requested Packy specification",
+			return issuedelivery.TrackerObservation{}, issuedelivery.NewStatusError(
+				issuedelivery.StatusErrorAuthority,
+				false,
+				errors.New(
+					"GitHub specification identity is incompatible with the requested Packy specification",
+				),
 			)
 		}
 		specificationLabels := make([]string, 0, len(observed.Labels))

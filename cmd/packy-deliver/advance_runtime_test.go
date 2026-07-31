@@ -19,6 +19,16 @@ import (
 
 type productionPathReviewExecutor struct{}
 
+type runtimeRunnerFunc func(context.Context, string, ...string) ([]byte, error)
+
+func (run runtimeRunnerFunc) Output(
+	ctx context.Context,
+	name string,
+	args ...string,
+) ([]byte, error) {
+	return run(ctx, name, args...)
+}
+
 func (productionPathReviewExecutor) Review(
 	_ context.Context,
 	request issuedelivery.ReviewRequest,
@@ -476,6 +486,57 @@ func TestProductionTrackerObserverBindsSelectedSpecification(t *testing.T) {
 	}
 	if len(runner.calls) != 3 || !strings.Contains(runner.calls[2], "issue view 354") {
 		t.Fatalf("tracker calls = %v", runner.calls)
+	}
+}
+
+func TestProductionTrackerObserverClassifiesReadFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		class     issuedelivery.StatusErrorClass
+		transient bool
+	}{
+		{
+			name: "transport", err: errors.New("temporary connection reset"),
+			class: issuedelivery.StatusErrorGitHubRead, transient: true,
+		},
+		{
+			name: "authority", err: errors.New("HTTP 403: forbidden"),
+			class: issuedelivery.StatusErrorAuthority,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observer := productionTrackerObserver{runner: runtimeRunnerFunc(
+				func(context.Context, string, ...string) ([]byte, error) {
+					return nil, test.err
+				},
+			)}
+			_, err := observer.ObserveIssue(
+				context.Background(),
+				issuedelivery.GitObservation{Owner: "yersonargotev", Name: "packy"},
+				361,
+			)
+			class, transient, ok := issuedelivery.StatusErrorDetails(err)
+			if !ok || class != test.class || transient != test.transient {
+				t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+			}
+		})
+	}
+}
+
+func TestProductionTrackerObserverClassifiesMalformedAuthorityAsCorruption(t *testing.T) {
+	observer := productionTrackerObserver{runner: &fakeRunner{
+		outputs: [][]byte{[]byte(`{"nameWithOwner":`)},
+	}}
+	_, err := observer.ObserveIssue(
+		context.Background(),
+		issuedelivery.GitObservation{Owner: "yersonargotev", Name: "packy"},
+		361,
+	)
+	class, transient, ok := issuedelivery.StatusErrorDetails(err)
+	if !ok || class != issuedelivery.StatusErrorCorruption || transient {
+		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
 	}
 }
 

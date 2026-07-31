@@ -17,6 +17,15 @@ func (m *Module) Status(ctx context.Context, request StatusRequest) (Outcome, er
 	}
 	git, err := m.git.ObserveGit(ctx, request.RepositoryPath)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Outcome{}, ctxErr
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Outcome{}, err
+		}
+		if _, _, typed := StatusErrorDetails(err); typed {
+			return Outcome{}, err
+		}
 		return Outcome{}, NewStatusError(
 			StatusErrorGitRead,
 			true,
@@ -66,6 +75,15 @@ func (m *Module) Status(ctx context.Context, request StatusRequest) (Outcome, er
 
 		tracker, err := m.github.ObserveIssue(ctx, git, request.IssueNumber)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			if _, _, typed := StatusErrorDetails(err); typed {
+				return err
+			}
 			return NewStatusError(
 				StatusErrorGitHubRead,
 				true,
@@ -109,6 +127,12 @@ func (m *Module) Status(ctx context.Context, request StatusRequest) (Outcome, er
 				nonLocalObserveRequest(active, *candidate),
 			)
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
 				if _, _, typed := StatusErrorDetails(err); typed {
 					return err
 				}

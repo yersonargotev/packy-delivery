@@ -72,9 +72,9 @@ type command struct {
 	GitHub               Runner
 	Validation           ValidationRunner
 	Now                  func() time.Time
-	Wait                 func(context.Context, time.Duration) error
 	AdvanceFactory       advanceFactory
 	StatusFactory        statusFactory
+	WatchFactory         watchFactory
 	InputTemplateFactory inputTemplateFactory
 	LegacyPrefixRequired bool
 }
@@ -125,6 +125,7 @@ func main() {
 	if err := (command{
 		Git: execRunner{}, GitHub: execRunner{}, Validation: execValidationRunner{},
 		Now: time.Now, AdvanceFactory: newProductionAdvancer, StatusFactory: newProductionStatuser,
+		WatchFactory:         newProductionWatcher,
 		InputTemplateFactory: newProductionInputTemplateMaterializer,
 		LegacyPrefixRequired: true,
 	}).run(context.Background(), os.Args[1:], os.Stdout); err != nil {
@@ -1395,20 +1396,6 @@ func (c command) now() time.Time {
 		return c.Now().UTC()
 	}
 	return time.Now().UTC()
-}
-
-func (c command) wait(ctx context.Context, duration time.Duration) error {
-	if c.Wait != nil {
-		return c.Wait(ctx, duration)
-	}
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func commandExitCode(err error) int {
