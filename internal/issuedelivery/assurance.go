@@ -582,6 +582,9 @@ func (m *Module) persistAssuranceTransition(
 	})
 	record.UpdatedAt = completed.Format(timeFormat)
 	adoptLegacyNullQualificationFindings(&record)
+	if err := projectAutomaticAssurance(&record); err != nil {
+		return Outcome{}, err
+	}
 	data, err := encodeRun(record)
 	if err != nil {
 		return Outcome{}, err

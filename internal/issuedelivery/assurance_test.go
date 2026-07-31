@@ -612,7 +612,6 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 		t.Fatalf("repair options=%#v", found.Repair)
 	}
 	before := *found.Candidate
-	beforeEvidence := *found.Evidence
 	decision := RepairDecision{
 		CandidateID: found.Repair.CandidateID, Class: RepairAdjudicationOnly,
 		Findings: []FindingDecision{
@@ -631,9 +630,10 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 		adjudicated.Candidate.RepairDecision.Class != RepairAdjudicationOnly ||
 		!reflect.DeepEqual(adjudicated.Candidate.Effects, before.Effects) ||
 		!reflect.DeepEqual(adjudicated.Candidate.Boundaries, before.Boundaries) ||
-		!reflect.DeepEqual(adjudicated.Candidate.Reviews, before.Reviews) ||
 		!reflect.DeepEqual(adjudicated.Candidate.SpecialistReviews, before.SpecialistReviews) ||
-		!reflect.DeepEqual(adjudicated.Evidence, &beforeEvidence) {
+		len(adjudicated.Evidence.CandidateReviewReceipts) != 1 ||
+		len(adjudicated.Evidence.AssuranceAdjudications) != 1 ||
+		adjudicated.Evidence.AssuranceAdjudications[0].Class != string(RepairAdjudicationOnly) {
 		t.Fatalf("adjudication-only outcome=%#v", adjudicated)
 	}
 	timingCount := len(adjudicated.Timing)
@@ -649,6 +649,39 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 	if ready.State != StateWaiting || ready.LocalReadiness == nil ||
 		validator.focusedCalls != 1 || validator.exhaustiveCalls != 1 {
 		t.Fatalf("adjudication-only readiness=%#v", ready)
+	}
+	if len(ready.Evidence.ExhaustiveAssurance) != 1 ||
+		len(ready.Evidence.AssurancePhases) != len(ready.Timing) ||
+		ready.Evidence.ExhaustiveAssurance[0].CandidateID != ready.Candidate.ID {
+		t.Fatalf("canonical assurance receipts are incomplete: %#v", ready.Evidence)
+	}
+	for _, proof := range ready.Candidate.Acceptance {
+		if proof.ReviewReceipt == nil || proof.ReviewReceipt.ReceiptID == "" ||
+			proof.ValidationReceipt == nil || proof.ValidationReceipt.ReceiptID == "" {
+			t.Fatalf("acceptance proof does not reference canonical receipts: %#v", proof)
+		}
+	}
+	readyRecord, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedExhaustive := readyRecord
+	exhaustiveReceipt := &tamperedExhaustive.Evidence.ExhaustiveAssurance[0]
+	exhaustiveReceipt.ValidatorIdentity = "scripts/forged-validator.sh"
+	exhaustiveReceipt.Identity = deliveryevidence.ExhaustiveAssuranceReceiptIdentity(*exhaustiveReceipt)
+	if err := validateRun(tamperedExhaustive); err == nil {
+		t.Fatal("self-consistent tampered exhaustive assurance receipt was admitted")
+	}
+	orphanReferences, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanReferences.Evidence.CandidateReviewReceipts = nil
+	orphanReferences.Evidence.AssuranceAdjudications = nil
+	orphanReferences.Evidence.AssurancePhases = nil
+	orphanReferences.Evidence.ExhaustiveAssurance = nil
+	if err := validateRun(orphanReferences); err == nil {
+		t.Fatal("receipt identity references without canonical receipt arrays were admitted")
 	}
 	risk := module.risk.(*fakeCandidateRiskObserver)
 	risk.effects = []EffectObservation{{
@@ -874,6 +907,27 @@ func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing
 		resumedCandidate.LastRepairBatch.CompatiblePrefix {
 		t.Fatalf("historyless v2 repair was not bootstrapped: %#v", resumedCandidate)
 	}
+	for _, mutate := range []func(*deliveryevidence.AssuranceAdjudicationReceipt){
+		func(receipt *deliveryevidence.AssuranceAdjudicationReceipt) { receipt.Class = string(RepairBounded) },
+		func(receipt *deliveryevidence.AssuranceAdjudicationReceipt) {
+			receipt.Findings[0].Evidence = "self-consistent forged adjudication evidence"
+		},
+		func(receipt *deliveryevidence.AssuranceAdjudicationReceipt) { receipt.Generation++ },
+	} {
+		record, err := decodeRun(persisted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt := &record.Evidence.AssuranceAdjudications[0]
+		mutate(receipt)
+		receipt.Identity = deliveryevidence.AssuranceAdjudicationReceiptIdentity(
+			receipt.RequestID, receipt.CandidateID, receipt.Generation, receipt.Class,
+			receipt.CompatiblePrefix, receipt.Findings,
+		)
+		if err := validateRun(record); err == nil {
+			t.Fatal("self-consistent tampered adjudication receipt was admitted")
+		}
+	}
 	for _, mutate := range []func(*Candidate){
 		func(candidate *Candidate) { candidate.RepairDecision.Class = RepairBounded },
 		func(candidate *Candidate) {
@@ -902,6 +956,13 @@ func TestProfileEscalationCannotDowngradeCandidateChangingRepairClass(t *testing
 		}
 	}
 	compatibleCandidate.RepairBatches[0].Decision.Findings[0].Disposition = FindingRejected
+	compatibleReceipt := &compatible.Evidence.AssuranceAdjudications[0]
+	compatibleReceipt.Findings[0].Disposition = string(FindingRejected)
+	compatibleReceipt.CompatiblePrefix = true
+	compatibleReceipt.Identity = deliveryevidence.AssuranceAdjudicationReceiptIdentity(
+		compatibleReceipt.RequestID, compatibleReceipt.CandidateID, compatibleReceipt.Generation,
+		compatibleReceipt.Class, compatibleReceipt.CompatiblePrefix, compatibleReceipt.Findings,
+	)
 	if err := validateRun(compatible); err != nil {
 		t.Fatalf("compatible candidate-changing rejected-only prefix failed validation: %v", err)
 	}

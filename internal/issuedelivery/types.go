@@ -420,6 +420,7 @@ type AcceptanceProof struct {
 }
 
 type ReviewReceiptReference struct {
+	ReceiptID   string                      `json:"receipt_id,omitempty"`
 	CandidateID string                      `json:"candidate_id"`
 	Axis        deliveryevidence.ReviewAxis `json:"axis"`
 	Iteration   int                         `json:"iteration"`
@@ -428,6 +429,7 @@ type ReviewReceiptReference struct {
 }
 
 type ValidationReceiptReference struct {
+	ReceiptID   string                                   `json:"receipt_id,omitempty"`
 	Schema      deliveryevidence.ValidationReceiptSchema `json:"schema"`
 	CandidateID string                                   `json:"candidate_id"`
 	CommitSHA   string                                   `json:"commit_sha"`

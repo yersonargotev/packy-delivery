@@ -153,6 +153,9 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 		if found {
 			record.SupersedesRunID = active.ID
 		}
+		if err := projectAutomaticAssurance(&record); err != nil {
+			return err
+		}
 		data, err := encodeRun(record)
 		if err != nil {
 			return err
@@ -186,7 +189,7 @@ func compatibleOrphan(
 		record.Issue == tracker.Issue &&
 		record.AuthoritySHA256 == compiled.hash &&
 		record.SupersedesRunID == supersedes &&
-		reflect.DeepEqual(record.Evidence, evidencePointer(compiled)) &&
+		equalQualificationEvidence(record.Evidence, evidencePointer(compiled)) &&
 		reflect.DeepEqual(record.PendingDecision, compiled.pending) &&
 		reflect.DeepEqual(record.Decisions, compiled.decisions)
 	if !common {
@@ -197,6 +200,18 @@ func compatibleOrphan(
 		return true
 	}
 	return compatiblePreCompilerCorrectionOrphan(record, compiled)
+}
+
+func equalQualificationEvidence(left, right *deliveryevidence.Bundle) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	leftCopy, rightCopy := *left, *right
+	leftCopy.CandidateReviewReceipts, rightCopy.CandidateReviewReceipts = nil, nil
+	leftCopy.AssuranceAdjudications, rightCopy.AssuranceAdjudications = nil, nil
+	leftCopy.AssurancePhases, rightCopy.AssurancePhases = nil, nil
+	leftCopy.ExhaustiveAssurance, rightCopy.ExhaustiveAssurance = nil, nil
+	return reflect.DeepEqual(leftCopy, rightCopy)
 }
 
 func compatiblePreCompilerCorrectionOrphan(

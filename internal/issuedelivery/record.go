@@ -197,6 +197,9 @@ func validateRun(record runRecord) error {
 	if err := validateCandidates(record); err != nil {
 		return err
 	}
+	if err := validatePersistedAutomaticAssurance(record); err != nil {
+		return err
+	}
 	return nil
 }
 
