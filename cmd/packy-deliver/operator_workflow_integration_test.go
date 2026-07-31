@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -206,6 +207,133 @@ func TestOperatorWorkflowRoundTripsGeneratedInputsThroughRealModule(t *testing.T
 		final.NonLocal.Checks[0].RunID != 31 {
 		t.Fatalf("final Advance did not adopt the watched external result: %#v", final)
 	}
+}
+
+func TestOperatorWorkflowReportsQualificationBindingFieldAndLocatorRule(t *testing.T) {
+	home, config, state := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", config)
+	t.Setenv("XDG_STATE_HOME", state)
+
+	module, _, repository, _, clock := productionReadyModule(
+		t,
+		&operatorWorkflowNonLocalGateway{},
+		nil,
+		suppliedReviewExecutor{},
+		"qualification-correction",
+		issuedelivery.AuthorityItem{
+			Text: "Reach exact local readiness.", EvidenceLink: "issue#361:acceptance-1",
+		},
+		issuedelivery.AuthorityItem{
+			Text: "Preserve the public delivery contract.", EvidenceLink: "issue#361:acceptance-2",
+		},
+	)
+	cmd := command{
+		Now: clock.Now,
+		InputTemplateFactory: func(string) (issueDeliveryInputTemplateMaterializer, error) {
+			return module, nil
+		},
+		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
+			return module, nil
+		},
+	}
+	correctionPath := filepath.Join(t.TempDir(), "qualification-correction.json")
+	var stdout bytes.Buffer
+	if err := cmd.run(context.Background(), []string{
+		"input-template", "--repository", repository, "--issue", "361",
+		"--kind", string(issuedelivery.InputTemplateQualificationCorrection),
+		"--output", correctionPath,
+	}, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	var valid advanceReviewContent
+	readOperatorJSON(t, correctionPath, &valid)
+	fillOperatorQualificationCorrection(t, valid.QualificationCorrection)
+	if len(valid.QualificationCorrection.AcceptanceMatrix) < 2 {
+		t.Fatalf("qualification fixture has fewer than two rows: %#v", valid.QualificationCorrection)
+	}
+
+	assertion := "; assertion=this assertion remains long enough to satisfy the binding grammar"
+	tests := []struct {
+		name        string
+		row         int
+		field       string
+		kind        string
+		locator     string
+		expectation string
+		set         func(*deliveryevidence.AcceptanceRow, string)
+	}{
+		{"owning seam file", 0, "owning_seam", "file", "", "<path>/<name>", func(row *deliveryevidence.AcceptanceRow, value string) { row.OwningSeam = value }},
+		{"positive symbol", 1, "positive_evidence", "symbol", "Unqualified", "1-2 '.' or ':' characters", func(row *deliveryevidence.AcceptanceRow, value string) { row.PositiveEvidence = value }},
+		{"negative test", 0, "negative_evidence", "test", "TestShort", "Test<name>", func(row *deliveryevidence.AcceptanceRow, value string) { row.NegativeEvidence = value }},
+		{"failure command", 1, "failure_evidence", "command", "scripts/check.sh", "./<path>/<name>", func(row *deliveryevidence.AcceptanceRow, value string) { row.FailureEvidence = value }},
+		{"mutation fixture", 0, "mutation_evidence", "fixture", "fixture/group", "fixture/<group>/<name>", func(row *deliveryevidence.AcceptanceRow, value string) { row.MutationEvidence = value }},
+		{"compatibility review", 1, "compatibility_evidence", "review", "review/not-a-receipt", "review/<16-lowercase-hex>", func(row *deliveryevidence.AcceptanceRow, value string) { row.CompatibilityEvidence = value }},
+		{"preservation authority", 0, "preservation_evidence", "authority", "criterion-invalid", "criterion-<16-lowercase-hex>[/<name>] or issue#<number>[/<name>]", func(row *deliveryevidence.AcceptanceRow, value string) { row.PreservationEvidence = value }},
+		{"migration not applicable", 1, "migration_evidence", "not-applicable", "reason/single", "reason/<word>-<word>[-<word>...]", func(row *deliveryevidence.AcceptanceRow, value string) { row.MigrationEvidence = value }},
+		{"parseable source with invalid prefix", 0, "owning_seam", "fixture", "fixture/group/name", "must start with", func(row *deliveryevidence.AcceptanceRow, _ string) {
+			row.OwningSeam = "[criterion:source=wrong] source=fixture:fixture/group/name" + assertion
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(valid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var content advanceReviewContent
+			if err = json.Unmarshal(raw, &content); err != nil {
+				t.Fatal(err)
+			}
+			row := &content.QualificationCorrection.AcceptanceMatrix[test.row]
+			test.set(row, "[criterion:"+row.Identity+"] source="+test.kind+":"+test.locator+assertion)
+			writeOperatorJSON(t, correctionPath, content)
+
+			stdout.Reset()
+			err = cmd.run(context.Background(), []string{
+				"advance", "--repository", repository, "--issue", "361",
+				"--risk-profile", "low-risk", "--review-content", correctionPath,
+			}, &stdout)
+			if err == nil {
+				t.Fatal("invalid qualification correction was accepted")
+			}
+			for _, expected := range []string{
+				row.Identity,
+				"acceptance_matrix[" + strconv.Itoa(test.row) + "]." + test.field,
+				"source kind " + strconv.Quote(test.kind),
+				test.expectation,
+			} {
+				if !strings.Contains(err.Error(), expected) {
+					t.Fatalf("binding error %q does not contain %q", err, expected)
+				}
+			}
+		})
+	}
+
+	t.Run("stable criterion identity", func(t *testing.T) {
+		raw, err := json.Marshal(valid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var content advanceReviewContent
+		if err = json.Unmarshal(raw, &content); err != nil {
+			t.Fatal(err)
+		}
+		row := &content.QualificationCorrection.AcceptanceMatrix[0]
+		stableIdentity := row.Identity
+		row.Identity = "criterion-ffffffffffffffff"
+		writeOperatorJSON(t, correctionPath, content)
+
+		stdout.Reset()
+		err = cmd.run(context.Background(), []string{
+			"advance", "--repository", repository, "--issue", "361",
+			"--risk-profile", "low-risk", "--review-content", correctionPath,
+		}, &stdout)
+		if err == nil || !strings.Contains(err.Error(), stableIdentity) ||
+			!strings.Contains(err.Error(), "acceptance_matrix[0].identity") {
+			t.Fatalf("altered criterion identity error = %v", err)
+		}
+	})
 }
 
 func fillOperatorQualificationCorrection(
