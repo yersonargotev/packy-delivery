@@ -629,6 +629,63 @@ func TestAdvanceCommandRealModuleReportsCandidateRepair(t *testing.T) {
 	}
 }
 
+func TestAdvanceCommandFullReportProjectsCanonicalAssuranceOnce(t *testing.T) {
+	module, found, repository, _, _ := productionReadyModule(
+		t, nil, nil, commandFindingReviewExecutor{}, "repair-decision",
+	)
+	if found.Repair == nil {
+		t.Fatalf("production fixture did not request adjudication: %#v", found)
+	}
+	repair := issuedelivery.RepairDecision{
+		CandidateID: found.Repair.CandidateID, Class: issuedelivery.RepairAdjudicationOnly,
+		Findings: []issuedelivery.FindingDecision{{
+			FindingID: "command-bounded-repair", Disposition: issuedelivery.FindingRejected,
+			Evidence: "the cited command fixture is test-only and requires no production repair",
+		}},
+	}
+	path := filepath.Join(t.TempDir(), "adjudication.json")
+	raw, err := json.Marshal(repair)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := command{
+		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) { return module, nil },
+	}
+	report := runAdvanceCommandReport(t, cmd, repository, "--repair", path)
+	if report.State != issuedelivery.StateWaiting || report.LocalReadiness == nil ||
+		report.Evidence == nil || report.Candidate == nil {
+		t.Fatalf("full command report did not reach exact local readiness: %#v", report)
+	}
+	if len(report.Evidence.CandidateReviewReceipts) != 1 ||
+		len(report.Evidence.AssuranceAdjudications) != 1 ||
+		len(report.Evidence.ExhaustiveAssurance) != 1 ||
+		len(report.Evidence.AssurancePhases) != len(report.Timing) {
+		t.Fatalf("canonical assurance projection is incomplete: %#v", report.Evidence)
+	}
+	reviewID := report.Evidence.CandidateReviewReceipts[0].Identity
+	validationID := report.Evidence.ExhaustiveAssurance[0].Identity
+	for _, proof := range report.Candidate.Acceptance {
+		if proof.ReviewReceipt == nil || proof.ReviewReceipt.ReceiptID != reviewID ||
+			proof.ValidationReceipt == nil || proof.ValidationReceipt.ReceiptID != validationID {
+			t.Fatalf("acceptance proof does not bind canonical receipts: %#v", proof)
+		}
+	}
+
+	resumed := runAdvanceCommandReport(t, cmd, repository)
+	if resumed.State != issuedelivery.StateWaiting ||
+		len(resumed.Evidence.CandidateReviewReceipts) != 1 ||
+		len(resumed.Evidence.AssuranceAdjudications) != 1 ||
+		len(resumed.Evidence.ExhaustiveAssurance) != 1 ||
+		resumed.Evidence.CandidateReviewReceipts[0].Identity != reviewID ||
+		resumed.Evidence.ExhaustiveAssurance[0].Identity != validationID ||
+		len(resumed.Evidence.AssurancePhases) != len(report.Evidence.AssurancePhases) {
+		t.Fatalf("resumed command duplicated canonical assurance: %#v", resumed)
+	}
+}
+
 type commandLegacyCandidate struct {
 	ID              string                          `json:"id"`
 	BaseSHA         string                          `json:"base_sha"`

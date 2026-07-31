@@ -159,6 +159,198 @@ func TestV2AuthorityRiskAndCanonicalPersistence(t *testing.T) {
 	}
 }
 
+func TestAutomaticAssuranceReceiptsAreCanonicalAndV2Only(t *testing.T) {
+	bundle := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
+	receipt := AssurancePhaseReceipt{
+		Sequence: 1, Repository: bundle.Repository, Phase: "qualification",
+		BaseSHA: bundle.StartingBaseSHA, CommitSHA: bundle.StartingBaseSHA,
+		TreeSHA:   strings.Repeat("d", 40),
+		StartedAt: "2026-07-30T01:00:00.000000000Z", CompletedAt: "2026-07-30T01:00:01.000000000Z",
+	}
+	receipt.Identity = AssurancePhaseReceiptIdentity(
+		receipt.Sequence, receipt.Repository, receipt.Phase, receipt.CandidateID,
+		receipt.BaseSHA, receipt.CommitSHA, receipt.TreeSHA, receipt.StartedAt, receipt.CompletedAt,
+	)
+	bundle.AssurancePhases = []AssurancePhaseReceipt{receipt}
+	if _, err := CanonicalJSON(bundle); err != nil {
+		t.Fatalf("canonical v2 assurance receipt: %v", err)
+	}
+	exhaustive := ExhaustiveAssuranceReceipt{
+		Repository: bundle.Repository, CandidateID: "candidate-1",
+		CommitSHA: bundle.StartingBaseSHA, TreeSHA: strings.Repeat("d", 40),
+		CheckoutSHA256: strings.Repeat("e", 64), ValidatorIdentity: "scripts/validate-packy.sh",
+		ValidatorSHA256: strings.Repeat("f", 64), ValidatorIdentityExpiresAt: "not-a-timestamp",
+		Command: "./scripts/validate-packy.sh", HomeRoot: "/sandbox/home", ConfigRoot: "/sandbox/config",
+		Sandboxed: true, CompletedAt: "2026-07-30T01:00:01.000000000Z",
+	}
+	exhaustive.Identity = ExhaustiveAssuranceReceiptIdentity(exhaustive)
+	bundle.ExhaustiveAssurance = []ExhaustiveAssuranceReceipt{exhaustive}
+	if err := Validate(bundle); err == nil {
+		t.Fatal("invalid exhaustive validator identity expiry was accepted")
+	}
+	bundle.ExhaustiveAssurance = nil
+	bundle.AssurancePhases[0].Identity = "phase-stale"
+	if err := Validate(bundle); err == nil {
+		t.Fatal("stale assurance phase identity was accepted")
+	}
+	legacy := fixture()
+	legacy.AssurancePhases = []AssurancePhaseReceipt{receipt}
+	if err := Validate(legacy); err == nil {
+		t.Fatal("schema v1 automatic assurance receipt was accepted")
+	}
+}
+
+func TestAutomaticAssuranceRejectsDuplicateSemanticKeys(t *testing.T) {
+	base := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
+	review := CandidateReviewReceipt{
+		CandidateID: "candidate-1", Iteration: 1,
+		Axes:           []ReviewAxis{ReviewStandards, ReviewSpec},
+		FindingsSHA256: strings.Repeat("d", 64), CommitSHA: strings.Repeat("e", 40),
+		TreeSHA: strings.Repeat("f", 40), CompletedAt: "2026-07-30T01:00:01Z",
+	}
+	review.Identity = CandidateReviewReceiptIdentity(
+		review.CandidateID, review.Iteration, review.Axes, review.FindingsSHA256,
+		review.CommitSHA, review.TreeSHA,
+	)
+	adjudication := AssuranceAdjudicationReceipt{
+		RequestID: "request-1", CandidateID: "candidate-1", Generation: 1,
+		Class: "adjudication-only",
+		Findings: []AssuranceFindingDecision{{
+			FindingID: "finding-1", Disposition: "rejected-with-evidence", Evidence: "exact rejection evidence",
+		}},
+	}
+	adjudication.Identity = AssuranceAdjudicationReceiptIdentity(
+		adjudication.RequestID, adjudication.CandidateID, adjudication.Generation,
+		adjudication.Class, adjudication.CompatiblePrefix, adjudication.Findings,
+	)
+	exhaustive := ExhaustiveAssuranceReceipt{
+		Repository: base.Repository, CandidateID: "candidate-1",
+		CommitSHA: strings.Repeat("e", 40), TreeSHA: strings.Repeat("f", 40),
+		CheckoutSHA256: strings.Repeat("a", 64), ValidatorIdentity: "scripts/validate-packy.sh",
+		ValidatorSHA256:            strings.Repeat("b", 64),
+		ValidatorIdentityExpiresAt: "2026-07-31T01:00:00Z",
+		Command:                    "./scripts/validate-packy.sh", HomeRoot: "/sandbox/home", ConfigRoot: "/sandbox/config",
+		Sandboxed: true, CompletedAt: "2026-07-30T01:00:02Z",
+	}
+	exhaustive.Identity = ExhaustiveAssuranceReceiptIdentity(exhaustive)
+	tests := map[string]func(*Bundle){
+		"review": func(bundle *Bundle) {
+			duplicate := review
+			duplicate.FindingsSHA256 = strings.Repeat("c", 64)
+			duplicate.Identity = CandidateReviewReceiptIdentity(
+				duplicate.CandidateID, duplicate.Iteration, duplicate.Axes,
+				duplicate.FindingsSHA256, duplicate.CommitSHA, duplicate.TreeSHA,
+			)
+			bundle.CandidateReviewReceipts = []CandidateReviewReceipt{review, duplicate}
+		},
+		"adjudication": func(bundle *Bundle) {
+			duplicate := adjudication
+			duplicate.Generation = 2
+			duplicate.Identity = AssuranceAdjudicationReceiptIdentity(
+				duplicate.RequestID, duplicate.CandidateID, duplicate.Generation,
+				duplicate.Class, duplicate.CompatiblePrefix, duplicate.Findings,
+			)
+			bundle.AssuranceAdjudications = []AssuranceAdjudicationReceipt{adjudication, duplicate}
+		},
+		"exhaustive": func(bundle *Bundle) {
+			duplicate := exhaustive
+			duplicate.Command = "./scripts/validate-packy.sh --forged"
+			duplicate.Identity = ExhaustiveAssuranceReceiptIdentity(duplicate)
+			bundle.ExhaustiveAssurance = []ExhaustiveAssuranceReceipt{exhaustive, duplicate}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			bundle := base
+			mutate(&bundle)
+			if err := Validate(bundle); err == nil {
+				t.Fatalf("duplicate %s semantic key was accepted", name)
+			}
+		})
+	}
+}
+
+func TestAutomaticAssuranceCanonicalOrderIsPermutationInvariant(t *testing.T) {
+	bundle := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
+	makeReview := func(candidate string, iteration int) CandidateReviewReceipt {
+		receipt := CandidateReviewReceipt{
+			CandidateID: candidate, Iteration: iteration, Axes: []ReviewAxis{ReviewStandards},
+			FindingsSHA256: strings.Repeat("d", 64), CommitSHA: strings.Repeat("e", 40),
+			TreeSHA: strings.Repeat("f", 40), CompletedAt: "2026-07-30T01:00:01Z",
+		}
+		receipt.Identity = CandidateReviewReceiptIdentity(
+			receipt.CandidateID, receipt.Iteration, receipt.Axes, receipt.FindingsSHA256,
+			receipt.CommitSHA, receipt.TreeSHA,
+		)
+		return receipt
+	}
+	bundle.CandidateReviewReceipts = []CandidateReviewReceipt{
+		makeReview("candidate-b", 1), makeReview("candidate-a", 2),
+	}
+	first, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.CandidateReviewReceipts[0], bundle.CandidateReviewReceipts[1] =
+		bundle.CandidateReviewReceipts[1], bundle.CandidateReviewReceipts[0]
+	second, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("automatic assurance canonical JSON depends on input permutation")
+	}
+}
+
+func TestAutomaticAssuranceCanonicalizesCollectionsAndRejectsUnknownDisposition(t *testing.T) {
+	bundle := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
+	reviews := []CandidateReviewReceipt{
+		{
+			CandidateID: "candidate-b", Iteration: 2,
+			Axes:           []ReviewAxis{ReviewSpec, ReviewStandards},
+			FindingsSHA256: strings.Repeat("d", 64), CommitSHA: bundle.StartingBaseSHA,
+			TreeSHA: strings.Repeat("e", 40), CompletedAt: "2026-07-30T01:00:02Z",
+		},
+		{
+			CandidateID: "candidate-a", Iteration: 1,
+			Axes:           []ReviewAxis{ReviewStandards},
+			FindingsSHA256: strings.Repeat("f", 64), CommitSHA: bundle.StartingBaseSHA,
+			TreeSHA: strings.Repeat("e", 40), CompletedAt: "2026-07-30T01:00:01Z",
+		},
+	}
+	for index := range reviews {
+		reviews[index].Identity = CandidateReviewReceiptIdentity(
+			reviews[index].CandidateID, reviews[index].Iteration, reviews[index].Axes,
+			reviews[index].FindingsSHA256, reviews[index].CommitSHA, reviews[index].TreeSHA,
+		)
+	}
+	bundle.CandidateReviewReceipts = reviews
+	raw, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Index(raw, []byte(`"candidate_id":"candidate-a"`)) >
+		bytes.Index(raw, []byte(`"candidate_id":"candidate-b"`)) {
+		t.Fatal("candidate review receipts were not canonically ordered")
+	}
+
+	finding := AssuranceFindingDecision{
+		FindingID: "finding-1", Disposition: "unknown", Evidence: "caller-authored evidence",
+	}
+	adjudication := AssuranceAdjudicationReceipt{
+		RequestID: "request-1", CandidateID: "candidate-a", Generation: 1,
+		Class: "adjudication-only", Findings: []AssuranceFindingDecision{finding},
+	}
+	adjudication.Identity = AssuranceAdjudicationReceiptIdentity(
+		adjudication.RequestID, adjudication.CandidateID, adjudication.Generation,
+		adjudication.Class, adjudication.CompatiblePrefix, adjudication.Findings,
+	)
+	bundle.AssuranceAdjudications = []AssuranceAdjudicationReceipt{adjudication}
+	if err := Validate(bundle); err == nil {
+		t.Fatal("unknown assurance adjudication disposition was accepted")
+	}
+}
+
 func TestV2RequiresExplicitValidAuthorityAndRisk(t *testing.T) {
 	tests := map[string]func(*Bundle){
 		"missing authority": func(b *Bundle) { b.Authority.Kind = "" },

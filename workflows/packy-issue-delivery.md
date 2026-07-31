@@ -356,6 +356,17 @@ external effects. It pauses only for a genuine decision, required review,
 external wait, or a blocking identity or invariant mismatch. Each pause returns
 a decision-ready or status brief with linked evidence rather than raw logs.
 
+Every v2 persistence projects the run's completed candidate-review batches,
+repair adjudications, phase timing, and exhaustive validation into additive
+canonical assurance receipts. Review identities cover the exact candidate,
+iteration, axes, review contents, commit, and tree; adjudication identities
+cover the exact request, generation, class, compatible-prefix status, and
+finding batch. Acceptance proof references name those canonical receipt
+identities. Projection is append-only and idempotent: an absent historical v2
+projection may bootstrap, while a stale, conflicting, or incomplete persisted
+projection fails closed. A green validation receipt never supplies semantic
+acceptance evidence.
+
 For low-risk delivery, the operating objective is approximately 25 minutes from
 qualification to PR readiness and 25–35 minutes end-to-end when CI completes
 within 10 minutes. This is an observable performance objective, not a

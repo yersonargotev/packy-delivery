@@ -225,20 +225,24 @@ type Iteration struct {
 	EvidenceSHA256 string `json:"evidence_sha256"`
 }
 type Bundle struct {
-	Schema             string                      `json:"schema"`
-	Repository         RepositoryIdentity          `json:"repository"`
-	Issue              IssueIdentity               `json:"issue"`
-	Spec               SpecIdentity                `json:"spec"`
-	Authority          Authority                   `json:"authority"`
-	RiskProfile        DeliveryRiskProfile         `json:"risk_profile,omitempty"`
-	Scope              ScopeLedger                 `json:"scope"`
-	AcceptanceMatrix   []AcceptanceRow             `json:"acceptance_matrix"`
-	StartingBaseSHA    string                      `json:"starting_base_sha"`
-	Iterations         []Iteration                 `json:"iterations"`
-	ReviewReceipts     []ReviewReceipt             `json:"review_receipts"`
-	Adjudications      []Adjudication              `json:"adjudications"`
-	ValidationReceipts []ValidationReceipt         `json:"validation_receipts,omitempty"`
-	FocusedValidation  []FocusedValidationEvidence `json:"focused_validation,omitempty"`
+	Schema                  string                         `json:"schema"`
+	Repository              RepositoryIdentity             `json:"repository"`
+	Issue                   IssueIdentity                  `json:"issue"`
+	Spec                    SpecIdentity                   `json:"spec"`
+	Authority               Authority                      `json:"authority"`
+	RiskProfile             DeliveryRiskProfile            `json:"risk_profile,omitempty"`
+	Scope                   ScopeLedger                    `json:"scope"`
+	AcceptanceMatrix        []AcceptanceRow                `json:"acceptance_matrix"`
+	StartingBaseSHA         string                         `json:"starting_base_sha"`
+	Iterations              []Iteration                    `json:"iterations"`
+	ReviewReceipts          []ReviewReceipt                `json:"review_receipts"`
+	Adjudications           []Adjudication                 `json:"adjudications"`
+	ValidationReceipts      []ValidationReceipt            `json:"validation_receipts,omitempty"`
+	FocusedValidation       []FocusedValidationEvidence    `json:"focused_validation,omitempty"`
+	CandidateReviewReceipts []CandidateReviewReceipt       `json:"candidate_review_receipts,omitempty"`
+	AssuranceAdjudications  []AssuranceAdjudicationReceipt `json:"assurance_adjudications,omitempty"`
+	AssurancePhases         []AssurancePhaseReceipt        `json:"assurance_phases,omitempty"`
+	ExhaustiveAssurance     []ExhaustiveAssuranceReceipt   `json:"exhaustive_assurance,omitempty"`
 }
 
 // TypedObservationHash binds a kind and identity to canonical transient facts.
@@ -281,6 +285,16 @@ func CanonicalJSON(bundle Bundle) ([]byte, error) {
 	bundle.Adjudications = clone(bundle.Adjudications)
 	bundle.ValidationReceipts = clone(bundle.ValidationReceipts)
 	bundle.FocusedValidation = clone(bundle.FocusedValidation)
+	bundle.CandidateReviewReceipts = clone(bundle.CandidateReviewReceipts)
+	for index := range bundle.CandidateReviewReceipts {
+		bundle.CandidateReviewReceipts[index].Axes = clone(bundle.CandidateReviewReceipts[index].Axes)
+	}
+	bundle.AssuranceAdjudications = clone(bundle.AssuranceAdjudications)
+	for index := range bundle.AssuranceAdjudications {
+		bundle.AssuranceAdjudications[index].Findings = clone(bundle.AssuranceAdjudications[index].Findings)
+	}
+	bundle.AssurancePhases = clone(bundle.AssurancePhases)
+	bundle.ExhaustiveAssurance = clone(bundle.ExhaustiveAssurance)
 	canonicalize(&bundle)
 	if err := Validate(bundle); err != nil {
 		return nil, err
@@ -557,6 +571,9 @@ func Validate(b Bundle) error {
 	if err := validateValidationEvidence(b); err != nil {
 		return err
 	}
+	if err := validateAutomaticAssurance(b); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -567,19 +584,23 @@ func marshalBundle(bundle Bundle) ([]byte, error) {
 		return json.Marshal(bundle)
 	}
 	type selfContainedV2 struct {
-		Schema             string                      `json:"schema"`
-		Repository         RepositoryIdentity          `json:"repository"`
-		Issue              IssueIdentity               `json:"issue"`
-		Authority          Authority                   `json:"authority"`
-		RiskProfile        DeliveryRiskProfile         `json:"risk_profile"`
-		Scope              ScopeLedger                 `json:"scope"`
-		AcceptanceMatrix   []AcceptanceRow             `json:"acceptance_matrix"`
-		StartingBaseSHA    string                      `json:"starting_base_sha"`
-		Iterations         []Iteration                 `json:"iterations"`
-		ReviewReceipts     []ReviewReceipt             `json:"review_receipts"`
-		Adjudications      []Adjudication              `json:"adjudications"`
-		ValidationReceipts []ValidationReceipt         `json:"validation_receipts,omitempty"`
-		FocusedValidation  []FocusedValidationEvidence `json:"focused_validation,omitempty"`
+		Schema                  string                         `json:"schema"`
+		Repository              RepositoryIdentity             `json:"repository"`
+		Issue                   IssueIdentity                  `json:"issue"`
+		Authority               Authority                      `json:"authority"`
+		RiskProfile             DeliveryRiskProfile            `json:"risk_profile"`
+		Scope                   ScopeLedger                    `json:"scope"`
+		AcceptanceMatrix        []AcceptanceRow                `json:"acceptance_matrix"`
+		StartingBaseSHA         string                         `json:"starting_base_sha"`
+		Iterations              []Iteration                    `json:"iterations"`
+		ReviewReceipts          []ReviewReceipt                `json:"review_receipts"`
+		Adjudications           []Adjudication                 `json:"adjudications"`
+		ValidationReceipts      []ValidationReceipt            `json:"validation_receipts,omitempty"`
+		FocusedValidation       []FocusedValidationEvidence    `json:"focused_validation,omitempty"`
+		CandidateReviewReceipts []CandidateReviewReceipt       `json:"candidate_review_receipts,omitempty"`
+		AssuranceAdjudications  []AssuranceAdjudicationReceipt `json:"assurance_adjudications,omitempty"`
+		AssurancePhases         []AssurancePhaseReceipt        `json:"assurance_phases,omitempty"`
+		ExhaustiveAssurance     []ExhaustiveAssuranceReceipt   `json:"exhaustive_assurance,omitempty"`
 	}
 	return json.Marshal(selfContainedV2{
 		Schema: bundle.Schema, Repository: bundle.Repository, Issue: bundle.Issue,
@@ -587,7 +608,11 @@ func marshalBundle(bundle Bundle) ([]byte, error) {
 		AcceptanceMatrix: bundle.AcceptanceMatrix, StartingBaseSHA: bundle.StartingBaseSHA,
 		Iterations: bundle.Iterations, ReviewReceipts: bundle.ReviewReceipts,
 		Adjudications: bundle.Adjudications, ValidationReceipts: bundle.ValidationReceipts,
-		FocusedValidation: bundle.FocusedValidation,
+		FocusedValidation:       bundle.FocusedValidation,
+		CandidateReviewReceipts: bundle.CandidateReviewReceipts,
+		AssuranceAdjudications:  bundle.AssuranceAdjudications,
+		AssurancePhases:         bundle.AssurancePhases,
+		ExhaustiveAssurance:     bundle.ExhaustiveAssurance,
 	})
 }
 
@@ -638,6 +663,50 @@ func canonicalize(b *Bundle) {
 			return b.FocusedValidation[i].Identity < b.FocusedValidation[j].Identity
 		}
 		return b.FocusedValidation[i].CompletedAt < b.FocusedValidation[j].CompletedAt
+	})
+	for index := range b.CandidateReviewReceipts {
+		sort.Slice(b.CandidateReviewReceipts[index].Axes, func(i, j int) bool {
+			return b.CandidateReviewReceipts[index].Axes[i] < b.CandidateReviewReceipts[index].Axes[j]
+		})
+	}
+	sort.Slice(b.CandidateReviewReceipts, func(i, j int) bool {
+		if b.CandidateReviewReceipts[i].CandidateID == b.CandidateReviewReceipts[j].CandidateID {
+			if b.CandidateReviewReceipts[i].Iteration == b.CandidateReviewReceipts[j].Iteration {
+				return b.CandidateReviewReceipts[i].Identity < b.CandidateReviewReceipts[j].Identity
+			}
+			return b.CandidateReviewReceipts[i].Iteration < b.CandidateReviewReceipts[j].Iteration
+		}
+		return b.CandidateReviewReceipts[i].CandidateID < b.CandidateReviewReceipts[j].CandidateID
+	})
+	for index := range b.AssuranceAdjudications {
+		sort.Slice(b.AssuranceAdjudications[index].Findings, func(i, j int) bool {
+			return b.AssuranceAdjudications[index].Findings[i].FindingID <
+				b.AssuranceAdjudications[index].Findings[j].FindingID
+		})
+	}
+	sort.Slice(b.AssuranceAdjudications, func(i, j int) bool {
+		if b.AssuranceAdjudications[i].CandidateID == b.AssuranceAdjudications[j].CandidateID {
+			if b.AssuranceAdjudications[i].Generation == b.AssuranceAdjudications[j].Generation {
+				if b.AssuranceAdjudications[i].RequestID == b.AssuranceAdjudications[j].RequestID {
+					return b.AssuranceAdjudications[i].Identity < b.AssuranceAdjudications[j].Identity
+				}
+				return b.AssuranceAdjudications[i].RequestID < b.AssuranceAdjudications[j].RequestID
+			}
+			return b.AssuranceAdjudications[i].Generation < b.AssuranceAdjudications[j].Generation
+		}
+		return b.AssuranceAdjudications[i].CandidateID < b.AssuranceAdjudications[j].CandidateID
+	})
+	sort.Slice(b.AssurancePhases, func(i, j int) bool {
+		return b.AssurancePhases[i].Sequence < b.AssurancePhases[j].Sequence
+	})
+	sort.Slice(b.ExhaustiveAssurance, func(i, j int) bool {
+		if b.ExhaustiveAssurance[i].CompletedAt == b.ExhaustiveAssurance[j].CompletedAt {
+			if b.ExhaustiveAssurance[i].CandidateID == b.ExhaustiveAssurance[j].CandidateID {
+				return b.ExhaustiveAssurance[i].Identity < b.ExhaustiveAssurance[j].Identity
+			}
+			return b.ExhaustiveAssurance[i].CandidateID < b.ExhaustiveAssurance[j].CandidateID
+		}
+		return b.ExhaustiveAssurance[i].CompletedAt < b.ExhaustiveAssurance[j].CompletedAt
 	})
 }
 func blank(s string) bool { return strings.TrimSpace(s) == "" }

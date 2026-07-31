@@ -446,6 +446,7 @@ func alreadyRetried(retries []CIRetry, failure CICheckObservation) bool {
 
 func invalidateForCandidateCIFailure(record *runRecord, candidate *Candidate) {
 	record.LocalReadiness = nil
+	retainExhaustiveProof(candidate)
 	candidate.Exhaustive = nil
 	for index := range candidate.Acceptance {
 		candidate.Acceptance[index].ValidationReceipt = nil

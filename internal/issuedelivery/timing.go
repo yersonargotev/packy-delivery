@@ -7,6 +7,8 @@ import (
 
 type TimingCategory string
 
+const exhaustiveValidationSucceededPhase = "exhaustive-validation-succeeded"
+
 const (
 	TimingQualification  TimingCategory = "qualification"
 	TimingImplementation TimingCategory = "implementation"
@@ -62,11 +64,11 @@ func BuildTimingReport(timings []Timing, now time.Time) (TimingReport, error) {
 		if !ok {
 			return TimingReport{}, fmt.Errorf("unknown timing phase %q", timing.Phase)
 		}
-		started, err := time.Parse(timeFormat, timing.StartedAt)
+		started, err := time.Parse(time.RFC3339Nano, timing.StartedAt)
 		if err != nil {
 			return TimingReport{}, fmt.Errorf("timing phase %q has invalid started_at: %w", timing.Phase, err)
 		}
-		completed, err := time.Parse(timeFormat, timing.CompletedAt)
+		completed, err := time.Parse(time.RFC3339Nano, timing.CompletedAt)
 		if err != nil {
 			return TimingReport{}, fmt.Errorf("timing phase %q has invalid completed_at: %w", timing.Phase, err)
 		}
@@ -83,7 +85,7 @@ func BuildTimingReport(timings []Timing, now time.Time) (TimingReport, error) {
 	if len(timings) > 0 {
 		last := timings[len(timings)-1]
 		if last.To == StateWaiting && last.Phase == "ci-wait" {
-			completed, _ := time.Parse(timeFormat, last.CompletedAt)
+			completed, _ := time.Parse(time.RFC3339Nano, last.CompletedAt)
 			if now.Before(completed) {
 				return TimingReport{}, fmt.Errorf("timing report time precedes open ci-wait")
 			}
@@ -109,8 +111,8 @@ func BuildTimingReport(timings []Timing, now time.Time) (TimingReport, error) {
 	}
 	report.LowRisk.CIWaitNanoseconds = totals[TimingCIWait].Nanoseconds()
 	if len(timings) > 0 {
-		qualifiedAt, _ := time.Parse(timeFormat, timings[0].StartedAt)
-		endAt, _ := time.Parse(timeFormat, timings[len(timings)-1].CompletedAt)
+		qualifiedAt, _ := time.Parse(time.RFC3339Nano, timings[0].StartedAt)
+		endAt, _ := time.Parse(time.RFC3339Nano, timings[len(timings)-1].CompletedAt)
 		if timings[len(timings)-1].To == StateWaiting && timings[len(timings)-1].Phase == "ci-wait" {
 			endAt = now
 		}
@@ -119,7 +121,7 @@ func BuildTimingReport(timings []Timing, now time.Time) (TimingReport, error) {
 			if timing.Phase != "pull-request" {
 				continue
 			}
-			readyAt, _ := time.Parse(timeFormat, timing.CompletedAt)
+			readyAt, _ := time.Parse(time.RFC3339Nano, timing.CompletedAt)
 			elapsed := readyAt.Sub(qualifiedAt).Nanoseconds()
 			report.LowRisk.QualificationToPRReadinessNanoseconds = &elapsed
 		}
@@ -139,7 +141,7 @@ func timingCategoryForPhase(phase string) (TimingCategory, bool) {
 	case "repair", "adjudication", "ci-candidate-failure", "qualification-correction":
 		return TimingRepair, true
 	case "risk-observation", "focused-validation", "boundary-validation",
-		"exhaustive-validation", "local-readiness", "merge-readiness",
+		"exhaustive-validation", exhaustiveValidationSucceededPhase, "local-readiness", "merge-readiness",
 		"integration-verification", "post-merge-observation":
 		return TimingValidation, true
 	case "ci-wait", "ci-success":

@@ -336,6 +336,13 @@ type CandidateReview struct {
 	Completed   bool                             `json:"completed"`
 }
 
+type CandidateReviewBatch struct {
+	Iteration      int                           `json:"iteration"`
+	RequiredAxes   []deliveryevidence.ReviewAxis `json:"required_axes"`
+	TimingSequence int                           `json:"timing_sequence"`
+	CompletedAt    string                        `json:"completed_at"`
+}
+
 type SpecialistReviewRequest struct {
 	RunID       string
 	CandidateID string
@@ -420,6 +427,7 @@ type AcceptanceProof struct {
 }
 
 type ReviewReceiptReference struct {
+	ReceiptID   string                      `json:"receipt_id,omitempty"`
 	CandidateID string                      `json:"candidate_id"`
 	Axis        deliveryevidence.ReviewAxis `json:"axis"`
 	Iteration   int                         `json:"iteration"`
@@ -428,6 +436,7 @@ type ReviewReceiptReference struct {
 }
 
 type ValidationReceiptReference struct {
+	ReceiptID   string                                   `json:"receipt_id,omitempty"`
 	Schema      deliveryevidence.ValidationReceiptSchema `json:"schema"`
 	CandidateID string                                   `json:"candidate_id"`
 	CommitSHA   string                                   `json:"commit_sha"`
@@ -512,9 +521,10 @@ type RepairBatchReceipt struct {
 }
 
 type ValidationProof struct {
-	Kind        string           `json:"kind"`
-	Result      ValidationResult `json:"result"`
-	CompletedAt string           `json:"completed_at"`
+	Kind           string           `json:"kind"`
+	Result         ValidationResult `json:"result"`
+	TimingSequence int              `json:"timing_sequence,omitempty"`
+	CompletedAt    string           `json:"completed_at"`
 }
 
 type Candidate struct {
@@ -530,12 +540,14 @@ type Candidate struct {
 	RequiredReviews     []deliveryevidence.ReviewAxis        `json:"required_reviews"`
 	ReviewIteration     int                                  `json:"review_iteration,omitempty"`
 	Reviews             []CandidateReview                    `json:"reviews"`
+	ReviewBatches       []CandidateReviewBatch               `json:"review_batches,omitempty"`
 	RequiredSpecialists []SensitiveBoundary                  `json:"required_specialists"`
 	SpecialistReviews   []SpecialistReview                   `json:"specialist_reviews"`
 	BoundaryProofs      []BoundaryProof                      `json:"boundary_proofs"`
 	Acceptance          []AcceptanceProof                    `json:"acceptance,omitempty"`
 	Focused             *ValidationProof                     `json:"focused,omitempty"`
 	Exhaustive          *ValidationProof                     `json:"exhaustive,omitempty"`
+	ExhaustiveHistory   []ValidationProof                    `json:"exhaustive_history,omitempty"`
 	RepairDecision      *RepairDecision                      `json:"repair_decision,omitempty"`
 	RepairBatches       []RepairBatchReceipt                 `json:"repair_batches,omitempty"`
 	LastRepairBatch     *RepairBatchReceipt                  `json:"last_repair_batch,omitempty"`
