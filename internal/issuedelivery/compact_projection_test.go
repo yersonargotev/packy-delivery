@@ -96,6 +96,7 @@ func TestCompactRunProjectionNamesRetainedAndReusedCurrentCandidateEvidence(t *t
 				Result: BoundaryValidationResult{
 					CandidateID: candidateID, Boundary: BoundarySecurity,
 					CommitSHA: commit, TreeSHA: tree,
+					WriteManifestSHA256: strings.Repeat("d", 64),
 				},
 				ValidationCompletionSHA256: completion,
 			}},
@@ -142,12 +143,13 @@ func TestCompactRunProjectionNamesRetainedAndReusedCurrentCandidateEvidence(t *t
 	}
 	wantArtifacts := []ReusedValidationArtifact{
 		{
-			Kind: "boundary", Boundary: BoundarySecurity, SessionID: "session-current",
+			Kind: "boundary", Identity: strings.Repeat("d", 64),
+			Boundary: BoundarySecurity, SessionID: "session-current",
 			ValidationCompletionSHA256: completion,
 		},
 		{
-			Kind: "exhaustive", SessionID: "session-current",
-			ValidationCompletionSHA256: completion, ReceiptIdentity: "exhaustive-receipt",
+			Kind: "exhaustive", Identity: "exhaustive-receipt",
+			SessionID: "session-current", ValidationCompletionSHA256: completion,
 		},
 	}
 	if !reflect.DeepEqual(projection.Assurance.ReusedValidationArtifacts, wantArtifacts) {
@@ -166,10 +168,15 @@ func TestCompactRunProjectionBoundsEveryPersistedInvalidationClass(t *testing.T)
 		})
 	}
 	invalidations = append(invalidations, ValidationInvalidation{
-		SessionID: "replacement-session", CandidateID: "replacement-candidate",
+		SessionID: "replacement-session", CandidateID: "candidate",
 		Class: ValidationInvalidationCandidate, ObservedAt: "2026-07-31T13:00:00Z",
 	})
+	invalidations = append(invalidations, ValidationInvalidation{
+		SessionID: "stale-session", CandidateID: "candidate-old",
+		Class: ValidationInvalidationWorkspace, ObservedAt: "2026-07-31T14:00:00Z",
+	})
 	projection, err := BuildCompactRunProjection(Outcome{
+		Candidate:               &Candidate{ID: "candidate"},
 		ValidationInvalidations: invalidations,
 	}, time.Time{})
 	if err != nil {
@@ -185,10 +192,17 @@ func TestCompactRunProjectionBoundsEveryPersistedInvalidationClass(t *testing.T)
 		}
 	}
 	if got[0].SessionID != "replacement-session" ||
-		got[0].CandidateID != "replacement-candidate" {
+		got[0].CandidateID != "candidate" {
 		t.Fatalf("candidate replacement was not the retained persisted fact: %#v", got[0])
 	}
-	empty, err := BuildCompactRunProjection(Outcome{}, time.Time{})
+	for _, invalidation := range got {
+		if invalidation.SessionID == "stale-session" {
+			t.Fatalf("stale candidate invalidation leaked: %#v", got)
+		}
+	}
+	empty, err := BuildCompactRunProjection(Outcome{
+		Candidate: &Candidate{ID: "candidate-with-no-invalidations"},
+	}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

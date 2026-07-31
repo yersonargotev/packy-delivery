@@ -417,13 +417,10 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 			receipt.Identity, receipt.Iteration)
 	}
 	for _, artifact := range report.Assurance.ReusedValidationArtifacts {
-		fmt.Fprintf(&out, "reused validation artifact: %s session=%s completion=%s",
-			artifact.Kind, artifact.SessionID, artifact.ValidationCompletionSHA256)
+		fmt.Fprintf(&out, "reused validation artifact: %s identity=%s session=%s completion=%s",
+			artifact.Kind, artifact.Identity, artifact.SessionID, artifact.ValidationCompletionSHA256)
 		if artifact.Boundary != "" {
 			fmt.Fprintf(&out, " boundary=%s", artifact.Boundary)
-		}
-		if artifact.ReceiptIdentity != "" {
-			fmt.Fprintf(&out, " receipt=%s", artifact.ReceiptIdentity)
 		}
 		out.WriteByte('\n')
 	}

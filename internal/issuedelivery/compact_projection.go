@@ -9,6 +9,8 @@ import (
 )
 
 type CompactTimingCategory string
+type TimingObjectiveComparisonResult string
+type ReusedValidationArtifactKind string
 
 const (
 	CompactTimingActiveWork     CompactTimingCategory = "active-work"
@@ -17,6 +19,21 @@ const (
 	CompactTimingExternalCIWait CompactTimingCategory = "external-ci-wait"
 	CompactTimingMerge          CompactTimingCategory = "merge"
 	CompactTimingCleanup        CompactTimingCategory = "cleanup"
+)
+
+const (
+	TimingObjectivePending     TimingObjectiveComparisonResult = "pending"
+	TimingObjectiveInProgress  TimingObjectiveComparisonResult = "in-progress"
+	TimingObjectiveWithin      TimingObjectiveComparisonResult = "within-objective"
+	TimingObjectiveOver        TimingObjectiveComparisonResult = "over-objective"
+	TimingObjectiveUnderRange  TimingObjectiveComparisonResult = "under-objective-range"
+	TimingObjectiveWithinRange TimingObjectiveComparisonResult = "within-objective-range"
+	TimingObjectiveOverRange   TimingObjectiveComparisonResult = "over-objective-range"
+)
+
+const (
+	ReusedValidationBoundary   ReusedValidationArtifactKind = "boundary"
+	ReusedValidationExhaustive ReusedValidationArtifactKind = "exhaustive"
 )
 
 var compactTimingCategoryOrder = [...]CompactTimingCategory{
@@ -67,16 +84,16 @@ type TimingObjectiveComparison struct {
 }
 
 type TimingThresholdComparison struct {
-	ObservedNanoseconds *int64 `json:"observed_nanoseconds,omitempty"`
-	MaximumNanoseconds  int64  `json:"maximum_nanoseconds"`
-	Comparison          string `json:"comparison"`
+	ObservedNanoseconds *int64                          `json:"observed_nanoseconds,omitempty"`
+	MaximumNanoseconds  int64                           `json:"maximum_nanoseconds"`
+	Comparison          TimingObjectiveComparisonResult `json:"comparison"`
 }
 
 type TimingRangeComparison struct {
-	ObservedNanoseconds int64  `json:"observed_nanoseconds"`
-	MinimumNanoseconds  int64  `json:"minimum_nanoseconds"`
-	MaximumNanoseconds  int64  `json:"maximum_nanoseconds"`
-	Comparison          string `json:"comparison"`
+	ObservedNanoseconds int64                           `json:"observed_nanoseconds"`
+	MinimumNanoseconds  int64                           `json:"minimum_nanoseconds"`
+	MaximumNanoseconds  int64                           `json:"maximum_nanoseconds"`
+	Comparison          TimingObjectiveComparisonResult `json:"comparison"`
 }
 
 type CompactAssuranceProjection struct {
@@ -91,11 +108,11 @@ type RetainedReviewReceipt struct {
 }
 
 type ReusedValidationArtifact struct {
-	Kind                       string            `json:"kind"`
-	Boundary                   SensitiveBoundary `json:"boundary,omitempty"`
-	SessionID                  string            `json:"session_id"`
-	ValidationCompletionSHA256 string            `json:"validation_completion_sha256"`
-	ReceiptIdentity            string            `json:"receipt_identity,omitempty"`
+	Kind                       ReusedValidationArtifactKind `json:"kind"`
+	Identity                   string                       `json:"identity"`
+	Boundary                   SensitiveBoundary            `json:"boundary,omitempty"`
+	SessionID                  string                       `json:"session_id"`
+	ValidationCompletionSHA256 string                       `json:"validation_completion_sha256"`
 }
 
 // BuildCompactRunProjection exposes a bounded explanation of canonical run
@@ -172,25 +189,25 @@ func compactTimingObjective(outcome Outcome, telemetry LowRiskTimingTelemetry) T
 	if !comparison.Applicable {
 		return comparison
 	}
-	prComparison := "pending"
+	prComparison := TimingObjectivePending
 	if telemetry.QualificationToPRReadinessNanoseconds != nil {
-		prComparison = "within-objective"
+		prComparison = TimingObjectiveWithin
 		if *telemetry.QualificationToPRReadinessNanoseconds > telemetry.PRReadinessObjectiveNanoseconds {
-			prComparison = "over-objective"
+			prComparison = TimingObjectiveOver
 		}
 	}
-	endComparison := "in-progress"
+	endComparison := TimingObjectiveInProgress
 	if outcome.State == StateCompleted {
 		switch {
 		case telemetry.EndToEndNanoseconds < telemetry.EndToEndObjectiveMinNanoseconds:
-			endComparison = "under-objective-range"
+			endComparison = TimingObjectiveUnderRange
 		case telemetry.EndToEndNanoseconds > telemetry.EndToEndObjectiveMaxNanoseconds:
-			endComparison = "over-objective-range"
+			endComparison = TimingObjectiveOverRange
 		default:
-			endComparison = "within-objective-range"
+			endComparison = TimingObjectiveWithinRange
 		}
 	} else if telemetry.EndToEndNanoseconds > telemetry.EndToEndObjectiveMaxNanoseconds {
-		endComparison = "over-objective-range"
+		endComparison = TimingObjectiveOverRange
 	}
 	comparison.PRReadiness = &TimingThresholdComparison{
 		ObservedNanoseconds: telemetry.QualificationToPRReadinessNanoseconds,
@@ -207,12 +224,15 @@ func compactTimingObjective(outcome Outcome, telemetry LowRiskTimingTelemetry) T
 }
 
 func compactAssuranceProjection(outcome Outcome) CompactAssuranceProjection {
-	projection := CompactAssuranceProjection{
-		Invalidations: boundedValidationInvalidations(outcome.ValidationInvalidations),
-	}
 	candidate := outcome.Candidate
 	if candidate == nil {
-		return projection
+		return CompactAssuranceProjection{}
+	}
+	projection := CompactAssuranceProjection{
+		Invalidations: boundedValidationInvalidations(
+			outcome.ValidationInvalidations,
+			candidate.ID,
+		),
 	}
 	projection.RetainedReviewReceipts = retainedReviewReceipts(outcome.Evidence, *candidate)
 	projection.ReusedValidationArtifacts = reusedValidationArtifacts(outcome, *candidate)
@@ -263,11 +283,13 @@ func reusedValidationArtifacts(outcome Outcome, candidate Candidate) []ReusedVal
 		if !ok ||
 			proof.Result.CandidateID != candidate.ID ||
 			proof.Result.CommitSHA != candidate.CommitSHA ||
-			proof.Result.TreeSHA != candidate.TreeSHA {
+			proof.Result.TreeSHA != candidate.TreeSHA ||
+			proof.Result.WriteManifestSHA256 == "" {
 			continue
 		}
 		artifacts = append(artifacts, ReusedValidationArtifact{
-			Kind: "boundary", Boundary: proof.Result.Boundary,
+			Kind: ReusedValidationBoundary, Identity: proof.Result.WriteManifestSHA256,
+			Boundary:  proof.Result.Boundary,
 			SessionID: session.ID, ValidationCompletionSHA256: session.CompletionSHA256,
 		})
 	}
@@ -275,11 +297,13 @@ func reusedValidationArtifacts(outcome Outcome, candidate Candidate) []ReusedVal
 		if session, ok := sessions[proof.ValidationCompletionSHA256]; ok &&
 			proof.Result.CommitSHA == candidate.CommitSHA &&
 			proof.Result.TreeSHA == candidate.TreeSHA {
-			artifacts = append(artifacts, ReusedValidationArtifact{
-				Kind: "exhaustive", SessionID: session.ID,
-				ValidationCompletionSHA256: session.CompletionSHA256,
-				ReceiptIdentity:            exhaustiveReceiptIdentity(outcome.Evidence, candidate, *proof),
-			})
+			identity := exhaustiveReceiptIdentity(outcome.Evidence, candidate, *proof)
+			if identity != "" {
+				artifacts = append(artifacts, ReusedValidationArtifact{
+					Kind: ReusedValidationExhaustive, Identity: identity,
+					SessionID: session.ID, ValidationCompletionSHA256: session.CompletionSHA256,
+				})
+			}
 		}
 	}
 	sort.Slice(artifacts, func(i, j int) bool {
@@ -310,9 +334,15 @@ func exhaustiveReceiptIdentity(
 	return ""
 }
 
-func boundedValidationInvalidations(values []ValidationInvalidation) []ValidationInvalidation {
+func boundedValidationInvalidations(
+	values []ValidationInvalidation,
+	candidateID string,
+) []ValidationInvalidation {
 	latest := make(map[ValidationInvalidationClass]ValidationInvalidation, len(validationInvalidationClassOrder))
 	for _, value := range values {
+		if value.CandidateID != candidateID {
+			continue
+		}
 		latest[value.Class] = value
 	}
 	out := make([]ValidationInvalidation, 0, len(latest))
