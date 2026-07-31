@@ -62,6 +62,12 @@ func TestReviewPacketsObservesCurrentRunWithoutWriting(t *testing.T) {
 
 func TestReviewPacketsFromRecordAreDeterministicAndScoped(t *testing.T) {
 	record, git := reviewPacketTestRecord()
+	record.Evidence.AcceptanceMatrix = append(record.Evidence.AcceptanceMatrix,
+		deliveryevidence.AcceptanceRow{
+			Identity: "AC-2", Criterion: "second packet contract",
+			Obligations: deliveryevidence.PhaseOwnedAcceptanceObligations(),
+		},
+	)
 
 	qualificationRecord := record
 	qualificationRecord.QualificationApproved = false
@@ -81,6 +87,45 @@ func TestReviewPacketsFromRecordAreDeterministicAndScoped(t *testing.T) {
 	}
 	if candidates[0].PacketID == candidates[1].PacketID || candidates[0].Axis == candidates[1].Axis {
 		t.Fatalf("candidate axes were not independently bound: %#v", candidates)
+	}
+	for _, packet := range candidates {
+		response := packet.Response.Candidate
+		if response == nil {
+			t.Fatalf("candidate packet lacks response: %#v", packet)
+		}
+		if packet.Axis == deliveryevidence.ReviewStandards {
+			if len(response.Acceptance) != 0 {
+				t.Fatalf("Standards response received Spec acceptance proofs: %#v", response)
+			}
+			continue
+		}
+		if len(response.Acceptance) != len(packet.AcceptanceRows) {
+			t.Fatalf("Spec response acceptance count = %d, rows = %d", len(response.Acceptance), len(packet.AcceptanceRows))
+		}
+		for index, proof := range response.Acceptance {
+			if proof.Identity != packet.AcceptanceRows[index].Identity ||
+				proof.CandidateID != packet.CandidateID ||
+				proof.Phase != deliveryevidence.AssuranceCandidateReview ||
+				proof.ReviewReceipt == nil ||
+				proof.ReviewReceipt.CandidateID != packet.CandidateID ||
+				proof.ReviewReceipt.Axis != deliveryevidence.ReviewSpec ||
+				proof.ReviewReceipt.Iteration != packet.Iteration ||
+				proof.ReviewReceipt.CommitSHA != packet.CommitSHA ||
+				proof.ReviewReceipt.TreeSHA != packet.TreeSHA {
+				t.Fatalf("Spec proof %d is not mechanically bound: %#v", index, proof)
+			}
+			for name, value := range map[string]string{
+				"positive": proof.PositiveEvidence, "negative": proof.NegativeEvidence,
+				"failure": proof.FailureEvidence, "mutation": proof.MutationEvidence,
+				"compatibility": proof.CompatibilityEvidence,
+				"preservation":  proof.PreservationEvidence,
+				"migration":     proof.MigrationEvidence,
+			} {
+				if value != inputPlaceholder {
+					t.Fatalf("Spec proof %d %s placeholder = %q", index, name, value)
+				}
+			}
+		}
 	}
 
 	specialistRecord := record

@@ -87,6 +87,12 @@ func TestOperatorWorkflowRoundTripsGeneratedInputsThroughRealModule(t *testing.T
 		nil,
 		suppliedReviewExecutor{},
 		"qualification-correction",
+		issuedelivery.AuthorityItem{
+			Text: "Reach exact local readiness.", EvidenceLink: "issue#361:acceptance-1",
+		},
+		issuedelivery.AuthorityItem{
+			Text: "Preserve the public delivery contract.", EvidenceLink: "issue#361:acceptance-2",
+		},
 	)
 	cmd := command{
 		Now: clock.Now,
@@ -167,7 +173,17 @@ func TestOperatorWorkflowRoundTripsGeneratedInputsThroughRealModule(t *testing.T
 		"--kind", string(issuedelivery.ReviewPacketCandidate),
 		"--output", candidateDirectory,
 	)
-	fillOperatorReviewResponses(t, candidateDirectory)
+	completeOperatorReviewResponses(t, candidateDirectory, false)
+	var rejected bytes.Buffer
+	err := cmd.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361",
+		"--risk-profile", "low-risk", "--full-report",
+		"--review-content", candidateDirectory,
+	}, &rejected)
+	if err == nil || !strings.Contains(err.Error(), "generated judgment placeholder") {
+		t.Fatalf("untouched generated Spec placeholders were admitted: %v", err)
+	}
+	completeOperatorReviewResponses(t, candidateDirectory, true)
 	afterReviews := runOperatorAdvanceReport(
 		t,
 		cmd,
@@ -372,6 +388,10 @@ func fillOperatorQualificationCorrection(
 }
 
 func fillOperatorReviewResponses(t *testing.T, directory string) {
+	completeOperatorReviewResponses(t, directory, true)
+}
+
+func completeOperatorReviewResponses(t *testing.T, directory string, fillAcceptance bool) {
 	t.Helper()
 	var manifest reviewPacketDirectoryManifest
 	readOperatorJSON(t, filepath.Join(directory, "manifest.json"), &manifest)
@@ -387,16 +407,31 @@ func fillOperatorReviewResponses(t *testing.T, directory string) {
 		case response.Candidate != nil:
 			response.Candidate.Completed = true
 			if response.Candidate.Axis == deliveryevidence.ReviewSpec {
-				response.Candidate.Acceptance = productionPathAcceptance(
-					issuedelivery.ReviewRequest{
-						CandidateID:    response.Candidate.CandidateID,
-						Axis:           response.Candidate.Axis,
-						Iteration:      response.Candidate.Iteration,
-						CommitSHA:      response.Candidate.CommitSHA,
-						TreeSHA:        response.Candidate.TreeSHA,
-						AcceptanceRows: packet.AcceptanceRows,
-					},
-				)
+				if len(response.Candidate.Acceptance) != len(packet.AcceptanceRows) {
+					t.Fatalf("generated Spec proof count = %d, rows = %d", len(response.Candidate.Acceptance), len(packet.AcceptanceRows))
+				}
+				for index := range response.Candidate.Acceptance {
+					proof := &response.Candidate.Acceptance[index]
+					if proof.Identity != packet.AcceptanceRows[index].Identity {
+						t.Fatalf("generated Spec proof order = %#v", response.Candidate.Acceptance)
+					}
+					if !fillAcceptance {
+						continue
+					}
+					completed := productionPathAcceptance(issuedelivery.ReviewRequest{
+						CandidateID: response.Candidate.CandidateID,
+						Axis:        response.Candidate.Axis, Iteration: response.Candidate.Iteration,
+						CommitSHA: response.Candidate.CommitSHA, TreeSHA: response.Candidate.TreeSHA,
+						AcceptanceRows: []deliveryevidence.AcceptanceRow{packet.AcceptanceRows[index]},
+					})[0]
+					proof.PositiveEvidence = completed.PositiveEvidence
+					proof.NegativeEvidence = completed.NegativeEvidence
+					proof.FailureEvidence = completed.FailureEvidence
+					proof.MutationEvidence = completed.MutationEvidence
+					proof.CompatibilityEvidence = completed.CompatibilityEvidence
+					proof.PreservationEvidence = completed.PreservationEvidence
+					proof.MigrationEvidence = completed.MigrationEvidence
+				}
 			}
 		default:
 			t.Fatalf("unexpected response template in %s: %#v", responsePath, response)
