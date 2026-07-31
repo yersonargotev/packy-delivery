@@ -133,7 +133,21 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		return errors.New("command is required: advance, status, version, or a legacy v1 command")
 	}
 	switch args[0] {
+	case "help", "-h", "--help":
+		if len(args) == 1 {
+			_, err := io.WriteString(stdout, rootUsage)
+			return err
+		}
+		if args[0] == "help" && len(args) == 2 && args[1] == "advance" {
+			_, err := io.WriteString(stdout, advanceUsage)
+			return err
+		}
+		return fmt.Errorf("help accepts only the optional command %q", "advance")
 	case "advance":
+		if len(args) == 2 && (args[1] == "help" || args[1] == "-h" || args[1] == "--help") {
+			_, err := io.WriteString(stdout, advanceUsage)
+			return err
+		}
 		return c.advance(ctx, args[1:], stdout)
 	case "legacy-v1":
 		if len(args) == 1 {
@@ -149,10 +163,51 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		_, err := fmt.Fprintln(stdout, version)
 		return err
 	default:
-		if c.LegacyPrefixRequired {
+		if c.LegacyPrefixRequired && isLegacyCommand(args[0]) {
 			return fmt.Errorf("unknown command %q; historical evidence sequencing is available only through legacy-v1", args[0])
 		}
+		if c.LegacyPrefixRequired {
+			return fmt.Errorf("unknown command %q; run \"packy-deliver help\" for usage", args[0])
+		}
 		return c.runLegacy(ctx, args, stdout)
+	}
+}
+
+const rootUsage = `Usage: packy-deliver <command> [options]
+
+Commands:
+  advance    Advance resumable issue delivery
+  status     Show delivery status
+  version    Print the build version
+  legacy-v1 Run a historical v1 command
+
+Run "packy-deliver help advance" for advance options.
+`
+
+const advanceUsage = `Usage: packy-deliver advance [options]
+
+Options:
+  --repository PATH          Repository to observe (default ".")
+  --issue NUMBER             Approved Packy issue number (required)
+  --spec NUMBER              Governing specification issue number
+  --risk-profile PROFILE     low-risk, standard, or high-risk (default "standard")
+  --decision PATH            Typed semantic qualification decision
+  --repair PATH              Typed finding adjudication and repair classification
+  --review-content PATH      Candidate and specialist review content
+  --ci-attribution PATH      Attribution of exact failed CI runs
+  --authorize-non-local      Authorize delivery effects after local readiness
+  --full-report              Emit the complete canonical JSON report
+  --output FORMAT            Compact report format: json or text (default "json")
+`
+
+func isLegacyCommand(name string) bool {
+	switch name {
+	case "initialize", "record-iteration", "record-review", "record-adjudication",
+		"review-status", "record-exhaustive-validation", "validation-status",
+		"record-focused-validation", "local-gate", "non-local-readiness", "final-outcome":
+		return true
+	default:
+		return false
 	}
 }
 
