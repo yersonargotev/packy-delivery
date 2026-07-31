@@ -21,6 +21,12 @@ grep -F 'qualification is approved; awaiting candidate development' \
   "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
 grep -F 'Except for the recognized candidate-development handoff above' \
   "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
+grep -F 'packy-deliver workspace prepare' \
+  "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
+grep -F 'one-proof-per-criterion order' \
+  "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
+grep -F 'bounded active-operation object' \
+  "$root/.agents/skills/deliver-packy-issue/SKILL.md" >/dev/null
 
 version="1.2.3"
 checksums="$sandbox/SHA256SUMS"

@@ -5,7 +5,7 @@ description: Deliver a named Packy GitHub issue end to end through a local imple
 
 # Deliver Packy Issue
 
-Compatible release: v0.4.0
+Compatible release: v0.5.0
 
 Read the complete [workflow contract](../../../workflows/packy-issue-delivery.md)
 and [repository instructions](../../../AGENTS.md) before mutating project or
@@ -41,6 +41,15 @@ After the version preflight, use `packy-deliver help` and
 and option syntax. Do not infer syntax from source searches or historical
 invocations.
 
+When the operator's Packy checkout must remain untouched or cannot satisfy the
+clean attached-branch invariant, use `packy-deliver help workspace` and prepare
+a new integration workspace with `packy-deliver workspace prepare`. Supply the
+exact source checkout, issue, branch kind, and a new absolute destination
+outside the source repository and all of its worktrees. Continue the Delivery
+Run from the prepared destination. Never clean, stash, reset, adopt, or mark the
+source checkout as delivery-owned; workspace preparation performs no fetch or
+GitHub mutation and grants no non-local authorization.
+
 Create or resume the issue's `Delivery Run`, then invoke the contract's
 `packy-deliver advance` repeatedly. Supply genuine decisions,
 review results, and adjudications only when the returned state requires them.
@@ -60,10 +69,16 @@ Use this schema-v2 operating loop:
    axis, or boundary requested. Send immutable packets to independent reviewers
    in parallel where allowed. Fill their separate response templates and pass
    the individual response files or packet directory unchanged through repeated
-   `--review-content`; never construct a parallel review envelope.
+   `--review-content`; never construct a parallel review envelope. In a Spec
+   candidate response, preserve every prefilled identity and the generated
+   one-proof-per-criterion order; replace only the seven semantic evidence
+   placeholders for each proof.
 5. For `external-result` or `lock-contention`, invoke bounded `watch` with an
    explicit interval and timeout. When it reports an actionable change, invoke
-   `advance` so the engine—not this skill—adopts the result.
+   `advance` so the engine—not this skill—adopts the result. During lock
+   contention, treat the bounded active-operation object returned by `status`
+   or `watch` as the only operational evidence. Never inspect its private
+   sidecar, infer failure from elapsed time, or terminate the owning process.
 
 Never inspect or derive a private delivery-state path. Never select an internal
 phase, invent semantic input, translate generated JSON into another shape,
