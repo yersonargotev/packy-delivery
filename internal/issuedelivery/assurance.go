@@ -882,9 +882,6 @@ func validateCandidateReview(
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete candidate review cannot contain findings")
 	}
-	if !review.Completed && len(review.Acceptance) != 0 {
-		return errors.New("incomplete candidate review cannot contain acceptance proof")
-	}
 	seenFindings := make(map[string]bool, len(review.Findings))
 	for _, finding := range review.Findings {
 		if finding.Axis != review.Axis || strings.TrimSpace(finding.ID) == "" || seenFindings[finding.ID] {
@@ -906,8 +903,34 @@ func validateCandidateReview(
 			proof.ReviewReceipt.TreeSHA != review.TreeSHA {
 			return errors.New("candidate review contains stale or phase-invalid acceptance proof")
 		}
+		if !review.Completed && !generatedAcceptanceProofPlaceholder(proof) {
+			return errors.New("incomplete candidate review cannot contain completed acceptance proof")
+		}
 	}
 	return nil
+}
+
+func generatedAcceptanceProofPlaceholder(proof AcceptanceProof) bool {
+	for _, field := range acceptanceEvidenceFields(proof) {
+		if field.value != inputPlaceholder {
+			return false
+		}
+	}
+	return true
+}
+
+type acceptanceEvidenceField struct{ name, value string }
+
+func acceptanceEvidenceFields(proof AcceptanceProof) []acceptanceEvidenceField {
+	return []acceptanceEvidenceField{
+		{"positive", proof.PositiveEvidence},
+		{"negative", proof.NegativeEvidence},
+		{"failure", proof.FailureEvidence},
+		{"mutation", proof.MutationEvidence},
+		{"compatibility", proof.CompatibilityEvidence},
+		{"preservation", proof.PreservationEvidence},
+		{"migration", proof.MigrationEvidence},
+	}
 }
 
 func validateReviewBatch(candidate Candidate, reviews []CandidateReview) error {
@@ -1000,19 +1023,20 @@ func admitAcceptanceProofs(
 				reference.TreeSHA != candidate.TreeSHA || strings.TrimSpace(reference.CompletedAt) == "") {
 			return fmt.Errorf("acceptance proof %q references a stale validation receipt", proof.Identity)
 		}
-		for name, value := range map[string]string{
-			"positive": proof.PositiveEvidence, "negative": proof.NegativeEvidence,
-			"failure": proof.FailureEvidence, "mutation": proof.MutationEvidence,
-			"compatibility": proof.CompatibilityEvidence, "preservation": proof.PreservationEvidence,
-			"migration": proof.MigrationEvidence,
-		} {
-			value = strings.TrimSpace(value)
-			if value == "" || (!required[name] && !strings.Contains(value, candidate.ID) &&
+		for _, field := range acceptanceEvidenceFields(proof) {
+			value := strings.TrimSpace(field.value)
+			if value == inputPlaceholder {
+				return fmt.Errorf(
+					"acceptance %s evidence retains a generated judgment placeholder for %s",
+					field.name, proof.Identity,
+				)
+			}
+			if value == "" || (!required[field.name] && !strings.Contains(value, candidate.ID) &&
 				!strings.HasPrefix(value, "not-applicable:") && proof.CandidateID == "") ||
-				(required[name] && proof.CandidateID == "" && !strings.Contains(value, candidate.ID)) {
+				(required[field.name] && proof.CandidateID == "" && !strings.Contains(value, candidate.ID)) {
 				return fmt.Errorf(
 					"acceptance %s evidence is insufficient for %s candidate %s",
-					name, candidate.Profile, candidate.ID,
+					field.name, candidate.Profile, candidate.ID,
 				)
 			}
 		}

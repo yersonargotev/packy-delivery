@@ -362,7 +362,26 @@ func finalizeReviewPacket(packet *ReviewPacket) error {
 	case ReviewPacketQualification:
 		packet.Response = ReviewPacketResponseTemplate{PacketID: id, Qualification: &QualificationReview{PacketID: id, AuthoritySHA256: packet.AuthoritySHA256, AcceptanceMatrixSHA256: packet.AcceptanceRowsSHA256, Findings: []deliveryevidence.ReviewFinding{}}}
 	case ReviewPacketCandidate:
-		packet.Response = ReviewPacketResponseTemplate{PacketID: id, Candidate: &CandidateReview{PacketID: id, CandidateID: packet.CandidateID, Axis: packet.Axis, Iteration: packet.Iteration, CommitSHA: packet.CommitSHA, TreeSHA: packet.TreeSHA, Findings: []deliveryevidence.ReviewFinding{}}}
+		response := CandidateReview{PacketID: id, CandidateID: packet.CandidateID, Axis: packet.Axis, Iteration: packet.Iteration, CommitSHA: packet.CommitSHA, TreeSHA: packet.TreeSHA, Findings: []deliveryevidence.ReviewFinding{}}
+		if packet.Axis == deliveryevidence.ReviewSpec && phaseOwnedAcceptance(packet.AcceptanceRows) {
+			response.Acceptance = make([]AcceptanceProof, 0, len(packet.AcceptanceRows))
+			for _, row := range packet.AcceptanceRows {
+				response.Acceptance = append(response.Acceptance, AcceptanceProof{
+					CandidateID:      packet.CandidateID,
+					Phase:            deliveryevidence.AssuranceCandidateReview,
+					Identity:         row.Identity,
+					PositiveEvidence: inputPlaceholder, NegativeEvidence: inputPlaceholder,
+					FailureEvidence: inputPlaceholder, MutationEvidence: inputPlaceholder,
+					CompatibilityEvidence: inputPlaceholder, PreservationEvidence: inputPlaceholder,
+					MigrationEvidence: inputPlaceholder,
+					ReviewReceipt: &ReviewReceiptReference{
+						CandidateID: packet.CandidateID, Axis: packet.Axis, Iteration: packet.Iteration,
+						CommitSHA: packet.CommitSHA, TreeSHA: packet.TreeSHA,
+					},
+				})
+			}
+		}
+		packet.Response = ReviewPacketResponseTemplate{PacketID: id, Candidate: &response}
 	case ReviewPacketSpecialist:
 		packet.Response = ReviewPacketResponseTemplate{PacketID: id, Specialist: &SpecialistReview{PacketID: id, CandidateID: packet.CandidateID, Boundary: packet.Boundary, Specialist: packet.Specialist, Findings: []SpecialistFinding{}}}
 	}
