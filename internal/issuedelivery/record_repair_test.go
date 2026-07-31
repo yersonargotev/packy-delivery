@@ -132,7 +132,6 @@ func TestDecodeV2RejectsInvalidPersistedRepairDecision(t *testing.T) {
 	}
 	historical.Candidates[0].RepairDecision.Class = RepairCandidateChanging
 	historical.Candidates[0].RepairBatches = nil
-	historical.Candidates[0].RepairHistory = nil
 	historical.Candidates[0].LastRepairBatch = nil
 	evidence, err := deliveryevidence.Decode(append(append([]byte(nil), historical.Evidence...), '\n'))
 	if err != nil {

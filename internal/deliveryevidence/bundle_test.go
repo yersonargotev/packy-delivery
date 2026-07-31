@@ -200,6 +200,108 @@ func TestAutomaticAssuranceReceiptsAreCanonicalAndV2Only(t *testing.T) {
 	}
 }
 
+func TestAutomaticAssuranceRejectsDuplicateSemanticKeys(t *testing.T) {
+	base := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
+	review := CandidateReviewReceipt{
+		CandidateID: "candidate-1", Iteration: 1,
+		Axes:           []ReviewAxis{ReviewStandards, ReviewSpec},
+		FindingsSHA256: strings.Repeat("d", 64), CommitSHA: strings.Repeat("e", 40),
+		TreeSHA: strings.Repeat("f", 40), CompletedAt: "2026-07-30T01:00:01Z",
+	}
+	review.Identity = CandidateReviewReceiptIdentity(
+		review.CandidateID, review.Iteration, review.Axes, review.FindingsSHA256,
+		review.CommitSHA, review.TreeSHA,
+	)
+	adjudication := AssuranceAdjudicationReceipt{
+		RequestID: "request-1", CandidateID: "candidate-1", Generation: 1,
+		Class: "adjudication-only",
+		Findings: []AssuranceFindingDecision{{
+			FindingID: "finding-1", Disposition: "rejected-with-evidence", Evidence: "exact rejection evidence",
+		}},
+	}
+	adjudication.Identity = AssuranceAdjudicationReceiptIdentity(
+		adjudication.RequestID, adjudication.CandidateID, adjudication.Generation,
+		adjudication.Class, adjudication.CompatiblePrefix, adjudication.Findings,
+	)
+	exhaustive := ExhaustiveAssuranceReceipt{
+		Repository: base.Repository, CandidateID: "candidate-1",
+		CommitSHA: strings.Repeat("e", 40), TreeSHA: strings.Repeat("f", 40),
+		CheckoutSHA256: strings.Repeat("a", 64), ValidatorIdentity: "scripts/validate-packy.sh",
+		ValidatorSHA256:            strings.Repeat("b", 64),
+		ValidatorIdentityExpiresAt: "2026-07-31T01:00:00Z",
+		Command:                    "./scripts/validate-packy.sh", HomeRoot: "/sandbox/home", ConfigRoot: "/sandbox/config",
+		Sandboxed: true, CompletedAt: "2026-07-30T01:00:02Z",
+	}
+	exhaustive.Identity = ExhaustiveAssuranceReceiptIdentity(exhaustive)
+	tests := map[string]func(*Bundle){
+		"review": func(bundle *Bundle) {
+			duplicate := review
+			duplicate.FindingsSHA256 = strings.Repeat("c", 64)
+			duplicate.Identity = CandidateReviewReceiptIdentity(
+				duplicate.CandidateID, duplicate.Iteration, duplicate.Axes,
+				duplicate.FindingsSHA256, duplicate.CommitSHA, duplicate.TreeSHA,
+			)
+			bundle.CandidateReviewReceipts = []CandidateReviewReceipt{review, duplicate}
+		},
+		"adjudication": func(bundle *Bundle) {
+			duplicate := adjudication
+			duplicate.Generation = 2
+			duplicate.Identity = AssuranceAdjudicationReceiptIdentity(
+				duplicate.RequestID, duplicate.CandidateID, duplicate.Generation,
+				duplicate.Class, duplicate.CompatiblePrefix, duplicate.Findings,
+			)
+			bundle.AssuranceAdjudications = []AssuranceAdjudicationReceipt{adjudication, duplicate}
+		},
+		"exhaustive": func(bundle *Bundle) {
+			duplicate := exhaustive
+			duplicate.Command = "./scripts/validate-packy.sh --forged"
+			duplicate.Identity = ExhaustiveAssuranceReceiptIdentity(duplicate)
+			bundle.ExhaustiveAssurance = []ExhaustiveAssuranceReceipt{exhaustive, duplicate}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			bundle := base
+			mutate(&bundle)
+			if err := Validate(bundle); err == nil {
+				t.Fatalf("duplicate %s semantic key was accepted", name)
+			}
+		})
+	}
+}
+
+func TestAutomaticAssuranceCanonicalOrderIsPermutationInvariant(t *testing.T) {
+	bundle := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
+	makeReview := func(candidate string, iteration int) CandidateReviewReceipt {
+		receipt := CandidateReviewReceipt{
+			CandidateID: candidate, Iteration: iteration, Axes: []ReviewAxis{ReviewStandards},
+			FindingsSHA256: strings.Repeat("d", 64), CommitSHA: strings.Repeat("e", 40),
+			TreeSHA: strings.Repeat("f", 40), CompletedAt: "2026-07-30T01:00:01Z",
+		}
+		receipt.Identity = CandidateReviewReceiptIdentity(
+			receipt.CandidateID, receipt.Iteration, receipt.Axes, receipt.FindingsSHA256,
+			receipt.CommitSHA, receipt.TreeSHA,
+		)
+		return receipt
+	}
+	bundle.CandidateReviewReceipts = []CandidateReviewReceipt{
+		makeReview("candidate-b", 1), makeReview("candidate-a", 2),
+	}
+	first, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle.CandidateReviewReceipts[0], bundle.CandidateReviewReceipts[1] =
+		bundle.CandidateReviewReceipts[1], bundle.CandidateReviewReceipts[0]
+	second, err := CanonicalJSON(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("automatic assurance canonical JSON depends on input permutation")
+	}
+}
+
 func TestAutomaticAssuranceCanonicalizesCollectionsAndRejectsUnknownDisposition(t *testing.T) {
 	bundle := v2Fixture(AuthoritySelfContainedIssue, RiskLow)
 	reviews := []CandidateReviewReceipt{

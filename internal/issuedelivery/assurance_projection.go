@@ -19,6 +19,8 @@ func projectAutomaticAssurance(record *runRecord) error {
 	var expectedAdjudications []deliveryevidence.AssuranceAdjudicationReceipt
 	var expectedExhaustive []deliveryevidence.ExhaustiveAssuranceReceipt
 	reviewIDs := make(map[string]string)
+	reviewTimingGroups := contiguousReviewTimingGroups(record.Timing)
+	reviewTimingGroupIndex := 0
 	for candidateIndex := range record.Candidates {
 		candidate := &record.Candidates[candidateIndex]
 		byIteration := make(map[int][]CandidateReview)
@@ -65,11 +67,18 @@ func projectAutomaticAssurance(record *runRecord) error {
 			if !fullBatch {
 				continue
 			}
+			var closingTiming Timing
+			if reviewTimingGroupIndex < len(reviewTimingGroups) {
+				closingTiming = reviewTimingGroups[reviewTimingGroupIndex]
+			}
+			reviewTimingGroupIndex++
 			if batch == nil {
-				completedAt := latestPhaseCompletion(record.Timing, "review")
+				if closingTiming.Sequence == 0 {
+					return fmt.Errorf("completed review batch lacks authoritative review timing")
+				}
 				candidate.ReviewBatches = append(candidate.ReviewBatches, CandidateReviewBatch{
 					Iteration: iteration, RequiredAxes: append([]deliveryevidence.ReviewAxis(nil), requiredAxes...),
-					CompletedAt: completedAt,
+					TimingSequence: closingTiming.Sequence, CompletedAt: closingTiming.CompletedAt,
 				})
 				batch = &candidate.ReviewBatches[len(candidate.ReviewBatches)-1]
 			}
@@ -122,19 +131,6 @@ func projectAutomaticAssurance(record *runRecord) error {
 				repairBatches = append(repairBatches, *candidate.LastRepairBatch)
 			}
 		}
-		historyRequests := make(map[string]int, len(candidate.RepairHistory))
-		for index, batch := range candidate.RepairHistory {
-			historyRequests[batch.RequestID] = index + 1
-		}
-		for _, batch := range repairBatches {
-			if position := historyRequests[batch.RequestID]; position > 0 {
-				candidate.RepairHistory[position-1] = batch
-			} else {
-				candidate.RepairHistory = append(candidate.RepairHistory, batch)
-				historyRequests[batch.RequestID] = len(candidate.RepairHistory)
-			}
-		}
-		repairBatches = append([]RepairBatchReceipt(nil), candidate.RepairHistory...)
 		for batchIndex, batch := range repairBatches {
 			findings := make([]deliveryevidence.AssuranceFindingDecision, len(batch.Decision.Findings))
 			for index, finding := range batch.Decision.Findings {
@@ -156,6 +152,13 @@ func projectAutomaticAssurance(record *runRecord) error {
 		}
 		exhaustiveProofs := append([]ValidationProof(nil), candidate.ExhaustiveHistory...)
 		if candidate.Exhaustive != nil {
+			if candidate.Exhaustive.TimingSequence == 0 {
+				timing, ok := latestPhaseTiming(record.Timing, "exhaustive-validation")
+				if !ok || timing.CompletedAt != candidate.Exhaustive.CompletedAt {
+					return fmt.Errorf("current exhaustive proof lacks authoritative lifecycle timing")
+				}
+				candidate.Exhaustive.TimingSequence = timing.Sequence
+			}
 			exhaustiveProofs = append(exhaustiveProofs, *candidate.Exhaustive)
 		}
 		for proofIndex := range exhaustiveProofs {
@@ -289,7 +292,7 @@ func validatePersistedAutomaticAssurance(record runRecord) error {
 
 func hasAutomaticAssuranceHistory(candidates []Candidate) bool {
 	for _, candidate := range candidates {
-		if len(candidate.ReviewBatches) != 0 || len(candidate.RepairHistory) != 0 ||
+		if len(candidate.ReviewBatches) != 0 ||
 			len(candidate.ExhaustiveHistory) != 0 {
 			return true
 		}
@@ -407,13 +410,26 @@ func reconcileReceipts[T any](persisted, expected []T, key func(T) string, kind 
 	return out, nil
 }
 
-func latestPhaseCompletion(timings []Timing, phase string) string {
+func latestPhaseTiming(timings []Timing, phase string) (Timing, bool) {
 	for index := len(timings) - 1; index >= 0; index-- {
 		if timings[index].Phase == phase {
-			return timings[index].CompletedAt
+			return timings[index], true
 		}
 	}
-	return ""
+	return Timing{}, false
+}
+
+func contiguousReviewTimingGroups(timings []Timing) []Timing {
+	var groups []Timing
+	for index, timing := range timings {
+		if timing.Phase != "review" {
+			continue
+		}
+		if index+1 == len(timings) || timings[index+1].Phase != "review" {
+			groups = append(groups, timing)
+		}
+	}
+	return groups
 }
 
 func reviewReferenceKey(candidateID string, iteration int, axis deliveryevidence.ReviewAxis) string {

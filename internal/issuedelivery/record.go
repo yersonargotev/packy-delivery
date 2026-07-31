@@ -173,8 +173,8 @@ func validateRun(record runRecord) error {
 		return fmt.Errorf("issue delivery run observations do not match its authority")
 	}
 	for i, timing := range record.Timing {
-		started, startErr := time.Parse(timeFormat, timing.StartedAt)
-		completed, completeErr := time.Parse(timeFormat, timing.CompletedAt)
+		started, startErr := time.Parse(time.RFC3339Nano, timing.StartedAt)
+		completed, completeErr := time.Parse(time.RFC3339Nano, timing.CompletedAt)
 		if timing.Sequence != i+1 || strings.TrimSpace(timing.Phase) == "" ||
 			startErr != nil || completeErr != nil || completed.Before(started) {
 			return fmt.Errorf("issue delivery run timing is invalid")
@@ -293,14 +293,26 @@ func validateCandidates(record runRecord) error {
 			required[axis] = true
 		}
 		batchIterations := make(map[int]bool, len(candidate.ReviewBatches))
+		currentBatchIteration := currentReviewIteration(&candidate)
+		previousBatchIteration, previousTimingSequence := 0, 0
 		for _, batch := range candidate.ReviewBatches {
 			if batch.Iteration < 1 || batchIterations[batch.Iteration] ||
-				len(batch.RequiredAxes) == 0 {
+				batch.Iteration <= previousBatchIteration ||
+				batch.TimingSequence <= previousTimingSequence ||
+				len(batch.RequiredAxes) == 0 ||
+				batch.TimingSequence > len(record.Timing) {
 				return fmt.Errorf("issue delivery candidate review batch history is invalid")
 			}
-			if _, err := time.Parse(timeFormat, batch.CompletedAt); err != nil {
+			timing := record.Timing[batch.TimingSequence-1]
+			if timing.Sequence != batch.TimingSequence || timing.Phase != "review" ||
+				timing.CompletedAt != batch.CompletedAt {
 				return fmt.Errorf("issue delivery candidate review batch history is invalid")
 			}
+			if batch.Iteration == currentBatchIteration &&
+				!reflect.DeepEqual(batch.RequiredAxes, candidate.RequiredReviews) {
+				return fmt.Errorf("issue delivery candidate current review batch requirements are invalid")
+			}
+			previousBatchIteration, previousTimingSequence = batch.Iteration, batch.TimingSequence
 			batchIterations[batch.Iteration] = true
 			batchAxes := make(map[deliveryevidence.ReviewAxis]bool, len(batch.RequiredAxes))
 			for _, axis := range batch.RequiredAxes {
@@ -428,13 +440,26 @@ func validateCandidates(record runRecord) error {
 		}
 		validationProofs := []*ValidationProof{candidate.Focused, candidate.Exhaustive}
 		historyCompletions := make(map[string]bool, len(candidate.ExhaustiveHistory))
+		historyTimingSequences := make(map[int]bool, len(candidate.ExhaustiveHistory))
 		for historyIndex := range candidate.ExhaustiveHistory {
 			proof := &candidate.ExhaustiveHistory[historyIndex]
-			if proof.Kind != "exhaustive" || historyCompletions[proof.CompletedAt] {
+			if proof.Kind != "exhaustive" || proof.TimingSequence < 1 ||
+				historyCompletions[proof.CompletedAt] || historyTimingSequences[proof.TimingSequence] ||
+				!exhaustiveProofTimingMatches(record, candidate.ID, *proof) {
 				return fmt.Errorf("issue delivery candidate contains duplicate exhaustive history")
 			}
 			historyCompletions[proof.CompletedAt] = true
+			historyTimingSequences[proof.TimingSequence] = true
 			validationProofs = append(validationProofs, proof)
+		}
+		if candidate.Exhaustive != nil {
+			if candidate.Exhaustive.TimingSequence == 0 {
+				if !receiptlessPreAssuranceRecord(record) {
+					return fmt.Errorf("issue delivery candidate exhaustive proof lacks lifecycle timing")
+				}
+			} else if !exhaustiveProofTimingMatches(record, candidate.ID, *candidate.Exhaustive) {
+				return fmt.Errorf("issue delivery candidate exhaustive proof has invalid lifecycle timing")
+			}
 		}
 		for _, proof := range validationProofs {
 			if proof == nil {
@@ -642,6 +667,50 @@ func validateCandidates(record runRecord) error {
 	return nil
 }
 
+func exhaustiveProofTimingMatches(record runRecord, candidateID string, proof ValidationProof) bool {
+	if proof.TimingSequence < 1 || proof.TimingSequence > len(record.Timing) {
+		return false
+	}
+	timing := record.Timing[proof.TimingSequence-1]
+	return timing.Sequence == proof.TimingSequence &&
+		timing.Phase == "exhaustive-validation" &&
+		timing.CompletedAt == proof.CompletedAt &&
+		candidateIDForTiming(record, proof.TimingSequence) == candidateID
+}
+
+func candidateIDForTiming(record runRecord, sequence int) string {
+	candidateIndex := -1
+	for _, timing := range record.Timing {
+		if (timing.Phase == "implementation" || timing.Phase == "repair") &&
+			candidateIndex+1 < len(record.Candidates) {
+			candidateIndex++
+		}
+		if timing.Sequence == sequence {
+			if candidateIndex >= 0 {
+				return record.Candidates[candidateIndex].ID
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+func receiptlessPreAssuranceRecord(record runRecord) bool {
+	if record.Evidence == nil ||
+		len(record.Evidence.CandidateReviewReceipts) != 0 ||
+		len(record.Evidence.AssuranceAdjudications) != 0 ||
+		len(record.Evidence.AssurancePhases) != 0 ||
+		len(record.Evidence.ExhaustiveAssurance) != 0 {
+		return false
+	}
+	for _, candidate := range record.Candidates {
+		if len(candidate.ReviewBatches) != 0 || len(candidate.ExhaustiveHistory) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func validatePersistedRepairDecision(
 	schema string,
 	candidate Candidate,
@@ -649,9 +718,6 @@ func validatePersistedRepairDecision(
 	allowPartial bool,
 ) error {
 	decision := candidate.RepairDecision
-	if err := validateRepairHistory(candidate); err != nil {
-		return err
-	}
 	if err := validateLastRepairBatch(schema, candidate); err != nil {
 		return err
 	}
@@ -685,23 +751,6 @@ func validatePersistedRepairDecision(
 		}
 	} else if decision.Class == RepairBounded && !accepted {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
-	}
-	return nil
-}
-
-func validateRepairHistory(candidate Candidate) error {
-	seen := make(map[string]bool, len(candidate.RepairHistory))
-	for _, batch := range candidate.RepairHistory {
-		if seen[batch.RequestID] || strings.TrimSpace(batch.RequestID) == "" ||
-			batch.Decision.CandidateID != candidate.ID || len(batch.Decision.Findings) == 0 {
-			return fmt.Errorf("issue delivery candidate contains an invalid canonical repair history")
-		}
-		seen[batch.RequestID] = true
-		for _, current := range candidate.RepairBatches {
-			if current.RequestID == batch.RequestID && !reflect.DeepEqual(current, batch) {
-				return fmt.Errorf("issue delivery candidate contains an invalid canonical repair history")
-			}
-		}
 	}
 	return nil
 }

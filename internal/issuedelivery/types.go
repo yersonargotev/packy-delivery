@@ -337,9 +337,10 @@ type CandidateReview struct {
 }
 
 type CandidateReviewBatch struct {
-	Iteration    int                           `json:"iteration"`
-	RequiredAxes []deliveryevidence.ReviewAxis `json:"required_axes"`
-	CompletedAt  string                        `json:"completed_at"`
+	Iteration      int                           `json:"iteration"`
+	RequiredAxes   []deliveryevidence.ReviewAxis `json:"required_axes"`
+	TimingSequence int                           `json:"timing_sequence"`
+	CompletedAt    string                        `json:"completed_at"`
 }
 
 type SpecialistReviewRequest struct {
@@ -520,9 +521,10 @@ type RepairBatchReceipt struct {
 }
 
 type ValidationProof struct {
-	Kind        string           `json:"kind"`
-	Result      ValidationResult `json:"result"`
-	CompletedAt string           `json:"completed_at"`
+	Kind           string           `json:"kind"`
+	Result         ValidationResult `json:"result"`
+	TimingSequence int              `json:"timing_sequence,omitempty"`
+	CompletedAt    string           `json:"completed_at"`
 }
 
 type Candidate struct {
@@ -548,7 +550,6 @@ type Candidate struct {
 	ExhaustiveHistory   []ValidationProof                    `json:"exhaustive_history,omitempty"`
 	RepairDecision      *RepairDecision                      `json:"repair_decision,omitempty"`
 	RepairBatches       []RepairBatchReceipt                 `json:"repair_batches,omitempty"`
-	RepairHistory       []RepairBatchReceipt                 `json:"repair_history,omitempty"`
 	LastRepairBatch     *RepairBatchReceipt                  `json:"last_repair_batch,omitempty"`
 }
 

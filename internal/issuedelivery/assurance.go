@@ -287,7 +287,8 @@ func (m *Module) advanceAssurance(
 				"exhaustive-validation",
 			)
 		}
-		completedAt := m.clock.Now().UTC().Format(time.RFC3339Nano)
+		completed := m.clock.Now().UTC()
+		completedAt := completed.Format(time.RFC3339Nano)
 		nextEvidence, err = deliveryevidence.RecordExhaustiveValidation(
 			nextEvidence,
 			deliveryevidence.ExhaustiveValidationResult{
@@ -310,6 +311,16 @@ func (m *Module) advanceAssurance(
 				"exhaustive-validation",
 			)
 		}
+		started, parseErr := time.Parse(timeFormat, record.UpdatedAt)
+		if parseErr != nil || completed.Before(started) {
+			return Outcome{}, errors.New("exhaustive validation lifecycle timing is invalid")
+		}
+		record.Timing = append(record.Timing, Timing{
+			Sequence: len(record.Timing) + 1, Phase: "exhaustive-validation",
+			From: record.State, To: record.State,
+			StartedAt: started.Format(timeFormat), CompletedAt: completedAt,
+		})
+		record.UpdatedAt = completedAt
 		validationReference := &ValidationReceiptReference{
 			Schema: deliveryevidence.ValidationReceiptV1, CandidateID: candidate.ID,
 			CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA, CompletedAt: completedAt,
@@ -566,7 +577,7 @@ func (m *Module) persistAssuranceTransition(
 	state State,
 	reason, phase string,
 ) (Outcome, error) {
-	started, err := time.Parse(timeFormat, record.UpdatedAt)
+	started, err := time.Parse(time.RFC3339Nano, record.UpdatedAt)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("parse issue delivery transition start: %w", err)
 	}
@@ -596,7 +607,7 @@ func (m *Module) persistAssuranceTransition(
 }
 
 func (m *Module) appendElapsedTiming(record *runRecord, phase string, completed time.Time) error {
-	started, err := time.Parse(timeFormat, record.UpdatedAt)
+	started, err := time.Parse(time.RFC3339Nano, record.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("parse issue delivery activity start: %w", err)
 	}

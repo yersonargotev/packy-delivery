@@ -130,6 +130,7 @@ func validateAutomaticAssurance(b Bundle) error {
 		return nil
 	}
 	reviewIDs := map[string]bool{}
+	reviewKeys := map[string]bool{}
 	for _, receipt := range b.CandidateReviewReceipts {
 		if receipt.Iteration < 1 || !gitSHA(receipt.CommitSHA) || !gitSHA(receipt.TreeSHA) ||
 			blank(receipt.CandidateID) || !digest(receipt.FindingsSHA256) || len(receipt.Axes) == 0 {
@@ -146,14 +147,17 @@ func validateAutomaticAssurance(b Bundle) error {
 				return errors.New("candidate review assurance axes are invalid")
 			}
 		}
+		key := receipt.CandidateID + "\x00" + strconv.Itoa(receipt.Iteration)
 		if receipt.Identity != CandidateReviewReceiptIdentity(
 			receipt.CandidateID, receipt.Iteration, axes, receipt.FindingsSHA256, receipt.CommitSHA, receipt.TreeSHA,
-		) || reviewIDs[receipt.Identity] {
+		) || reviewIDs[receipt.Identity] || reviewKeys[key] {
 			return errors.New("candidate review assurance identity is invalid")
 		}
 		reviewIDs[receipt.Identity] = true
+		reviewKeys[key] = true
 	}
 	adjudicationIDs := map[string]bool{}
+	adjudicationKeys := map[string]bool{}
 	for _, receipt := range b.AssuranceAdjudications {
 		if blank(receipt.RequestID) || blank(receipt.CandidateID) || receipt.Generation < 1 ||
 			(receipt.Class != "adjudication-only" && receipt.Class != "bounded" &&
@@ -168,13 +172,15 @@ func validateAutomaticAssurance(b Bundle) error {
 				return errors.New("assurance adjudication finding batch is invalid")
 			}
 		}
+		key := receipt.CandidateID + "\x00" + receipt.RequestID
 		if receipt.Identity != AssuranceAdjudicationReceiptIdentity(
 			receipt.RequestID, receipt.CandidateID, receipt.Generation, receipt.Class,
 			receipt.CompatiblePrefix, receipt.Findings,
-		) || adjudicationIDs[receipt.Identity] {
+		) || adjudicationIDs[receipt.Identity] || adjudicationKeys[key] {
 			return errors.New("assurance adjudication identity is invalid")
 		}
 		adjudicationIDs[receipt.Identity] = true
+		adjudicationKeys[key] = true
 	}
 	for index, receipt := range b.AssurancePhases {
 		if receipt.Sequence != index+1 || receipt.Repository != b.Repository || blank(receipt.Phase) ||
@@ -197,6 +203,7 @@ func validateAutomaticAssurance(b Bundle) error {
 		}
 	}
 	exhaustiveIDs := map[string]bool{}
+	exhaustiveKeys := map[string]bool{}
 	for _, receipt := range b.ExhaustiveAssurance {
 		if receipt.Repository != b.Repository || blank(receipt.CandidateID) ||
 			!gitSHA(receipt.CommitSHA) || !gitSHA(receipt.TreeSHA) ||
@@ -211,11 +218,13 @@ func validateAutomaticAssurance(b Bundle) error {
 		if _, err := time.Parse(time.RFC3339Nano, receipt.ValidatorIdentityExpiresAt); err != nil {
 			return errors.New("exhaustive assurance validator identity expiry is invalid")
 		}
+		key := receipt.CandidateID + "\x00" + receipt.CompletedAt
 		if receipt.Identity != ExhaustiveAssuranceReceiptIdentity(receipt) ||
-			exhaustiveIDs[receipt.Identity] {
+			exhaustiveIDs[receipt.Identity] || exhaustiveKeys[key] {
 			return fmt.Errorf("exhaustive assurance identity is invalid")
 		}
 		exhaustiveIDs[receipt.Identity] = true
+		exhaustiveKeys[key] = true
 	}
 	return nil
 }

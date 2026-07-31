@@ -671,6 +671,9 @@ func canonicalize(b *Bundle) {
 	}
 	sort.Slice(b.CandidateReviewReceipts, func(i, j int) bool {
 		if b.CandidateReviewReceipts[i].CandidateID == b.CandidateReviewReceipts[j].CandidateID {
+			if b.CandidateReviewReceipts[i].Iteration == b.CandidateReviewReceipts[j].Iteration {
+				return b.CandidateReviewReceipts[i].Identity < b.CandidateReviewReceipts[j].Identity
+			}
 			return b.CandidateReviewReceipts[i].Iteration < b.CandidateReviewReceipts[j].Iteration
 		}
 		return b.CandidateReviewReceipts[i].CandidateID < b.CandidateReviewReceipts[j].CandidateID
@@ -684,6 +687,9 @@ func canonicalize(b *Bundle) {
 	sort.Slice(b.AssuranceAdjudications, func(i, j int) bool {
 		if b.AssuranceAdjudications[i].CandidateID == b.AssuranceAdjudications[j].CandidateID {
 			if b.AssuranceAdjudications[i].Generation == b.AssuranceAdjudications[j].Generation {
+				if b.AssuranceAdjudications[i].RequestID == b.AssuranceAdjudications[j].RequestID {
+					return b.AssuranceAdjudications[i].Identity < b.AssuranceAdjudications[j].Identity
+				}
 				return b.AssuranceAdjudications[i].RequestID < b.AssuranceAdjudications[j].RequestID
 			}
 			return b.AssuranceAdjudications[i].Generation < b.AssuranceAdjudications[j].Generation
@@ -695,6 +701,9 @@ func canonicalize(b *Bundle) {
 	})
 	sort.Slice(b.ExhaustiveAssurance, func(i, j int) bool {
 		if b.ExhaustiveAssurance[i].CompletedAt == b.ExhaustiveAssurance[j].CompletedAt {
+			if b.ExhaustiveAssurance[i].CandidateID == b.ExhaustiveAssurance[j].CandidateID {
+				return b.ExhaustiveAssurance[i].Identity < b.ExhaustiveAssurance[j].Identity
+			}
 			return b.ExhaustiveAssurance[i].CandidateID < b.ExhaustiveAssurance[j].CandidateID
 		}
 		return b.ExhaustiveAssurance[i].CompletedAt < b.ExhaustiveAssurance[j].CompletedAt
