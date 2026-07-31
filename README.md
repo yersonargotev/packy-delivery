@@ -46,6 +46,17 @@ packy-deliver advance \
   --risk-profile low-risk|standard|high-risk
 ```
 
+The schema-v2 operator path is:
+
+```text
+status -> input-template -> advance -> review-packets -> advance -> watch -> advance
+```
+
+Use the generated semantic-input and review-response files unchanged as
+`advance` inputs. Steps are skipped when their pause is absent; only `advance`
+changes lifecycle state or adopts external results. Run `packy-deliver help`
+for the complete journey and per-command options.
+
 The command can perform Git and GitHub delivery effects after local readiness
 and explicit non-local authorization. Use a sandboxed `HOME` and
 `XDG_CONFIG_HOME` for local checks that resolve or write user paths. See

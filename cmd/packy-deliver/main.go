@@ -313,6 +313,15 @@ Commands:
   version        Print the build version
   legacy-v1      Run a historical v1 command
 
+Schema-v2 operator journey:
+  status -> input-template -> advance -> review-packets -> advance -> watch -> advance
+
+Use compact status and Advance output for ordinary operation. Generate exact
+semantic-input and review-response files, fill only genuine judgment, and pass
+those files unchanged to Advance. Use watch only for external-result or
+lock-contention pauses. Advance alone adopts results and owns lifecycle
+sequencing. Request --full-report only for judgment or audit.
+
 Run "packy-deliver help <command>" for advance, input-template, review-packets, status, watch, or legacy-v1 options.
 `
 
@@ -377,6 +386,18 @@ const legacyV1Usage = `Usage: packy-deliver legacy-v1 <historical-subcommand> [o
 
 Historical schema-v1 commands include:
   status --bundle PATH       Render canonical bundle status
+  initialize                 Initialize a canonical v1 evidence bundle
+  record-iteration           Record a v1 delivery iteration
+  record-review              Record a v1 review receipt
+  record-adjudication        Record a v1 finding adjudication
+  review-status              Evaluate v1 review coverage
+  record-focused-validation  Record a v1 focused-validation receipt
+  record-exhaustive-validation
+                             Record a v1 exhaustive-validation receipt
+  validation-status          Evaluate v1 validation coverage
+  local-gate                 Evaluate the v1 local gate
+  non-local-readiness        Evaluate v1 non-local readiness
+  final-outcome              Evaluate the v1 final outcome
 
 Run "packy-deliver legacy-v1 status --help" for bundle status options.
 `
@@ -401,6 +422,12 @@ Options:
   --authorize-non-local      Authorize delivery effects after local readiness
   --full-report              Emit the complete canonical JSON report
   --output FORMAT            Compact report format: json or text (default "json")
+
+Advance is the only lifecycle operation. Pass generated semantic-input files
+and completed review response files or directories without translating their
+JSON shape. Use status for compact observation and watch only while awaiting an
+external or lock result. Internal phases and private state paths are not public
+inputs. Timing objectives are telemetry, never correctness or merge gates.
 `
 
 func isLegacyCommand(name string) bool {

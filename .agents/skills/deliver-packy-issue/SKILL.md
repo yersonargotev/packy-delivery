@@ -47,6 +47,29 @@ review results, and adjudications only when the returned state requires them.
 Otherwise let `Advance` reacquire facts, perform deterministic work, persist
 evidence, and recover idempotently.
 
+Use this schema-v2 operating loop:
+
+1. Inspect with `packy-deliver status --repository ... --issue ...` when a
+   compact current projection is sufficient.
+2. Invoke `advance` only when its typed `next_action` requires Advance.
+3. For a semantic-input pause, invoke `input-template` with the exact pending
+   kind and a sandboxed output path. Replace only the explicit judgment
+   placeholders, then pass that same file unchanged to its matching `advance`
+   option.
+4. For an independent-review pause, invoke `review-packets` with the exact kind,
+   axis, or boundary requested. Send immutable packets to independent reviewers
+   in parallel where allowed. Fill their separate response templates and pass
+   the individual response files or packet directory unchanged through repeated
+   `--review-content`; never construct a parallel review envelope.
+5. For `external-result` or `lock-contention`, invoke bounded `watch` with an
+   explicit interval and timeout. When it reports an actionable change, invoke
+   `advance` so the engine—not this skill—adopts the result.
+
+Never inspect or derive a private delivery-state path. Never select an internal
+phase, invent semantic input, translate generated JSON into another shape,
+adopt an external result outside `Advance`, or treat timing objectives as
+readiness or correctness gates.
+
 One CLI invocation already converges consecutive safe deterministic
 transitions. Do not repeat a typed decision, repair, review, correction, CI
 attribution, or authorization merely because several internal transitions

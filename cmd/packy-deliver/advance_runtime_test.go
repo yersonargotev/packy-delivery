@@ -348,6 +348,9 @@ func productionReadyModule(
 	if pending == nil {
 		t.Fatalf("compiler did not request qualification correction: %#v", qualified)
 	}
+	if stop == "qualification-correction" {
+		return module, qualified, repository, tracker, clock
+	}
 	rows := append([]deliveryevidence.AcceptanceRow(nil), qualified.Evidence.AcceptanceMatrix...)
 	rows[0].OwningSeam = "production validation adapter"
 	rows[0].PositiveEvidence = "planned: exact candidate validation succeeds"

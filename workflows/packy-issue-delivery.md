@@ -92,23 +92,26 @@ resume. Add `--decision`, `--repair`, or
 content. Use `--ci-attribution` only for an exact failed CI run reported by
 `Advance`. Each of these four options takes a path to a file containing exactly
 one JSON value of its typed contract; inline JSON and free-form prose are not
-accepted. For example, after `Advance` returns a pending decision request:
+accepted. For example, after `Advance` returns a pending decision request,
+materialize its exact bound draft:
 
 ```sh
-cat > /tmp/packy-decision.json <<'JSON'
-{
-  "request_id": "decision-request-id-from-Advance",
-  "disposition": "owned-now",
-  "requirement": "Implement the clarified behavior in the accepted scope.",
-  "evidence_link": "https://github.com/yersonargotev/packy/issues/361#issuecomment-123456789"
-}
-JSON
+packy-deliver input-template \
+  --repository /absolute/path/to/packy \
+  --issue 361 \
+  --kind decision \
+  --output /sandbox/artifacts/packy-decision.json
+```
 
+Replace only the visible judgment placeholders in that file, preserving every
+generated mechanical identity, then submit the same file:
+
+```sh
 packy-deliver advance \
   --repository /absolute/path/to/packy \
   --issue 361 \
   --risk-profile standard \
-  --decision /tmp/packy-decision.json
+  --decision /sandbox/artifacts/packy-decision.json
 ```
 
 The `request_id` must be copied from the exact pending request returned by
@@ -198,6 +201,47 @@ The caller supplies only genuine judgment: ambiguous scope classification,
 exceptions, profile decisions not settled mechanically, and review or
 adjudication content. It does not assemble phase receipts or caller-authored JSON
 for observable facts.
+
+### Operator journey
+
+Operate a schema-v2 run through repository and issue identity, never through a
+private state path:
+
+1. Use `status --repository ... --issue ...` for ordinary inspection. It is a
+   single observation-only projection and cannot advance the run, execute
+   validation, consume input, or persist state.
+2. Invoke `advance` when `next_action` says to advance. The engine alone selects
+   and persists the next lifecycle transition.
+3. When a semantic input is requested, invoke `input-template` with the exact
+   returned kind. It pre-fills current mechanical identities and leaves only
+   judgment placeholders. Replace those placeholders and pass the same file,
+   without shape translation, through the matching `advance` option.
+4. When independent review is requested, invoke `review-packets` for the exact
+   qualification, candidate, or specialist request. Dispatch the immutable
+   packet files in parallel where allowed, fill only their separate response
+   templates, and pass each response file or the packet directory unchanged
+   through repeated `--review-content` options. `Advance` owns aggregation and
+   canonical admission.
+5. When a pause is `external-result` or `lock-contention`, invoke bounded
+   `watch --interval ... --timeout ...`. Watch emits observation changes and
+   stops at the next actionable pause; it never calls `Advance`, replays input,
+   adopts external results, or writes delivery state. Invoke `advance` after
+   the observation changes so the engine can adopt the result.
+6. Use compact JSON or text for routine operation. Request `--full-report` only
+   when genuine judgment needs the complete evidence record or for an explicit
+   audit.
+
+The ordinary sequence is therefore:
+
+```text
+status -> input-template -> Advance -> review-packets -> Advance -> watch -> Advance
+```
+
+Commands may be omitted when their corresponding pause is absent. Generated
+files are exact typed contracts, not suggestions for caller-authored wrappers.
+Neither an operator nor the thin skill may choose an internal phase, invent
+semantic input, infer evidence from free-form reason text, or adopt an external
+result outside `Advance`.
 
 LOCAL may prepare a branch and coherent commits but cannot mutate GitHub.
 NON-LOCAL begins only after fresh authority, candidate review, exact final
@@ -344,16 +388,22 @@ commits. Once pushed, never rewrite history.
 ## Exact final validation
 
 After the final candidate is stable and its required reviews are satisfied,
-create the intended final local commit and run the repository validation
-authority exactly once:
+create the intended final local commit and execute the repository validation
+authority through one immutable candidate-bound validation session:
 
 `./scripts/validate-packy.sh`
 
+The session runs under the strongest instrumentation required by the candidate.
+Compatible sensitive-boundary proofs and the exhaustive receipt remain distinct
+artifacts, but derive from that one execution. Reuse is permitted only for the
+exact run, candidate, commit, tree, validator digest, sandbox roots, and
+instrumentation set; any mismatch, expiry, failure, dirty workspace, or
+ambiguous crash state invalidates reuse and requires a fresh execution.
+
 Also retain the acceptance evidence and `git diff --check` result required by
-the matrix. Bind the validation receipt to the exact commit and tree. Any later
+the matrix. Bind every derived artifact to the exact commit and tree. A later
 repository change invalidates it and returns the run to candidate development;
-do not reuse or patch the receipt. A high-risk pre-effect checkpoint, when
-required by policy, is the only additional exhaustive validation.
+do not reuse, relabel, or patch the receipt.
 
 ## Delivery, CI, merge, and cleanup
 
@@ -403,7 +453,9 @@ acceptance evidence.
 For low-risk delivery, the operating objective is approximately 25 minutes from
 qualification to PR readiness and 25–35 minutes end-to-end when CI completes
 within 10 minutes. This is an observable performance objective, not a
-correctness gate.
+correctness, readiness, merge, or recovery gate. Compact timing reports expose
+active work, review, validation, and open external-wait categories against those
+objectives as telemetry derived from canonical persisted facts.
 
 ## Explicit legacy-v1 behavior
 
