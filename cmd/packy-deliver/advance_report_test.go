@@ -67,6 +67,15 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 			AcceptanceMatrixSHA256: strings.Repeat("e", 64),
 			Findings:               []deliveryevidence.ReviewFinding{}, Completed: true,
 		}},
+		ValidationSessions: []issuedelivery.ValidationSession{{
+			ID: strings.Repeat("f", 64), Attempt: 1,
+			State: issuedelivery.ValidationSessionStarted,
+		}},
+		ValidationInvalidations: []issuedelivery.ValidationInvalidation{{
+			SessionID: strings.Repeat("f", 64), CandidateID: candidate.ID,
+			Class:      issuedelivery.ValidationInvalidationWorkspace,
+			ObservedAt: "2026-07-31T12:00:00.000000000Z",
+		}},
 	}
 	full := runAdvanceOutput(t, outcome, "--full-report")
 	var decoded advanceReport
@@ -74,6 +83,8 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(decoded.Candidate, candidate) ||
+		!reflect.DeepEqual(decoded.ValidationSessions, outcome.ValidationSessions) ||
+		!reflect.DeepEqual(decoded.ValidationInvalidations, outcome.ValidationInvalidations) ||
 		len(decoded.QualificationReviews) != len(outcome.QualificationReviews) {
 		t.Fatal("full canonical report lost outcome fields")
 	}

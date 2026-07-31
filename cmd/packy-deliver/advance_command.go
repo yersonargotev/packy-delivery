@@ -66,6 +66,8 @@ type advanceReport struct {
 	QualificationApproved    bool                                          `json:"qualification_approved,omitempty"`
 	QualificationReviews     []issuedelivery.QualificationReview           `json:"qualification_reviews,omitempty"`
 	QualificationCorrections []issuedelivery.QualificationCorrection       `json:"qualification_corrections,omitempty"`
+	ValidationSessions       []issuedelivery.ValidationSession             `json:"validation_sessions,omitempty"`
+	ValidationInvalidations  []issuedelivery.ValidationInvalidation        `json:"validation_invalidations,omitempty"`
 	Evidence                 *deliveryevidence.Bundle                      `json:"evidence,omitempty"`
 	Observations             issuedelivery.Observations                    `json:"observations"`
 	Candidate                *issuedelivery.Candidate                      `json:"candidate,omitempty"`
@@ -86,6 +88,8 @@ type compactAdvanceReport struct {
 	Decision                *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                  *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
 	QualificationCorrection *issuedelivery.QualificationCorrectionRequest `json:"qualification_correction,omitempty"`
+	ValidationSession       *issuedelivery.ValidationSession              `json:"validation_session,omitempty"`
+	ValidationInvalidations []issuedelivery.ValidationInvalidation        `json:"validation_invalidations,omitempty"`
 	Candidate               *compactCandidateIdentity                     `json:"candidate,omitempty"`
 	Branch                  *issuedelivery.RemoteBranchObservation        `json:"branch,omitempty"`
 	PullRequest             *compactPullRequestIdentity                   `json:"pull_request,omitempty"`
@@ -326,6 +330,14 @@ func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceRepor
 		BlockerKind: outcome.BlockerKind, SupersedesRunID: outcome.SupersedesRunID,
 		Decision: outcome.Decision, Repair: outcome.Repair,
 		QualificationCorrection: outcome.QualificationCorrection,
+		ValidationInvalidations: append(
+			[]issuedelivery.ValidationInvalidation(nil),
+			outcome.ValidationInvalidations...,
+		),
+	}
+	if len(outcome.ValidationSessions) > 0 {
+		latest := outcome.ValidationSessions[len(outcome.ValidationSessions)-1]
+		report.ValidationSession = &latest
 	}
 	if outcome.BlockerKind != "" {
 		return report
@@ -431,6 +443,8 @@ func reportFromOutcome(outcome issuedelivery.Outcome, now time.Time) (advanceRep
 		QualificationApproved:    outcome.QualificationApproved,
 		QualificationReviews:     outcome.QualificationReviews,
 		QualificationCorrections: outcome.QualificationCorrections,
+		ValidationSessions:       outcome.ValidationSessions,
+		ValidationInvalidations:  outcome.ValidationInvalidations,
 		Candidate:                outcome.Candidate, LocalReadiness: outcome.LocalReadiness,
 		NonLocal: outcome.NonLocal, Timing: outcome.Timing, TimingReport: timingReport,
 	}, nil

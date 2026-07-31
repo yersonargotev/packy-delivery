@@ -141,6 +141,8 @@ func timingCategoryForPhase(phase string) (TimingCategory, bool) {
 	case "repair", "adjudication", "ci-candidate-failure", "qualification-correction":
 		return TimingRepair, true
 	case "risk-observation", "focused-validation", "boundary-validation",
+		"validation-session-observation", "validation-session-started",
+		"validation-session-completed", "validation-session-failed",
 		"exhaustive-validation", exhaustiveValidationSucceededPhase, "local-readiness", "merge-readiness",
 		"integration-verification", "post-merge-observation":
 		return TimingValidation, true

@@ -110,6 +110,8 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 	mustAdvance(t, module, request)
 	risk := module.risk.(*fakeCandidateRiskObserver)
 	initialRiskCalls := risk.calls
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
 
 	var outcome Outcome
 	err := module.store.withIssueLock(
@@ -159,7 +161,8 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 		t.Fatal(err)
 	}
 	if outcome.State != StateNeedsReview || outcome.Candidate == nil ||
-		len(outcome.Candidate.Reviews) != 2 || risk.calls != initialRiskCalls {
+		len(outcome.Candidate.Reviews) != 2 || risk.calls != initialRiskCalls ||
+		session.observeCalls != 0 || session.executeCalls != 0 {
 		t.Fatalf("legacy continuation outcome=%#v risk calls=%d", outcome, risk.calls)
 	}
 	err = module.store.withIssueLock(

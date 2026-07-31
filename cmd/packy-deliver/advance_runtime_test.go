@@ -67,9 +67,50 @@ func (productionPathRiskObserver) ObserveCandidateRisk(
 	}, nil
 }
 
+type productionPathHighRiskObserver struct{}
+
+func (productionPathHighRiskObserver) ObserveCandidateRisk(
+	_ context.Context,
+	request issuedelivery.CandidateRiskRequest,
+) (issuedelivery.CandidateRiskObservation, error) {
+	return issuedelivery.CandidateRiskObservation{
+		CandidateID: request.CandidateID, CommitSHA: request.CommitSHA, TreeSHA: request.TreeSHA,
+		Effects: []issuedelivery.EffectObservation{
+			{
+				Effect:   issuedelivery.EffectSecurity,
+				Evidence: "production-path security boundary",
+				Complete: true,
+			},
+			{
+				Effect:   issuedelivery.EffectRealConfiguration,
+				Evidence: "production-path configuration boundary",
+				Complete: true,
+			},
+		},
+		Completed: true,
+	}, nil
+}
+
+type productionPathSpecialistExecutor struct{}
+
+func (productionPathSpecialistExecutor) ReviewSpecialist(
+	_ context.Context,
+	request issuedelivery.SpecialistReviewRequest,
+) (issuedelivery.SpecialistReview, error) {
+	return issuedelivery.SpecialistReview{
+		CandidateID: request.CandidateID,
+		Boundary:    request.Boundary,
+		Specialist:  request.Specialist,
+		Findings:    []issuedelivery.SpecialistFinding{},
+		Completed:   true,
+	}, nil
+}
+
 type productionValidationObservationRunner struct {
-	commit string
-	tree   string
+	commit     string
+	tree       string
+	repository string
+	common     string
 }
 
 type mutatingValidationRunner struct {
@@ -100,6 +141,10 @@ func (runner productionValidationObservationRunner) Output(
 		return []byte(runner.tree + "\n"), nil
 	case strings.Contains(joined, "status --porcelain"):
 		return nil, nil
+	case strings.Contains(joined, "worktree list --porcelain"):
+		return []byte("worktree " + runner.repository + "\n"), nil
+	case strings.Contains(joined, "--git-common-dir"):
+		return []byte(runner.common + "\n"), nil
 	default:
 		return nil, errors.New("unexpected validation observation")
 	}
@@ -239,18 +284,36 @@ func productionReadyModule(
 	}}
 	clock := &commandClock{now: time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)}
 	focusedRunner, exhaustiveRunner := &fakeValidationRunner{}, &fakeValidationRunner{}
+	observationRunner := productionValidationObservationRunner{
+		commit: commit, tree: tree, repository: repository, common: common,
+	}
 	validationAdapter := &productionValidationExecutor{
 		repository: repository,
-		runner:     productionValidationObservationRunner{commit: commit, tree: tree},
+		runner:     observationRunner,
 		focused:    focusedRunner, exhaustive: exhaustiveRunner, now: clock.Now,
+	}
+	boundary := productionBoundaryExecutor{
+		repository: repository, runner: observationRunner,
+		validation: exhaustiveRunner, mu: &sync.Mutex{},
 	}
 	if review == nil {
 		review = productionPathReviewExecutor{}
 	}
+	var risk issuedelivery.CandidateRiskObserver = productionPathRiskObserver{}
+	if stop == "high-risk-validation" {
+		risk = productionPathHighRiskObserver{}
+	}
 	module, err := issuedelivery.New(issuedelivery.Config{
 		Git: git, GitHub: tracker, Review: review,
 		Validation: validationAdapter,
-		Risk:       productionPathRiskObserver{}, Clock: clock, SandboxRoot: sandbox,
+		Risk:       risk,
+		Specialist: productionPathSpecialistExecutor{},
+		Boundary:   boundary,
+		ValidationSession: productionValidationSessionExecutor{
+			repository: repository, runner: observationRunner,
+			validation: exhaustiveRunner, boundary: boundary,
+		},
+		Clock: clock, SandboxRoot: sandbox,
 		NonLocal: nonLocal, LocalCompletion: localCompletion,
 		DeclaredProfile: deliveryevidence.RiskLow, AllowLegacyV1: true,
 	})
@@ -350,14 +413,36 @@ func productionReadyModule(
 	if outcome.LocalReadiness == nil || outcome.State != issuedelivery.StateWaiting ||
 		outcome.Evidence == nil ||
 		outcome.Evidence.AcceptanceMatrix[0].State != deliveryevidence.AcceptanceProved ||
-		len(focusedRunner.calls) != 1 || len(exhaustiveRunner.calls) != 1 {
+		len(focusedRunner.calls) != 1 || len(exhaustiveRunner.calls) != 1 ||
+		outcome.Candidate == nil ||
+		outcome.Candidate.Exhaustive == nil ||
+		outcome.Candidate.Exhaustive.ValidationCompletionSHA256 == "" ||
+		len(outcome.ValidationSessions) != 1 ||
+		outcome.ValidationSessions[0].Result == nil {
 		t.Fatalf("production-shaped path did not reach local readiness: %#v", outcome)
+	}
+	if stop != "high-risk-validation" {
+		return module, outcome, repository, tracker, clock
+	}
+	if len(outcome.Candidate.BoundaryProofs) != 2 ||
+		len(outcome.ValidationSessions[0].Result.BoundaryEvidence) != 2 {
+		t.Fatalf("production high-risk path lacks boundary evidence: %#v", outcome)
+	}
+	completion := outcome.Candidate.Exhaustive.ValidationCompletionSHA256
+	first, second := outcome.Candidate.BoundaryProofs[0], outcome.Candidate.BoundaryProofs[1]
+	if first.ValidationCompletionSHA256 != completion ||
+		second.ValidationCompletionSHA256 != completion ||
+		first.Result.WriteManifestSHA256 == second.Result.WriteManifestSHA256 {
+		t.Fatalf(
+			"production boundary proofs do not retain one completion with distinct manifests: %#v",
+			outcome.Candidate.BoundaryProofs,
+		)
 	}
 	return module, outcome, repository, tracker, clock
 }
 
-func TestProductionValidationAdapterAdvancesRealModuleToLocalReadiness(t *testing.T) {
-	_, _, _, _, _ = productionReadyModule(t, nil, nil, nil, "")
+func TestProductionValidationSessionRunsOnceForTwoBoundariesAndExhaustiveAssurance(t *testing.T) {
+	_, _, _, _, _ = productionReadyModule(t, nil, nil, nil, "high-risk-validation")
 }
 
 func TestProductionTrackerObserverBindsSelectedSpecification(t *testing.T) {
