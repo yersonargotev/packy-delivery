@@ -217,6 +217,58 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 	}
 }
 
+func TestLegacyRunAtStartingHeadStillCreatesHistoricalCandidate(t *testing.T) {
+	module, git, tracker, _, validator := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	git.value.HeadSHA = git.value.StartingBaseSHA
+	risk := module.risk.(*fakeCandidateRiskObserver)
+	initialRiskCalls := risk.calls
+
+	var outcome Outcome
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, _, loadErr := store.loadActive()
+			if loadErr != nil {
+				return loadErr
+			}
+			record, loadErr := decodeRun(data)
+			if loadErr != nil {
+				return loadErr
+			}
+			record.Schema = legacyRunSchema
+			record.Evidence.CandidateReviewReceipts = nil
+			record.Evidence.AssuranceAdjudications = nil
+			record.Evidence.AssurancePhases = nil
+			record.Evidence.ExhaustiveAssurance = nil
+			record.EffectiveProfile = ""
+			record.RequiredBoundaries = nil
+			record.ProfileHistory = nil
+			for index := range record.Evidence.AcceptanceMatrix {
+				record.Evidence.AcceptanceMatrix[index].Obligations = nil
+			}
+			compiled, compileErr := compileAuthority(
+				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard,
+			)
+			if compileErr != nil {
+				return compileErr
+			}
+			outcome, loadErr = module.advanceAssurance(
+				context.Background(), store, record, git.value, tracker.value, compiled, request,
+			)
+			return loadErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.State != StateNeedsReview || outcome.Candidate == nil ||
+		outcome.Candidate.CommitSHA != git.value.StartingBaseSHA ||
+		validator.focusedCalls != 1 || risk.calls != initialRiskCalls {
+		t.Fatalf("same-head legacy outcome=%#v risk calls=%d", outcome, risk.calls)
+	}
+}
+
 func TestLegacyRepairDecisionOptionsAndAcceptanceRemainV1(t *testing.T) {
 	request := repairDecisionRequest(legacyRunSchema, "candidate", []string{"finding"})
 	if !reflect.DeepEqual(request.Options, []RepairClass{RepairBounded, RepairCandidateChanging}) {

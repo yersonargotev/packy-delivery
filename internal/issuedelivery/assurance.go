@@ -43,6 +43,20 @@ func (m *Module) advanceAssurance(
 	}
 
 	candidate := latestCandidate(&record)
+	if record.Schema != legacyRunSchema && candidate == nil &&
+		git.HeadSHA == record.Evidence.StartingBaseSHA {
+		const reason = "qualification is approved; awaiting candidate development"
+		if record.State == StateWaiting && record.Reason == reason {
+			return outcomeFromRecord(record), nil
+		}
+		return m.persistAssuranceTransition(
+			store,
+			record,
+			StateWaiting,
+			reason,
+			"candidate-development",
+		)
+	}
 	if candidate == nil || candidate.CommitSHA != git.HeadSHA || candidate.TreeSHA != git.TreeSHA {
 		if candidate != nil && hasAcceptedFindings(candidate.RepairDecision) {
 			// The changed tree is the declared repair batch.

@@ -182,6 +182,55 @@ func (f *fakeIssueDeliveryAdvancer) Advance(_ context.Context, request issuedeli
 	return outcome, nil
 }
 
+func TestAdvanceCommandFullReportIncludesCandidateDevelopmentTiming(t *testing.T) {
+	repository := t.TempDir()
+	fake := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{{
+		RunID: "run-1", State: issuedelivery.StateWaiting,
+		Reason:     "qualification is approved; awaiting candidate development",
+		PauseCause: issuedelivery.PauseExternalResult,
+		NextAction: issuedelivery.ActionObserveExternalResult,
+		Timing: []issuedelivery.Timing{
+			{
+				Sequence: 1, Phase: "qualification", To: issuedelivery.StateNeedsReview,
+				StartedAt:   "2026-07-30T06:00:00.000000000Z",
+				CompletedAt: "2026-07-30T06:00:01.000000000Z",
+			},
+			{
+				Sequence: 2, Phase: "candidate-development",
+				From: issuedelivery.StateNeedsReview, To: issuedelivery.StateWaiting,
+				StartedAt:   "2026-07-30T06:00:01.000000000Z",
+				CompletedAt: "2026-07-30T06:00:03.000000000Z",
+			},
+		},
+	}}}
+	cmd := command{
+		Now: func() time.Time { return time.Date(2026, 7, 30, 6, 0, 4, 0, time.UTC) },
+		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
+			return fake, nil
+		},
+	}
+	var stdout bytes.Buffer
+	if err := cmd.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361",
+		"--risk-profile", "low-risk", "--full-report",
+	}, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	var report advanceReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	for _, category := range report.TimingReport.Categories {
+		if category.Category == issuedelivery.TimingImplementation {
+			if category.DurationNanoseconds != int64(2*time.Second) {
+				t.Fatalf("candidate development duration = %d", category.DurationNanoseconds)
+			}
+			return
+		}
+	}
+	t.Fatal("full report omitted candidate development timing")
+}
+
 func TestAdvanceCommandCallsDeepModuleAndSynthesizesOnlyExactRemoteAuthorization(t *testing.T) {
 	repository := t.TempDir()
 	resolvedRepository, err := filepath.EvalSymlinks(repository)
