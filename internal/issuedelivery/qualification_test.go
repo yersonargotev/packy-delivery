@@ -789,7 +789,7 @@ func TestCompilerQualificationBindingsRejectGenericAndForeignContent(t *testing.
 	valid := compilerQualificationCorrectionForTest(
 		pending, rows, "mapped renderer authority to observable contract assertions",
 	)
-	if err := validateCompilerQualificationBindings(*valid); err != nil {
+	if err := validateCompilerQualificationBindings(*valid, rows); err != nil {
 		t.Fatalf("valid distinct criterion bindings rejected: %v", err)
 	}
 
@@ -805,7 +805,7 @@ func TestCompilerQualificationBindingsRejectGenericAndForeignContent(t *testing.
 	} {
 		correction := *valid
 		correction.Evidence = value
-		if err := validateCompilerQualificationBindings(correction); err == nil {
+		if err := validateCompilerQualificationBindings(correction, rows); err == nil {
 			t.Fatalf("compiler explanation binding accepted %q", value)
 		}
 	}
@@ -845,7 +845,7 @@ func TestCompilerQualificationBindingsRejectGenericAndForeignContent(t *testing.
 				[]deliveryevidence.AcceptanceRow(nil), valid.AcceptanceMatrix...,
 			)
 			field.set(&correction.AcceptanceMatrix[0], value)
-			if err := validateCompilerQualificationBindings(correction); err == nil {
+			if err := validateCompilerQualificationBindings(correction, rows); err == nil {
 				t.Fatalf("%s binding accepted %q", field.name, value)
 			}
 		}

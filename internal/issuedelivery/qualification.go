@@ -441,7 +441,7 @@ func validateCompilerQualificationCorrection(record runRecord, correction Qualif
 		correction.AuthoritySHA256 != expected.AuthoritySHA256 ||
 		correction.ReviewedMatrixSHA256 != expected.ReviewedMatrixSHA256 ||
 		!reflect.DeepEqual(correction.FindingIDs, expected.FindingIDs) ||
-		validateCompilerQualificationBindings(correction) != nil {
+		validateCompilerQualificationBindings(correction, record.Evidence.AcceptanceMatrix) != nil {
 		return errors.New("qualification history contains an invalid compiler correction")
 	}
 	if validateQualificationMatrixShape(record.Evidence, correction.AcceptanceMatrix) != nil {
@@ -546,7 +546,9 @@ func validateQualificationCorrection(record runRecord, correction QualificationC
 		return errors.New("qualification correction must address every finding as one batch")
 	}
 	if isCompilerQualificationRequest(*pending) {
-		if err := validateCompilerQualificationBindings(correction); err != nil {
+		if err := validateCompilerQualificationBindings(
+			correction, record.Evidence.AcceptanceMatrix,
+		); err != nil {
 			return err
 		}
 		return validateQualificationMatrixShape(record.Evidence, correction.AcceptanceMatrix)
@@ -660,18 +662,46 @@ func specificQualificationText(value string) bool {
 	return false
 }
 
-func validateCompilerQualificationBindings(correction QualificationCorrection) error {
+func validateCompilerQualificationBindings(
+	correction QualificationCorrection,
+	expectedRows []deliveryevidence.AcceptanceRow,
+) error {
 	if !validCompilerQualificationEvidence(correction) {
 		return errors.New("compiler qualification correction evidence is not bound to its request")
 	}
-	for _, row := range correction.AcceptanceMatrix {
-		for _, value := range []string{
-			row.OwningSeam, row.PositiveEvidence, row.NegativeEvidence,
-			row.FailureEvidence, row.MutationEvidence, row.CompatibilityEvidence,
-			row.PreservationEvidence, row.MigrationEvidence,
+	for rowIndex, row := range correction.AcceptanceMatrix {
+		criterionID := row.Identity
+		if rowIndex < len(expectedRows) {
+			criterionID = expectedRows[rowIndex].Identity
+		}
+		if row.Identity != criterionID {
+			return fmt.Errorf(
+				"compiler qualification correction row is not bound to its criterion: criterion %q field %q: supplied criterion identity %q does not match",
+				criterionID,
+				fmt.Sprintf("acceptance_matrix[%d].identity", rowIndex),
+				row.Identity,
+			)
+		}
+		for _, cell := range []struct {
+			field string
+			value string
+		}{
+			{"owning_seam", row.OwningSeam},
+			{"positive_evidence", row.PositiveEvidence},
+			{"negative_evidence", row.NegativeEvidence},
+			{"failure_evidence", row.FailureEvidence},
+			{"mutation_evidence", row.MutationEvidence},
+			{"compatibility_evidence", row.CompatibilityEvidence},
+			{"preservation_evidence", row.PreservationEvidence},
+			{"migration_evidence", row.MigrationEvidence},
 		} {
-			if !validCompilerQualificationCell(value, row.Identity) {
-				return errors.New("compiler qualification correction row is not bound to its criterion")
+			if err := validateCompilerQualificationCell(cell.value, criterionID); err != nil {
+				return fmt.Errorf(
+					"compiler qualification correction row is not bound to its criterion: criterion %q field %q: %w",
+					criterionID,
+					fmt.Sprintf("acceptance_matrix[%d].%s", rowIndex, cell.field),
+					err,
+				)
 			}
 		}
 	}
@@ -691,18 +721,65 @@ func validCompilerQualificationEvidence(correction QualificationCorrection) bool
 	return validCompilerQualificationStatement(parts[1])
 }
 
-func validCompilerQualificationCell(value, criterionID string) bool {
+func validateCompilerQualificationCell(value, criterionID string) error {
 	prefix := "[criterion:" + criterionID + "] source="
 	if !strings.HasPrefix(value, prefix) {
-		return false
+		if kind, parseable := suppliedCompilerQualificationSourceKind(value); parseable {
+			return fmt.Errorf("source kind %q binding must start with %q", kind, prefix)
+		}
+		return fmt.Errorf("must start with %q", prefix)
 	}
-	parts := strings.Split(strings.TrimPrefix(value, prefix), "; assertion=")
-	if len(parts) != 2 {
-		return false
+	bound := strings.TrimPrefix(value, prefix)
+	if strings.Count(bound, "; assertion=") != 1 {
+		if kind, parseable := suppliedCompilerQualificationSourceKind(value); parseable {
+			return fmt.Errorf(
+				`source kind %q binding must contain exactly one "; assertion=" separator`,
+				kind,
+			)
+		}
+		return errors.New(`must contain exactly one "; assertion=" separator`)
 	}
+	parts := strings.SplitN(bound, "; assertion=", 2)
 	source := strings.SplitN(parts[0], ":", 2)
-	return len(source) == 2 && validCompilerQualificationLocator(source[0], source[1]) &&
-		validCompilerQualificationStatement(parts[1])
+	if len(source) != 2 || source[0] == "" {
+		return errors.New(`source must match "<kind>:<locator>"`)
+	}
+	rule, ok := compilerQualificationLocatorRuleFor(source[0])
+	if !ok {
+		return fmt.Errorf(
+			"source kind %q is unsupported; use file, symbol, test, command, fixture, review, authority, or not-applicable",
+			source[0],
+		)
+	}
+	if !rule.matches(source[1]) {
+		return fmt.Errorf(
+			"source kind %q locator %q must match %s",
+			source[0], source[1], rule.expectation,
+		)
+	}
+	if !validCompilerQualificationStatement(parts[1]) {
+		return fmt.Errorf(
+			"source kind %q assertion must be 24-512 characters with no surrounding whitespace, semicolon, or qualification-correction marker",
+			source[0],
+		)
+	}
+	return nil
+}
+
+func suppliedCompilerQualificationSourceKind(value string) (string, bool) {
+	const marker = " source="
+	header, _, _ := strings.Cut(value, "; assertion=")
+	markerIndex := strings.LastIndex(header, marker)
+	var source string
+	if markerIndex >= 0 {
+		source = header[markerIndex+len(marker):]
+	} else if strings.HasPrefix(header, "source=") {
+		source = strings.TrimPrefix(header, "source=")
+	} else {
+		return "", false
+	}
+	kind, _, parseable := strings.Cut(source, ":")
+	return kind, parseable && kind != ""
 }
 
 var (
@@ -715,27 +792,54 @@ var (
 	compilerAuthorityLocatorPattern = regexp.MustCompile(`^(?:criterion-[a-f0-9]{16}|issue#[1-9][0-9]*)(?:/[A-Za-z0-9_.-]+)?$`)
 )
 
-func validCompilerQualificationLocator(kind, locator string) bool {
+type compilerQualificationLocatorRule struct {
+	expectation string
+	matches     func(string) bool
+}
+
+func compilerQualificationLocatorRuleFor(kind string) (compilerQualificationLocatorRule, bool) {
 	switch kind {
 	case "file":
-		return compilerFileLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "<path>/<name>", matches: compilerFileLocatorPattern.MatchString,
+		}, true
 	case "symbol":
-		return compilerSymbolLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "<scope><separator><symbol>, with each separator made of 1-2 '.' or ':' characters",
+			matches:     compilerSymbolLocatorPattern.MatchString,
+		}, true
 	case "test":
-		return compilerTestLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "Test<name> with at least 8 letters, digits, or underscores",
+			matches:     compilerTestLocatorPattern.MatchString,
+		}, true
 	case "command":
-		return strings.HasPrefix(locator, "./") &&
-			compilerFileLocatorPattern.MatchString(strings.TrimPrefix(locator, "./"))
+		return compilerQualificationLocatorRule{
+			expectation: "./<path>/<name>",
+			matches: func(locator string) bool {
+				return strings.HasPrefix(locator, "./") &&
+					compilerFileLocatorPattern.MatchString(strings.TrimPrefix(locator, "./"))
+			},
+		}, true
 	case "fixture":
-		return compilerFixtureLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "fixture/<group>/<name>", matches: compilerFixtureLocatorPattern.MatchString,
+		}, true
 	case "review":
-		return compilerReviewLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "review/<16-lowercase-hex>", matches: compilerReviewLocatorPattern.MatchString,
+		}, true
 	case "authority":
-		return compilerAuthorityLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "criterion-<16-lowercase-hex>[/<name>] or issue#<number>[/<name>]",
+			matches:     compilerAuthorityLocatorPattern.MatchString,
+		}, true
 	case "not-applicable":
-		return compilerReasonLocatorPattern.MatchString(locator)
+		return compilerQualificationLocatorRule{
+			expectation: "reason/<word>-<word>[-<word>...]", matches: compilerReasonLocatorPattern.MatchString,
+		}, true
 	default:
-		return false
+		return compilerQualificationLocatorRule{}, false
 	}
 }
 

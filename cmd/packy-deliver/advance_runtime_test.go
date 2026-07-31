@@ -245,6 +245,7 @@ func productionReadyModule(
 	localCompletion issuedelivery.LocalCompletionGateway,
 	review issuedelivery.ReviewExecutor,
 	stop string,
+	criteria ...issuedelivery.AuthorityItem,
 ) (*issuedelivery.Module, issuedelivery.Outcome, string, *commandMutableTrackerObserver, *commandClock) {
 	t.Helper()
 	repository := t.TempDir()
@@ -279,16 +280,19 @@ func productionReadyModule(
 		HeadSHA: commit, TreeSHA: tree, WorkspaceClean: true,
 		Branch: "chore/issue-361-production-validation",
 	}}
+	if len(criteria) == 0 {
+		criteria = []issuedelivery.AuthorityItem{{
+			Text: "Reach exact local readiness.", EvidenceLink: "issue#361:acceptance-1",
+		}}
+	}
 	tracker := &commandMutableTrackerObserver{observation: issuedelivery.TrackerObservation{
 		Repository: deliveryevidence.RepositoryIdentity{
 			Owner: "yersonargotev", Name: "packy", NodeID: "R1",
 		},
 		Issue: deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
 		Title: "Cut over", Body: "Approved authority.", State: "OPEN",
-		Labels: []string{"status:approved", "type:chore"},
-		Criteria: []issuedelivery.AuthorityItem{{
-			Text: "Reach exact local readiness.", EvidenceLink: "issue#361:acceptance-1",
-		}},
+		Labels:     []string{"status:approved", "type:chore"},
+		Criteria:   criteria,
 		Exclusions: []issuedelivery.AuthorityItem{}, Dependencies: []issuedelivery.DependencyObservation{},
 		References: []issuedelivery.ReferenceObservation{}, Ambiguities: []issuedelivery.AuthorityItem{},
 	}}
