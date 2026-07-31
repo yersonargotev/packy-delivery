@@ -29,6 +29,13 @@ type remoteCommandError struct {
 func (e *remoteCommandError) Error() string { return e.err.Error() }
 func (e *remoteCommandError) Unwrap() error { return e.err }
 
+type remoteDecodeError struct {
+	err error
+}
+
+func (e *remoteDecodeError) Error() string { return e.err.Error() }
+func (e *remoteDecodeError) Unwrap() error { return e.err }
+
 type remoteRepository struct {
 	ID            string `json:"id"`
 	NameWithOwner string `json:"nameWithOwner"`
@@ -596,14 +603,14 @@ func exactJSON(raw []byte, target any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		return err
+		return &remoteDecodeError{err: err}
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return errors.New("command output contains more than one JSON value")
+			err = errors.New("command output contains more than one JSON value")
 		}
-		return err
+		return &remoteDecodeError{err: err}
 	}
 	return nil
 }

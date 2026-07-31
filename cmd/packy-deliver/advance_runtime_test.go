@@ -501,7 +501,9 @@ func TestProductionTrackerObserverClassifiesReadFailures(t *testing.T) {
 			class: issuedelivery.StatusErrorGitHubRead, transient: true,
 		},
 		{
-			name: "authority", err: errors.New("HTTP 403: forbidden"),
+			name: "authority", err: &commandRejectedError{
+				err: errors.New("GitHub rejected the command"),
+			},
 			class: issuedelivery.StatusErrorAuthority,
 		},
 	}

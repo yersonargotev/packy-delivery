@@ -162,10 +162,12 @@ func TestProductionStatusNonLocalObservationClassifiesCommandFailureAsTransient(
 	}
 }
 
-func TestProductionStatusNonLocalObservationClassifiesAuthorizationFailureAsPermanent(t *testing.T) {
+func TestProductionStatusNonLocalObservationClassifiesRejectedIdentityReadAsPermanent(t *testing.T) {
 	runner := &fakeRemoteRunner{
 		outputs: [][]byte{nil},
-		errs:    []error{errors.New("HTTP 403: forbidden")},
+		errs: []error{&commandRejectedError{
+			err: errors.New("GitHub rejected the command"),
+		}},
 	}
 	observer := productionStatusNonLocalObserver{
 		gateway: productionNonLocalGateway{runner: runner},
@@ -181,7 +183,7 @@ func TestProductionStatusNonLocalObservationClassifiesAuthorizationFailureAsPerm
 		},
 	)
 	class, transient, ok := issuedelivery.StatusErrorDetails(err)
-	if !ok || class != issuedelivery.StatusErrorAuthority || transient {
+	if !ok || class != issuedelivery.StatusErrorIdentity || transient {
 		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
 	}
 }
@@ -205,6 +207,33 @@ func TestProductionStatusNonLocalObservationClassifiesInvalidIdentityAsPermanent
 	)
 	class, transient, ok := issuedelivery.StatusErrorDetails(err)
 	if !ok || class != issuedelivery.StatusErrorIdentity || transient {
+		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+	}
+}
+
+func TestProductionStatusNonLocalObservationClassifiesMalformedJSONAsCorruption(t *testing.T) {
+	head, main := strings.Repeat("b", 40), strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
+		[]byte(head + "\trefs/heads/chore/issue-361-remote-adapter\n" +
+			main + "\trefs/heads/main\n"),
+		[]byte(`[{"number":`),
+	}}
+	observer := productionStatusNonLocalObserver{
+		gateway: productionNonLocalGateway{runner: runner},
+	}
+	_, err := observer.ObserveNonLocal(
+		context.Background(),
+		issuedelivery.NonLocalObserveRequest{
+			Repository: packyRemoteRepository(),
+			Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+			Branch:     "chore/issue-361-remote-adapter",
+			BaseRef:    "main",
+			HeadSHA:    head,
+		},
+	)
+	class, transient, ok := issuedelivery.StatusErrorDetails(err)
+	if !ok || class != issuedelivery.StatusErrorCorruption || transient {
 		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
 	}
 }

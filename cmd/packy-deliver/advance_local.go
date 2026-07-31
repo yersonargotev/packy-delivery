@@ -31,6 +31,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe Git common directory: %w", err),
 		)
 	}
@@ -38,6 +39,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe Git worktree: %w", err),
 		)
 	}
@@ -45,6 +47,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe Git origin: %w", err),
 		)
 	}
@@ -60,6 +63,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe origin/main: %w", err),
 		)
 	}
@@ -67,6 +71,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe HEAD: %w", err),
 		)
 	}
@@ -74,6 +79,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe HEAD tree: %w", err),
 		)
 	}
@@ -81,6 +87,7 @@ func (o productionGitObserver) ObserveGit(ctx context.Context, repository string
 	if err != nil {
 		return issuedelivery.GitObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
 			fmt.Errorf("observe workspace status: %w", err),
 		)
 	}

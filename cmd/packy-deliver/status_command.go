@@ -39,6 +39,15 @@ func (observer productionStatusNonLocalObserver) ObserveNonLocal(
 		if errors.As(err, &commandError) {
 			return issuedelivery.NonLocalObservation{}, classifyStatusCommandError(
 				issuedelivery.StatusErrorExternalRead,
+				issuedelivery.StatusErrorIdentity,
+				err,
+			)
+		}
+		var decodeError *remoteDecodeError
+		if errors.As(err, &decodeError) {
+			return issuedelivery.NonLocalObservation{}, issuedelivery.NewStatusError(
+				issuedelivery.StatusErrorCorruption,
+				false,
 				err,
 			)
 		}
@@ -51,27 +60,22 @@ func (observer productionStatusNonLocalObserver) ObserveNonLocal(
 	return observation, nil
 }
 
-func classifyStatusCommandError(class issuedelivery.StatusErrorClass, err error) error {
+func classifyStatusCommandError(
+	transientClass issuedelivery.StatusErrorClass,
+	rejectedClass issuedelivery.StatusErrorClass,
+	err error,
+) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	if _, _, typed := issuedelivery.StatusErrorDetails(err); typed {
 		return err
 	}
-	message := strings.ToLower(err.Error())
-	for _, marker := range []string{
-		"authentication", "unauthorized", "forbidden", "http 401", "http 403",
-		"not authorized", "permission denied",
-	} {
-		if strings.Contains(message, marker) {
-			return issuedelivery.NewStatusError(
-				issuedelivery.StatusErrorAuthority,
-				false,
-				err,
-			)
-		}
+	var rejected *commandRejectedError
+	if errors.As(err, &rejected) {
+		return issuedelivery.NewStatusError(rejectedClass, false, err)
 	}
-	return issuedelivery.NewStatusError(class, true, err)
+	return issuedelivery.NewStatusError(transientClass, true, err)
 }
 
 func (c command) status(ctx context.Context, args []string, stdout io.Writer) error {

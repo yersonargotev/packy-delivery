@@ -29,9 +29,21 @@ type Runner interface {
 }
 type execRunner struct{}
 
+type commandRejectedError struct {
+	err error
+}
+
+func (e *commandRejectedError) Error() string { return e.err.Error() }
+func (e *commandRejectedError) Unwrap() error { return e.err }
+
 func (execRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, name, args...)
-	return c.Output()
+	output, err := c.Output()
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		return output, &commandRejectedError{err: err}
+	}
+	return output, err
 }
 
 type ValidationRunner interface {

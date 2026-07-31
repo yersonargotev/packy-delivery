@@ -322,6 +322,7 @@ func (o productionTrackerObserver) ObserveIssue(
 	if err != nil {
 		return issuedelivery.TrackerObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitHubRead,
+			issuedelivery.StatusErrorAuthority,
 			fmt.Errorf("observe GitHub repository: %w", err),
 		)
 	}
@@ -347,6 +348,7 @@ func (o productionTrackerObserver) ObserveIssue(
 	if err != nil {
 		return issuedelivery.TrackerObservation{}, classifyStatusCommandError(
 			issuedelivery.StatusErrorGitHubRead,
+			issuedelivery.StatusErrorAuthority,
 			fmt.Errorf("observe GitHub issue: %w", err),
 		)
 	}
@@ -408,6 +410,7 @@ func (o productionTrackerObserver) ObserveIssue(
 		if observeErr != nil {
 			return issuedelivery.TrackerObservation{}, classifyStatusCommandError(
 				issuedelivery.StatusErrorGitHubRead,
+				issuedelivery.StatusErrorAuthority,
 				fmt.Errorf("observe GitHub specification: %w", observeErr),
 			)
 		}
