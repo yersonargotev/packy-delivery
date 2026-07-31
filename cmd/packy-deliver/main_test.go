@@ -336,7 +336,7 @@ func TestInitializeV2AuthorityAndRiskProfiles(t *testing.T) {
 	}
 }
 
-func TestLegacyCommandsRejectV2WhileStatusRemainsAvailable(t *testing.T) {
+func TestLegacyCommandsRejectV2WhileBundleStatusRemainsExplicitlyAvailable(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "v2.json")
 	bundle := reviewBundleFixture(strings.Repeat("a", 40))
@@ -350,8 +350,8 @@ func TestLegacyCommandsRejectV2WhileStatusRemainsAvailable(t *testing.T) {
 	}
 
 	var status bytes.Buffer
-	if err := (command{}).run(context.Background(), []string{"status", "--bundle", path}, &status); err != nil {
-		t.Fatalf("v2 status rejected: %v", err)
+	if err := (command{}).run(context.Background(), []string{"legacy-v1", "status", "--bundle", path}, &status); err != nil {
+		t.Fatalf("explicit bundle status rejected: %v", err)
 	}
 	if !strings.Contains(status.String(), "Self-contained issue") {
 		t.Fatalf("v2 status omitted authority: %s", status.String())
@@ -364,6 +364,29 @@ func TestLegacyCommandsRejectV2WhileStatusRemainsAvailable(t *testing.T) {
 	err := (command{}).run(context.Background(), []string{"record-review", "--bundle", path, "--receipt", record}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "requires Advance") {
 		t.Fatalf("legacy command admitted v2: %v", err)
+	}
+}
+
+func TestLegacyV1StatusPreservesCanonicalBundleRendering(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.json")
+	bundle := reviewBundleFixture(strings.Repeat("a", 40))
+	if err := deliveryevidence.StoreAtomic(path, bundle); err != nil {
+		t.Fatal(err)
+	}
+	want, err := deliveryevidence.RenderStatus(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := (command{}).run(
+		context.Background(),
+		[]string{"legacy-v1", "status", "--bundle", path},
+		&output,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != want {
+		t.Fatalf("legacy status changed:\n got %q\nwant %q", output.String(), want)
 	}
 }
 
