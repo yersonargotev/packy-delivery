@@ -78,7 +78,9 @@ packy-deliver advance \
   --repository /absolute/path/to/packy \
   --issue N \
   [--spec S] \
-  --risk-profile low-risk|standard|high-risk
+  --risk-profile low-risk|standard|high-risk \
+  [--full-report] \
+  [--output json|text]
 ```
 
 Use `--spec S` only when qualification selects a distinct governing
@@ -103,6 +105,15 @@ complete-delivery request authorizes the deterministic remote effects. The CLI
 observes and binds repository, authority, candidate, branch, PR, CI, merge, and
 cleanup identities itself; callers never provide those receipts or select an
 internal phase.
+
+The default JSON response is a compact decision-ready projection containing
+the run state, reason, pause cause, next action, typed pending request, and only
+the candidate or furthest branch, pull-request, CI, merge, or blocker identity
+relevant to that pause. It omits evidence matrices, qualification and review
+history, review bodies, and timing history. `--output text` renders the same
+pause cause and next action for a human. `--full-report` explicitly selects the
+existing complete canonical JSON report for automation compatibility, judgment,
+or audit and cannot be combined with text output.
 
 Every normal `Advance` report includes a typed `pause_cause` and exact
 `next_action`. The pause cause is one of `semantic-input`,

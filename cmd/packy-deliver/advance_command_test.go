@@ -354,7 +354,8 @@ func TestAdvanceCommandHighestSeamCreatesV2RunThroughRealModule(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	if err = cmd.run(context.Background(), []string{
-		"advance", "--repository", resolvedRepository, "--issue", "361", "--risk-profile", "low-risk",
+		"advance", "--repository", resolvedRepository, "--issue", "361",
+		"--risk-profile", "low-risk", "--full-report",
 	}, &stdout); err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +552,8 @@ func runAdvanceCommandReport(
 ) advanceReport {
 	t.Helper()
 	args := []string{
-		"advance", "--repository", repository, "--issue", "361", "--risk-profile", "low-risk",
+		"advance", "--repository", repository, "--issue", "361",
+		"--risk-profile", "low-risk", "--full-report",
 	}
 	args = append(args, extra...)
 	var stdout bytes.Buffer

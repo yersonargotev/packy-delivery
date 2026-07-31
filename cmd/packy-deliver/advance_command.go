@@ -31,6 +31,8 @@ type advanceOptions struct {
 	QualificationCorrection *issuedelivery.QualificationCorrection
 	CIFailureAttributions   []advanceCIFailureAttribution
 	AuthorizeRemote         bool
+	FullReport              bool
+	Output                  string
 }
 
 type advanceFactory func(advanceOptions) (issueDeliveryAdvancer, error)
@@ -73,6 +75,45 @@ type advanceReport struct {
 	TimingReport             issuedelivery.TimingReport                    `json:"timing_report"`
 }
 
+type compactAdvanceReport struct {
+	RunID                   string                                        `json:"run_id"`
+	State                   issuedelivery.State                           `json:"state"`
+	Reason                  string                                        `json:"reason"`
+	PauseCause              issuedelivery.PauseCause                      `json:"pause_cause"`
+	NextAction              issuedelivery.NextAction                      `json:"next_action"`
+	BlockerKind             issuedelivery.BlockerKind                     `json:"blocker_kind,omitempty"`
+	SupersedesRunID         string                                        `json:"supersedes_run_id,omitempty"`
+	Decision                *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
+	Repair                  *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
+	QualificationCorrection *issuedelivery.QualificationCorrectionRequest `json:"qualification_correction,omitempty"`
+	Candidate               *compactCandidateIdentity                     `json:"candidate,omitempty"`
+	Branch                  *issuedelivery.RemoteBranchObservation        `json:"branch,omitempty"`
+	PullRequest             *compactPullRequestIdentity                   `json:"pull_request,omitempty"`
+	CI                      []compactCIIdentity                           `json:"ci,omitempty"`
+	Merge                   *issuedelivery.MergeProof                     `json:"merge,omitempty"`
+}
+
+type compactCandidateIdentity struct {
+	ID        string `json:"id"`
+	CommitSHA string `json:"commit_sha"`
+	TreeSHA   string `json:"tree_sha"`
+}
+
+type compactPullRequestIdentity struct {
+	Number  int    `json:"number"`
+	URL     string `json:"url"`
+	HeadSHA string `json:"head_sha"`
+}
+
+type compactCIIdentity struct {
+	Identity   string                     `json:"identity"`
+	RunID      int64                      `json:"run_id"`
+	Status     issuedelivery.CIStatusKind `json:"status"`
+	Conclusion string                     `json:"conclusion,omitempty"`
+	HeadSHA    string                     `json:"head_sha"`
+	DetailsURL string                     `json:"details_url"`
+}
+
 func (c command) advance(ctx context.Context, args []string, stdout io.Writer) error {
 	f := flag.NewFlagSet("deliveryevidence advance", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
@@ -87,6 +128,8 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	f.StringVar(&reviewPath, "review-content", "", "candidate and specialist review content")
 	f.StringVar(&ciAttributionPath, "ci-attribution", "", "typed attribution of exact failed CI runs")
 	f.BoolVar(&options.AuthorizeRemote, "authorize-non-local", false, "authorize deterministic delivery effects after exact local readiness")
+	f.BoolVar(&options.FullReport, "full-report", false, "emit the complete canonical JSON report")
+	f.StringVar(&options.Output, "output", "json", "compact report format: json or text")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -139,6 +182,12 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	if options.Decision != nil && options.Repair != nil {
 		return errors.New("one Advance call cannot submit both a qualification decision and repair adjudication")
 	}
+	if options.Output != "json" && options.Output != "text" {
+		return fmt.Errorf("output %q is invalid; use json or text", options.Output)
+	}
+	if options.FullReport && options.Output != "json" {
+		return errors.New("full report is canonical JSON and cannot use text output")
+	}
 	if c.AdvanceFactory == nil {
 		return errors.New("Advance adapter is unavailable")
 	}
@@ -167,8 +216,17 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 			return err
 		}
 	}
-	report, err := reportFromOutcome(outcome, c.now())
+	var report any
+	if options.FullReport {
+		report, err = reportFromOutcome(outcome, c.now())
+	} else {
+		report = compactReportFromOutcome(outcome)
+	}
 	if err != nil {
+		return err
+	}
+	if options.Output == "text" {
+		_, err = io.WriteString(stdout, renderCompactAdvanceReport(report.(compactAdvanceReport)))
 		return err
 	}
 	raw, err := json.MarshalIndent(report, "", "  ")
@@ -178,6 +236,86 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	raw = append(raw, '\n')
 	_, err = stdout.Write(raw)
 	return err
+}
+
+func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceReport {
+	report := compactAdvanceReport{
+		RunID: outcome.RunID, State: outcome.State, Reason: outcome.Reason,
+		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
+		BlockerKind: outcome.BlockerKind, SupersedesRunID: outcome.SupersedesRunID,
+		Decision: outcome.Decision, Repair: outcome.Repair,
+		QualificationCorrection: outcome.QualificationCorrection,
+	}
+	if outcome.Candidate != nil {
+		report.Candidate = &compactCandidateIdentity{
+			ID: outcome.Candidate.ID, CommitSHA: outcome.Candidate.CommitSHA,
+			TreeSHA: outcome.Candidate.TreeSHA,
+		}
+	}
+	if outcome.LocalReadiness != nil {
+		report.Branch = &issuedelivery.RemoteBranchObservation{
+			Name: outcome.LocalReadiness.Branch, HeadSHA: outcome.LocalReadiness.CommitSHA,
+		}
+	}
+	if remote := outcome.NonLocal; remote != nil {
+		switch {
+		case remote.Merge != nil:
+			report.Merge = remote.Merge
+		case len(remote.Checks) > 0:
+			if remote.PullRequest != nil {
+				report.PullRequest = &compactPullRequestIdentity{
+					Number: remote.PullRequest.Number, URL: remote.PullRequest.URL,
+					HeadSHA: remote.PullRequest.HeadSHA,
+				}
+			}
+			for _, check := range remote.Checks {
+				report.CI = append(report.CI, compactCIIdentity{
+					Identity: check.Identity, RunID: check.RunID, Status: check.StatusKind,
+					Conclusion: check.Conclusion, HeadSHA: check.HeadSHA, DetailsURL: check.DetailsURL,
+				})
+			}
+		case remote.PullRequest != nil:
+			report.PullRequest = &compactPullRequestIdentity{
+				Number: remote.PullRequest.Number, URL: remote.PullRequest.URL,
+				HeadSHA: remote.PullRequest.HeadSHA,
+			}
+		default:
+			report.Branch = remote.Branch
+		}
+	}
+	return report
+}
+
+func renderCompactAdvanceReport(report compactAdvanceReport) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "run: %s\nstate: %s\npause cause: %s\nnext action: %s\n",
+		report.RunID, report.State, report.PauseCause, report.NextAction)
+	if report.Reason != "" {
+		fmt.Fprintf(&out, "reason: %s\n", report.Reason)
+	}
+	if report.BlockerKind != "" {
+		fmt.Fprintf(&out, "blocker: %s\n", report.BlockerKind)
+	}
+	if report.Candidate != nil {
+		fmt.Fprintf(&out, "candidate: %s commit=%s tree=%s\n",
+			report.Candidate.ID, report.Candidate.CommitSHA, report.Candidate.TreeSHA)
+	}
+	if report.Branch != nil {
+		fmt.Fprintf(&out, "branch: %s head=%s\n", report.Branch.Name, report.Branch.HeadSHA)
+	}
+	if report.PullRequest != nil {
+		fmt.Fprintf(&out, "pull request: #%d %s head=%s\n",
+			report.PullRequest.Number, report.PullRequest.URL, report.PullRequest.HeadSHA)
+	}
+	for _, check := range report.CI {
+		fmt.Fprintf(&out, "ci: %s run=%d status=%s conclusion=%s head=%s %s\n",
+			check.Identity, check.RunID, check.Status, check.Conclusion, check.HeadSHA, check.DetailsURL)
+	}
+	if report.Merge != nil {
+		fmt.Fprintf(&out, "merge: pr=#%d commit=%s %s\n",
+			report.Merge.PullRequest, report.Merge.MergeCommitSHA, report.Merge.URL)
+	}
+	return out.String()
 }
 
 func nonLocalAuthorization(outcome issuedelivery.Outcome) *issuedelivery.NonLocalAuthorization {

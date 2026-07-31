@@ -25,6 +25,13 @@ review results, and adjudications only when the returned state requires them.
 Otherwise let `Advance` reacquire facts, perform deterministic work, persist
 evidence, and recover idempotently.
 
+Use the default compact JSON report during normal advancement. Request
+`--full-report` only when the current decision requires complete evidence or
+when performing an explicit audit; do not carry full qualification, review, or
+timing histories through routine repeated calls. Use `--output text` only for a
+human status display—the JSON and text forms carry the same pause cause and next
+action.
+
 When `Advance` returns `provide-qualification-correction`, submit one complete
 correction that echoes the returned request ID, authority hash, reviewed matrix
 hash, and full finding-ID set. Preserve every criterion identity and authority
