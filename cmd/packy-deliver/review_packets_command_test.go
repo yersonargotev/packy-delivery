@@ -246,6 +246,56 @@ func TestAdvanceReviewContentDirectoryRejectsMismatchedAndSymlinkedResponses(t *
 	}
 }
 
+func TestAdvanceReviewContentDirectoryRejectsNonRegularManifest(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		replace func(*testing.T, string, []byte)
+	}{
+		{
+			name: "symlink",
+			replace: func(t *testing.T, path string, original []byte) {
+				t.Helper()
+				target := filepath.Join(t.TempDir(), "manifest.json")
+				if err := os.WriteFile(target, original, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			replace: func(t *testing.T, path string, _ []byte) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output := filepath.Join(t.TempDir(), "packets")
+			if err := writeReviewPacketDirectory(output, testReviewPacketSet()); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := filepath.Join(output, "manifest.json")
+			original, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.Remove(manifestPath); err != nil {
+				t.Fatal(err)
+			}
+			test.replace(t, manifestPath, original)
+			if _, err = loadAdvanceReviewContents(output); err == nil ||
+				!strings.Contains(err.Error(), "manifest is not a regular file") {
+				t.Fatalf("non-regular manifest accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestAdvanceReviewContentDirectoryRejectsMalformedManifest(t *testing.T) {
 	for _, test := range []struct {
 		name   string

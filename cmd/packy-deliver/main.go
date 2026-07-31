@@ -363,7 +363,7 @@ Options:
   --repository PATH          Absolute repository containing the delivery run (required)
   --issue NUMBER             Packy issue number (required)
   --kind KIND                qualification, candidate, or specialist (required)
-  --axis AXIS                Optional candidate-review axis: Standards or Spec
+  --axis AXIS                Optional candidate-review axis: standards or spec
   --boundary BOUNDARY        Optional sensitive boundary for specialist review
   --output DIRECTORY         New packet directory to create (required)
 

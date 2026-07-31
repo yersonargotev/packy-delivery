@@ -255,7 +255,15 @@ func loadAdvanceReviewContents(path string) ([]advanceReviewContent, error) {
 }
 
 func loadReviewPacketDirectory(path string) ([]advanceReviewContent, error) {
-	raw, err := os.ReadFile(filepath.Join(path, "manifest.json"))
+	manifestPath := filepath.Join(path, "manifest.json")
+	manifestInfo, err := os.Lstat(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect review packet manifest: %w", err)
+	}
+	if manifestInfo.Mode().Type() != 0 {
+		return nil, errors.New("review packet manifest is not a regular file")
+	}
+	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return nil, fmt.Errorf("read review packet manifest: %w", err)
 	}
