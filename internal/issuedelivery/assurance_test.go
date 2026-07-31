@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yersonargotev/packy-delivery/internal/deliveryevidence"
 )
@@ -477,10 +478,9 @@ func TestLegacyReviewBatchMigrationUsesContiguousReviewTimingClosures(t *testing
 			{
 				ID: "candidate-2", CommitSHA: sha("b"), TreeSHA: sha("c"),
 				RequiredReviews: []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards},
-				ReviewIteration: 2,
+				ReviewIteration: 1,
 				Reviews: []CandidateReview{
 					review("candidate-2", 1, deliveryevidence.ReviewStandards),
-					review("candidate-2", 2, deliveryevidence.ReviewStandards),
 				},
 			},
 		},
@@ -501,9 +501,8 @@ func TestLegacyReviewBatchMigrationUsesContiguousReviewTimingClosures(t *testing
 		got.CompletedAt != record.Timing[1].CompletedAt {
 		t.Fatalf("first candidate migrated review closure=%#v", got)
 	}
-	if batches := record.Candidates[1].ReviewBatches; len(batches) != 2 ||
-		batches[0].TimingSequence != 4 || batches[0].CompletedAt != record.Timing[3].CompletedAt ||
-		batches[1].TimingSequence != 7 || batches[1].CompletedAt != record.Timing[6].CompletedAt {
+	if batches := record.Candidates[1].ReviewBatches; len(batches) != 1 ||
+		batches[0].TimingSequence != 4 || batches[0].CompletedAt != record.Timing[3].CompletedAt {
 		t.Fatalf("second candidate migrated review closures=%#v", batches)
 	}
 	rebound := record
@@ -532,9 +531,6 @@ func TestProfileEscalationDoesNotReceiptAbandonedPartialReviewIteration(t *testi
 			Repository: deliveryevidence.RepositoryIdentity{
 				Owner: "yersonargotev", Name: "packy", NodeID: "R1",
 			},
-			AssurancePhases: []deliveryevidence.AssurancePhaseReceipt{{
-				Sequence: 1, Phase: "qualification",
-			}},
 		},
 		Candidates: []Candidate{{
 			ID: "candidate", CommitSHA: sha("b"), TreeSHA: sha("c"),
@@ -559,13 +555,6 @@ func TestProfileEscalationDoesNotReceiptAbandonedPartialReviewIteration(t *testi
 					Findings: []deliveryevidence.ReviewFinding{},
 				},
 			},
-			ReviewBatches: []CandidateReviewBatch{{
-				Iteration: 2,
-				RequiredAxes: []deliveryevidence.ReviewAxis{
-					deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
-				},
-				TimingSequence: 2, CompletedAt: "2026-07-30T01:00:03.000000000Z",
-			}},
 		}},
 		Timing: []Timing{
 			{
@@ -906,6 +895,13 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 		len(preAssurance.Timing) != preAssuranceTimingCount ||
 		len(preAssurance.Evidence.ExhaustiveAssurance) != 1 {
 		t.Fatalf("receipt-less ready v2 bootstrap was not resumably idempotent: %v %#v", err, preAssurance)
+	}
+	if err := validateRun(preAssurance); err != nil {
+		t.Fatalf("migrated receipt-less ready v2 run is invalid: %v", err)
+	}
+	reportNow := time.Date(2026, 7, 30, 2, 0, 0, 0, time.UTC)
+	if _, err := BuildTimingReport(preAssurance.Timing, reportNow); err != nil {
+		t.Fatalf("migrated receipt-less ready v2 timing report is invalid: %v", err)
 	}
 	historicalRequirements, err := decodeRun(persistedAssuranceRun(t, module, git))
 	if err != nil {

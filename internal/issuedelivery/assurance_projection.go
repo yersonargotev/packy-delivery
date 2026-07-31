@@ -54,13 +54,8 @@ func projectAutomaticAssurance(record *runRecord) error {
 			requiredAxes := candidate.RequiredReviews
 			if batch != nil {
 				requiredAxes = batch.RequiredAxes
-			} else if iteration < currentReviewIteration(candidate) && !preAssuranceMigration {
+			} else if iteration < currentReviewIteration(candidate) {
 				return fmt.Errorf("historical review iteration lacks authoritative review batch")
-			} else if preAssuranceMigration && iteration < currentReviewIteration(candidate) {
-				requiredAxes = make([]deliveryevidence.ReviewAxis, 0, len(reviews))
-				for _, review := range reviews {
-					requiredAxes = append(requiredAxes, review.Axis)
-				}
 			}
 			completed := make(map[deliveryevidence.ReviewAxis]bool, len(reviews))
 			for _, review := range reviews {
@@ -308,22 +303,28 @@ func migrateReceiptlessExhaustiveTimings(record *runRecord) error {
 		return pending[i].completedAt < pending[j].completedAt
 	})
 	for _, item := range pending {
-		insertAt := len(record.Timing)
+		insertAt := -1
+		var containingStarted time.Time
+		proofCompleted, _ := time.Parse(time.RFC3339Nano, item.completedAt)
 		for index, timing := range record.Timing {
+			if timing.Phase == exhaustiveValidationSucceededPhase {
+				continue
+			}
+			started, startErr := time.Parse(time.RFC3339Nano, timing.StartedAt)
 			completed, err := time.Parse(time.RFC3339Nano, timing.CompletedAt)
-			proofCompleted, _ := time.Parse(time.RFC3339Nano, item.completedAt)
-			if err != nil {
+			if startErr != nil || err != nil {
 				return fmt.Errorf("receipt-less lifecycle timing is invalid")
 			}
-			if completed.After(proofCompleted) {
+			if !proofCompleted.Before(started) && !proofCompleted.After(completed) {
 				insertAt = index
+				containingStarted = started
 				break
 			}
 		}
-		state := State("")
-		if insertAt > 0 {
-			state = record.Timing[insertAt-1].To
+		if insertAt < 0 {
+			return fmt.Errorf("receipt-less exhaustive proof completion lacks containing lifecycle interval")
 		}
+		containing := record.Timing[insertAt]
 		record.Timing = append(record.Timing, Timing{})
 		copy(record.Timing[insertAt+1:], record.Timing[insertAt:])
 		insertedSequence := insertAt + 1
@@ -344,9 +345,10 @@ func migrateReceiptlessExhaustiveTimings(record *runRecord) error {
 			}
 		}
 		record.Timing[insertAt] = Timing{
-			Phase: exhaustiveValidationSucceededPhase, From: state, To: state,
-			StartedAt: item.completedAt, CompletedAt: item.completedAt,
+			Phase: exhaustiveValidationSucceededPhase, From: containing.From, To: containing.From,
+			StartedAt: containingStarted.UTC().Format(time.RFC3339Nano), CompletedAt: item.completedAt,
 		}
+		record.Timing[insertAt+1].StartedAt = proofCompleted.UTC().Format(timeFormat)
 		for index := range record.Timing {
 			record.Timing[index].Sequence = index + 1
 		}
