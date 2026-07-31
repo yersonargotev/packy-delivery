@@ -28,7 +28,7 @@ func TestHelpCommandsAsProcess(t *testing.T) {
 			}
 			for _, command := range []string{
 				"advance", "input-template", "review-packets", "status", "watch",
-				"version", "legacy-v1",
+				"workspace", "version", "legacy-v1",
 			} {
 				if !strings.Contains(stdout, command) {
 					t.Errorf("stdout does not list %q:\n%s", command, stdout)
@@ -41,6 +41,36 @@ func TestHelpCommandsAsProcess(t *testing.T) {
 			} {
 				if !strings.Contains(stdout, guidance) {
 					t.Errorf("stdout does not contain operator guidance %q:\n%s", guidance, stdout)
+				}
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q", stderr)
+			}
+		})
+	}
+}
+
+func TestWorkspaceHelpCommandsAsProcess(t *testing.T) {
+	binary := buildPackyDeliverForHelpTest(t)
+
+	for _, args := range [][]string{
+		{"workspace", "--help"},
+		{"workspace", "-h"},
+		{"workspace", "prepare", "--help"},
+		{"workspace", "prepare", "--issue", "43", "--help"},
+		{"help", "workspace"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			stdout, stderr, exitCode := runPackyDeliverForHelpTest(t, binary, args...)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
+			}
+			for _, value := range []string{
+				"workspace prepare", "--source", "--issue", "--branch-kind", "--destination",
+				"no GitHub mutation", "no non-local delivery authorization",
+			} {
+				if !strings.Contains(stdout, value) {
+					t.Errorf("stdout does not contain %q:\n%s", value, stdout)
 				}
 			}
 			if stderr != "" {

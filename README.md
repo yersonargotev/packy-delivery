@@ -37,6 +37,25 @@ packy-deliver version
 
 ## Use
 
+When the current Packy checkout must remain untouched, prepare a clean local
+integration workspace first:
+
+```sh
+packy-deliver workspace prepare \
+  --source /absolute/path/to/packy \
+  --issue N \
+  --branch-kind chore|feat|fix \
+  --destination /absolute/path/to/new-workspace
+```
+
+The source must be the attached `yersonargotev/packy` repository and have a
+local `origin/main`. The destination must not exist and must be outside every
+source worktree. Preparation copies the exact local `origin/main` into an
+independent repository, checks out `KIND/issue-N-workspace`, and records local
+preparation identity without changing or adopting any source worktree. It uses
+only local Git data: it performs no GitHub mutation and grants no non-local
+delivery authorization.
+
 Start or resume delivery of one Packy issue:
 
 ```sh

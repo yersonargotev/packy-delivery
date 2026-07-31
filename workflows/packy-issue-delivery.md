@@ -202,6 +202,34 @@ exceptions, profile decisions not settled mechanically, and review or
 adjudication content. It does not assemble phase receipts or caller-authored JSON
 for observable facts.
 
+### Workspace preparation
+
+An operator may create a clean integration repository before starting or
+resuming delivery:
+
+```sh
+packy-deliver workspace prepare \
+  --source /absolute/path/to/packy \
+  --issue N \
+  --branch-kind chore|feat|fix \
+  --destination /absolute/path/to/new-workspace
+```
+
+Preparation is a Packy-specific local helper, not a Delivery Run transition.
+It requires an attached Packy source repository and uses its exact local
+`origin/main`; it performs no network fetch, GitHub mutation, or non-local
+authorization. The destination must be new, absolute, and outside the source
+repository, Git common directory, and every registered source worktree.
+
+The helper creates an independent Git repository with its own common directory,
+canonical Packy origin, local `main`, and attached
+`KIND/issue-N-workspace` branch. Local `packy.delivery-*` configuration records
+the preparation source, issue, and branch. That identity describes only the new
+integration repository: it never marks an existing worktree as owned, and the
+run/candidate ownership checks used for temporary-worktree cleanup remain
+unchanged. Any validation or later non-local effect is still governed by fresh
+`Advance` observations and explicit authorization.
+
 ### Operator journey
 
 Operate a schema-v2 run through repository and issue identity, never through a
