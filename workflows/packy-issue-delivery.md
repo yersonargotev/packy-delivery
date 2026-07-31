@@ -180,6 +180,16 @@ On every invocation, `Advance`:
 4. performs all currently safe deterministic work; and
 5. persists the resulting state and automatic phase timing before returning.
 
+Each invocation also has a distinct, non-semantic operation identity. While an
+invocation owns the issue lock, a separate operational sidecar beneath the
+issue's Git-common-directory state exposes only its operation kind, monotonic
+phase, start time, terminal state, and the current persisted validation-session
+identity when applicable. `status` and `watch` include that same bounded object
+during lock contention. It is never embedded in canonical Delivery Run JSON,
+never carries validator logs or semantic evidence, and does not alter replay or
+retry semantics. Completion, failure, and cancellation terminally resolve the
+sidecar before the issue lock is released.
+
 The CLI converges consecutive `deterministic-advance` results in the same
 invocation. Each iteration calls the public `Advance` operation again, so it
 reloads the persisted run and reobserves repository and GitHub facts through the

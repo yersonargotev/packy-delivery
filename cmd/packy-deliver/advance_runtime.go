@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -62,7 +61,7 @@ type productionValidationSessionExecutor struct {
 func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error) {
 	runner := execRunner{}
 	sandboxRoot, err := productionSandboxRoot(
-		context.Background(), runner, options.RepositoryPath, options.IssueNumber, options.SandboxRoot,
+		options.Context, runner, options.RepositoryPath, options.IssueNumber, options.SandboxRoot,
 	)
 	if err != nil {
 		return nil, err
@@ -608,7 +607,7 @@ func (execFocusedValidationRunner) Run(
 	repository string,
 	sandbox deliveryevidence.SandboxFacts,
 ) error {
-	command := exec.CommandContext(ctx, "go", "-C", repository, "test", "./...")
+	command := ownedCommandContext(ctx, "go", "-C", repository, "test", "./...")
 	command.Env = replacedEnvironment(os.Environ(), map[string]string{
 		"HOME": sandbox.HomeRoot, "XDG_CONFIG_HOME": sandbox.ConfigHomeRoot,
 		"PACKY_VALIDATION_HOME":        sandbox.HomeRoot,

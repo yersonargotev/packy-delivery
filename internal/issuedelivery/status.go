@@ -149,9 +149,14 @@ func (m *Module) Status(ctx context.Context, request StatusRequest) (Outcome, er
 		return nil
 	})
 	if errors.Is(err, errIssueRunActive) {
+		operation, operationErr := m.store.loadOperation(git.CommonDir, request.IssueNumber)
+		if operationErr != nil {
+			return Outcome{}, NewStatusError(StatusErrorRunState, false, operationErr)
+		}
 		return outcomeWithPause(Outcome{
 			State: StateWaiting, Reason: "another Advance call is active for this issue",
 			IssueLockContended: true,
+			Operation:          operation,
 			StatusObservation: &StatusObservation{
 				Persisted: StatusRelevantIdentity{Kind: StatusIdentityLock, Value: "contended"},
 				Current:   StatusRelevantIdentity{Kind: StatusIdentityLock, Value: "contended"},

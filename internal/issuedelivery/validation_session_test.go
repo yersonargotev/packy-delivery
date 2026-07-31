@@ -288,6 +288,32 @@ func TestFailedValidationSessionPersistsFailureWithoutAssuranceArtifacts(t *test
 	}
 }
 
+func TestCancelledValidationSessionCannotPersistSuccessfulReceipt(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	session := &fakeValidationSessionExecutor{}
+	session.executeHook = func(ValidationSession) { cancel() }
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+
+	var advanceErr error
+	for step := 0; step < 10; step++ {
+		_, advanceErr = module.Advance(ctx, request)
+		if advanceErr != nil {
+			break
+		}
+	}
+	if !errors.Is(advanceErr, context.Canceled) {
+		t.Fatalf("cancelled validation error=%v", advanceErr)
+	}
+	_, record := readActiveValidationSessionRecord(t, git.value.CommonDir, 357)
+	latest := latestValidationSession(record.ValidationSessions)
+	if latest == nil || latest.State != ValidationSessionFailed || latest.Result != nil ||
+		latest.ResultSHA256 != "" || latest.CompletionSHA256 != "" {
+		t.Fatalf("cancelled validation persisted success: %#v", latest)
+	}
+}
+
 func TestRestartInvalidatesAmbiguousStartedSessionBeforeFreshExecution(t *testing.T) {
 	module, git, _, _, _ := assuranceFixture(t)
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
