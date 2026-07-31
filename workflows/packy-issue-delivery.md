@@ -1,6 +1,7 @@
 # Packy Issue Delivery
 
 Status: Active
+Release: v0.2.1
 
 ## Goal
 
@@ -134,6 +135,14 @@ Blocked reports are classified inside `Advance` from the persisted transition
 and expose a specific reconciliation action. Callers never classify free-form
 reason text. Unknown blocked transitions fail closed with
 `inspect-blocked-transition`.
+
+An approved schema-v2 run with no candidate and `HEAD` still equal to its
+starting base pauses in `waiting` with phase `candidate-development`, reason
+`qualification is approved; awaiting candidate development`, pause cause
+`external-result`, and next action `observe-external-result`. This is the
+caller's development handoff: implement the approved issue locally, then invoke
+`Advance` again. The pause creates no candidate or risk observation, persists
+once, and preserves the run identity and qualified evidence.
 
 On every invocation, `Advance`:
 

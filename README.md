@@ -21,10 +21,12 @@ brew install yersonargotev/tap/packy-delivery
 ```
 
 Homebrew installs `packy-deliver`; later releases are available through
-`brew upgrade packy-delivery`. Alternatively, install directly from Go:
+`brew upgrade packy-delivery`. Direct source builds and `go install` builds
+report version `dev`; use them for development only, not with a release-pinned
+`deliver-packy-issue` skill. To build one explicitly:
 
 ```sh
-go install github.com/yersonargotev/packy-delivery/cmd/packy-deliver@latest
+go build ./cmd/packy-deliver
 ```
 
 Confirm the installed release with:

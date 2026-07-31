@@ -5,19 +5,36 @@ description: Deliver a named Packy GitHub issue end to end through a local imple
 
 # Deliver Packy Issue
 
+Compatible release: v0.2.1
+
 Read the complete [workflow contract](../../../workflows/packy-issue-delivery.md)
 and [repository instructions](../../../AGENTS.md) before mutating project or
 tracker state. The contract owns delivery behavior; keep this skill as its thin
 orchestrator.
 
-Before creating or resuming a run, check `command -v packy-deliver`. If the
-executable is unavailable, stop and tell the user to install it with:
+Before creating or resuming a run, enforce the release preflight:
+
+1. Check `command -v packy-deliver`. If the executable is unavailable, stop and
+   tell the user to install it with:
 
 ```sh
 brew install yersonargotev/tap/packy-delivery
 ```
 
-Never install it silently.
+2. Derive the expected CLI version by removing the leading `v` from the
+   `Compatible release` declared above. Run `packy-deliver version` and require
+   that exact value.
+3. If the installed version differs, stop before invoking `advance` and report
+   both expected and observed versions. For a Homebrew installation, tell the
+   user to run:
+
+```sh
+brew update
+brew upgrade packy-delivery
+```
+
+Never install or upgrade it silently. Never combine a mismatched executable,
+contract, and skill against an existing Delivery Run.
 
 Create or resume the issue's `Delivery Run`, then invoke the contract's
 `packy-deliver advance` repeatedly. Supply genuine decisions,
@@ -59,6 +76,16 @@ Use the exact returned canonical finding list. Rationale and assertion text
 must be bounded, marker-free statements; do not add, omit, reorder, or duplicate
 fields.
 
-Stop only when the run is completed, blocked, waiting for an external result,
-needs review, or needs one decision. For a schema v1 run, follow only the
-contract's explicit legacy-v1 behavior.
+When `Advance` returns `state: waiting`, reason
+`qualification is approved; awaiting candidate development`, pause cause
+`external-result`, next action `observe-external-result`, and no candidate,
+treat it as the local development handoff rather than a generic external wait.
+Implement the approved issue in the target checkout, run focused verification,
+and invoke the same `advance` command again. Do not create candidate, risk, or
+validation receipts yourself; `Advance` observes the changed Git HEAD and
+persists them.
+
+Except for the recognized candidate-development handoff above, stop only when
+the run is completed, blocked, waiting for an external result, needs review, or
+needs one decision. For a schema v1 run, follow only the contract's explicit
+legacy-v1 behavior.
