@@ -178,7 +178,7 @@ func main() {
 
 func (c command) run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("command is required: advance, input-template, review-packets, status, watch, version, or a legacy v1 command")
+		return errors.New("command is required: advance, input-template, review-packets, status, watch, workspace, version, or a legacy v1 command")
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -203,12 +203,15 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			case "review-packets":
 				_, err := io.WriteString(stdout, reviewPacketsUsage)
 				return err
+			case "workspace":
+				_, err := io.WriteString(stdout, workspaceUsage)
+				return err
 			case "legacy-v1":
 				_, err := io.WriteString(stdout, legacyV1Usage)
 				return err
 			}
 		}
-		return errors.New("help accepts only the optional commands advance, input-template, review-packets, status, watch, or legacy-v1")
+		return errors.New("help accepts only the optional commands advance, input-template, review-packets, status, watch, workspace, or legacy-v1")
 	case "advance":
 		if containsAdvanceHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
@@ -248,6 +251,8 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			return err
 		}
 		return c.reviewPackets(ctx, args[1:])
+	case "workspace":
+		return c.workspace(ctx, args[1:], stdout)
 	case "version":
 		if len(args) != 1 {
 			return errors.New("version does not accept arguments")
@@ -310,10 +315,12 @@ Commands:
   review-packets Export immutable packets for pending independent review
   status         Observe one schema-v2 delivery run
   watch          Wait for an actionable external or lock result
+  workspace      Prepare an isolated local integration workspace
   version        Print the build version
   legacy-v1      Run a historical v1 command
 
 Schema-v2 operator journey:
+  workspace prepare (optional, local-only)
   status -> input-template -> advance -> review-packets -> advance -> watch -> advance
 
 Use compact status and Advance output for ordinary operation. Generate exact
@@ -322,7 +329,7 @@ those files unchanged to Advance. Use watch only for external-result or
 lock-contention pauses. Advance alone adopts results and owns lifecycle
 sequencing. Request --full-report only for judgment or audit.
 
-Run "packy-deliver help <command>" for advance, input-template, review-packets, status, watch, or legacy-v1 options.
+Run "packy-deliver help <command>" for advance, input-template, review-packets, status, watch, workspace, or legacy-v1 options.
 `
 
 const statusUsage = `Usage: packy-deliver status [options]
