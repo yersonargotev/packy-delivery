@@ -15,6 +15,7 @@ import (
 )
 
 type QualificationReview struct {
+	PacketID               string                           `json:"packet_id,omitempty"`
 	AuthoritySHA256        string                           `json:"authority_sha256"`
 	AcceptanceMatrixSHA256 string                           `json:"acceptance_matrix_sha256"`
 	Findings               []deliveryevidence.ReviewFinding `json:"findings"`
@@ -173,6 +174,14 @@ func validateQualificationReview(record runRecord, review QualificationReview) e
 	}
 	if review.AcceptanceMatrixSHA256 != digest {
 		return errors.New("qualification review does not match the current acceptance matrix")
+	}
+	if review.PacketID != "" {
+		packets, packetErr := reviewPacketsFromRecord(
+			record, GitObservation{}, ReviewPacketRequest{Kind: ReviewPacketQualification},
+		)
+		if packetErr != nil || len(packets) != 1 || review.PacketID != packets[0].PacketID {
+			return errors.New("qualification review does not match its exact current packet")
+		}
 	}
 	links := make(map[string]string, len(record.Evidence.Scope.OwnedNow))
 	for _, entry := range record.Evidence.Scope.OwnedNow {

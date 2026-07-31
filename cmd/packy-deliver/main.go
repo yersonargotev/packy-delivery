@@ -116,6 +116,7 @@ type command struct {
 	StatusFactory        statusFactory
 	WatchFactory         watchFactory
 	InputTemplateFactory inputTemplateFactory
+	ReviewPacketFactory  reviewPacketFactory
 	LegacyPrefixRequired bool
 }
 
@@ -167,6 +168,7 @@ func main() {
 		Now: time.Now, AdvanceFactory: newProductionAdvancer, StatusFactory: newProductionStatuser,
 		WatchFactory:         newProductionWatcher,
 		InputTemplateFactory: newProductionInputTemplateMaterializer,
+		ReviewPacketFactory:  newProductionReviewPacketMaterializer,
 		LegacyPrefixRequired: true,
 	}).run(context.Background(), os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -176,7 +178,7 @@ func main() {
 
 func (c command) run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("command is required: advance, input-template, status, watch, version, or a legacy v1 command")
+		return errors.New("command is required: advance, input-template, review-packets, status, watch, version, or a legacy v1 command")
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -198,12 +200,15 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			case "input-template":
 				_, err := io.WriteString(stdout, inputTemplateUsage)
 				return err
+			case "review-packets":
+				_, err := io.WriteString(stdout, reviewPacketsUsage)
+				return err
 			case "legacy-v1":
 				_, err := io.WriteString(stdout, legacyV1Usage)
 				return err
 			}
 		}
-		return errors.New("help accepts only the optional commands advance, input-template, status, watch, or legacy-v1")
+		return errors.New("help accepts only the optional commands advance, input-template, review-packets, status, watch, or legacy-v1")
 	case "advance":
 		if containsAdvanceHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
@@ -237,6 +242,12 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			return err
 		}
 		return c.inputTemplate(ctx, args[1:])
+	case "review-packets":
+		if containsReviewPacketsHelpFlag(args[1:]) {
+			_, err := io.WriteString(stdout, reviewPacketsUsage)
+			return err
+		}
+		return c.reviewPackets(ctx, args[1:])
 	case "version":
 		if len(args) != 1 {
 			return errors.New("version does not accept arguments")
@@ -296,12 +307,13 @@ const rootUsage = `Usage: packy-deliver <command> [options]
 Commands:
   advance        Advance resumable issue delivery
   input-template Materialize a draft for the exact pending semantic input
+  review-packets Export immutable packets for pending independent review
   status         Observe one schema-v2 delivery run
   watch          Wait for an actionable external or lock result
   version        Print the build version
   legacy-v1      Run a historical v1 command
 
-Run "packy-deliver help <command>" for advance, input-template, status, watch, or legacy-v1 options.
+Run "packy-deliver help <command>" for advance, input-template, review-packets, status, watch, or legacy-v1 options.
 `
 
 const statusUsage = `Usage: packy-deliver status [options]
@@ -345,6 +357,22 @@ not accepted input until those placeholders are replaced, then the same file can
 passed unchanged to Advance through its matching semantic-input option.
 `
 
+const reviewPacketsUsage = `Usage: packy-deliver review-packets [options]
+
+Options:
+  --repository PATH          Absolute repository containing the delivery run (required)
+  --issue NUMBER             Packy issue number (required)
+  --kind KIND                qualification, candidate, or specialist (required)
+  --axis AXIS                Optional candidate-review axis: Standards or Spec
+  --boundary BOUNDARY        Optional sensitive boundary for specialist review
+  --output DIRECTORY         New packet directory to create (required)
+
+Review-packets observes the exact current review pause and exports deterministic,
+self-contained packet files plus separate response templates. It does not advance
+or rewrite delivery state. Fill response templates and submit either the directory
+or individual response files through repeated --review-content flags.
+`
+
 const legacyV1Usage = `Usage: packy-deliver legacy-v1 <historical-subcommand> [options]
 
 Historical schema-v1 commands include:
@@ -368,7 +396,7 @@ Options:
   --risk-profile PROFILE     low-risk, standard, or high-risk (default "standard")
   --decision PATH            PATH to a file containing exactly one Decision JSON value
   --repair PATH              PATH to a file containing exactly one RepairDecision JSON value
-  --review-content PATH      PATH to a file containing exactly one review-content JSON object
+  --review-content PATH      Review JSON file or packet directory; may be repeated
   --ci-attribution PATH      PATH to a file containing exactly one JSON array of CI failure attributions
   --authorize-non-local      Authorize delivery effects after local readiness
   --full-report              Emit the complete canonical JSON report

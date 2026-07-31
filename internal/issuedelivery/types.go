@@ -146,6 +146,8 @@ type Request struct {
 	Repair                  *RepairDecision
 	QualificationReview     *QualificationReview
 	QualificationCorrection *QualificationCorrection
+	CandidateReviews        []CandidateReview
+	SpecialistReviews       []SpecialistReview
 	NonLocal                *NonLocalAuthorization
 }
 
@@ -375,6 +377,7 @@ type ReviewRequest struct {
 }
 
 type CandidateReview struct {
+	PacketID    string                           `json:"packet_id,omitempty"`
 	CandidateID string                           `json:"candidate_id"`
 	Axis        deliveryevidence.ReviewAxis      `json:"axis"`
 	Iteration   int                              `json:"iteration,omitempty"`
@@ -413,6 +416,7 @@ type SpecialistFinding struct {
 }
 
 type SpecialistReview struct {
+	PacketID    string              `json:"packet_id,omitempty"`
 	CandidateID string              `json:"candidate_id"`
 	Boundary    SensitiveBoundary   `json:"boundary"`
 	Specialist  string              `json:"specialist"`

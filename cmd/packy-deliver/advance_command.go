@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -43,6 +44,20 @@ type advanceReviewContent struct {
 	Acceptance              []issuedelivery.AcceptanceProof        `json:"acceptance_proofs"`
 	QualificationReview     *issuedelivery.QualificationReview     `json:"qualification_review,omitempty"`
 	QualificationCorrection *issuedelivery.QualificationCorrection `json:"qualification_correction,omitempty"`
+}
+
+type repeatedPaths []string
+
+func (paths *repeatedPaths) String() string {
+	return strings.Join(*paths, ",")
+}
+
+func (paths *repeatedPaths) Set(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("path must not be empty")
+	}
+	*paths = append(*paths, path)
+	return nil
 }
 
 type advanceCIFailureAttribution = issuedelivery.CIFailureAttributionInput
@@ -118,14 +133,15 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	f := flag.NewFlagSet("deliveryevidence advance", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	var options advanceOptions
-	var profile, decisionPath, repairPath, reviewPath, ciAttributionPath string
+	var profile, decisionPath, repairPath, ciAttributionPath string
+	var reviewPaths repeatedPaths
 	f.StringVar(&options.RepositoryPath, "repository", ".", "repository to observe")
 	f.IntVar(&options.IssueNumber, "issue", 0, "approved Packy issue number")
 	f.IntVar(&options.SpecificationNumber, "spec", 0, "approved governing specification issue number")
 	f.StringVar(&profile, "risk-profile", string(deliveryevidence.RiskStandard), "declared low-risk, standard, or high-risk profile")
 	f.StringVar(&decisionPath, "decision", "", "PATH to a file containing exactly one Decision JSON value")
 	f.StringVar(&repairPath, "repair", "", "PATH to a file containing exactly one RepairDecision JSON value")
-	f.StringVar(&reviewPath, "review-content", "", "PATH to a file containing exactly one review-content JSON object")
+	f.Var(&reviewPaths, "review-content", "PATH to a review-content JSON object; repeat to submit multiple responses")
 	f.StringVar(&ciAttributionPath, "ci-attribution", "", "PATH to a file containing exactly one JSON array of CI failure attributions")
 	f.BoolVar(&options.AuthorizeRemote, "authorize-non-local", false, "authorize deterministic delivery effects after exact local readiness")
 	f.BoolVar(&options.FullReport, "full-report", false, "emit the complete canonical JSON report")
@@ -160,16 +176,16 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	if err := decodeOptionalExactJSON("--repair", repairPath, &options.Repair); err != nil {
 		return err
 	}
-	if reviewPath != "" {
-		var content advanceReviewContent
-		if err := decodeSemanticJSONFile("--review-content", reviewPath, &content); err != nil {
+	for _, reviewPath := range reviewPaths {
+		contents, err := loadAdvanceReviewContents(reviewPath)
+		if err != nil {
 			return err
 		}
-		options.Reviews = content.Reviews
-		options.Specialists = content.Specialists
-		options.Acceptance = content.Acceptance
-		options.QualificationReview = content.QualificationReview
-		options.QualificationCorrection = content.QualificationCorrection
+		for _, content := range contents {
+			if err := mergeAdvanceReviewContent(&options, content); err != nil {
+				return fmt.Errorf("--review-content %q: %w", reviewPath, err)
+			}
+		}
 	}
 	if ciAttributionPath != "" {
 		if err := decodeSemanticJSONFile("--ci-attribution", ciAttributionPath, &options.CIFailureAttributions); err != nil {
@@ -202,6 +218,8 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 		Repair:                  options.Repair,
 		QualificationReview:     options.QualificationReview,
 		QualificationCorrection: options.QualificationCorrection,
+		CandidateReviews:        packetBoundCandidateReviews(options.Reviews),
+		SpecialistReviews:       packetBoundSpecialistReviews(options.Specialists),
 	}
 	outcome, err := convergeAdvance(ctx, advancer, request, options.AuthorizeRemote)
 	if err != nil {
@@ -229,6 +247,96 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	return err
 }
 
+func packetBoundCandidateReviews(reviews []issuedelivery.CandidateReview) []issuedelivery.CandidateReview {
+	var packetBound []issuedelivery.CandidateReview
+	for _, review := range reviews {
+		if review.PacketID != "" {
+			packetBound = append(packetBound, review)
+		}
+	}
+	return packetBound
+}
+
+func packetBoundSpecialistReviews(reviews []issuedelivery.SpecialistReview) []issuedelivery.SpecialistReview {
+	var packetBound []issuedelivery.SpecialistReview
+	for _, review := range reviews {
+		if review.PacketID != "" {
+			packetBound = append(packetBound, review)
+		}
+	}
+	return packetBound
+}
+
+func mergeAdvanceReviewContent(options *advanceOptions, content advanceReviewContent) error {
+	for _, review := range content.Reviews {
+		key := review.CandidateID + "\x00" + string(review.Axis)
+		for _, existing := range options.Reviews {
+			if existing.CandidateID+"\x00"+string(existing.Axis) != key {
+				continue
+			}
+			if reflect.DeepEqual(existing, review) {
+				goto nextReview
+			}
+			return fmt.Errorf("conflicting candidate review for candidate %q axis %q", review.CandidateID, review.Axis)
+		}
+		options.Reviews = append(options.Reviews, review)
+	nextReview:
+	}
+	for _, specialist := range content.Specialists {
+		key := specialist.CandidateID + "\x00" + string(specialist.Boundary) + "\x00" + specialist.Specialist
+		for _, existing := range options.Specialists {
+			existingKey := existing.CandidateID + "\x00" + string(existing.Boundary) + "\x00" + existing.Specialist
+			if existingKey != key {
+				continue
+			}
+			if reflect.DeepEqual(existing, specialist) {
+				goto nextSpecialist
+			}
+			return fmt.Errorf(
+				"conflicting specialist review for candidate %q boundary %q specialist %q",
+				specialist.CandidateID, specialist.Boundary, specialist.Specialist,
+			)
+		}
+		options.Specialists = append(options.Specialists, specialist)
+	nextSpecialist:
+	}
+	for _, proof := range content.Acceptance {
+		for _, existing := range options.Acceptance {
+			if existing.Identity != proof.Identity {
+				continue
+			}
+			if reflect.DeepEqual(existing, proof) {
+				goto nextProof
+			}
+			return fmt.Errorf("conflicting acceptance proof for identity %q", proof.Identity)
+		}
+		options.Acceptance = append(options.Acceptance, proof)
+	nextProof:
+	}
+	if err := mergeSingleton(
+		"qualification review", &options.QualificationReview, content.QualificationReview,
+	); err != nil {
+		return err
+	}
+	return mergeSingleton(
+		"qualification correction", &options.QualificationCorrection, content.QualificationCorrection,
+	)
+}
+
+func mergeSingleton[T any](name string, target **T, supplied *T) error {
+	if supplied == nil {
+		return nil
+	}
+	if *target == nil {
+		*target = supplied
+		return nil
+	}
+	if reflect.DeepEqual(*target, supplied) {
+		return nil
+	}
+	return fmt.Errorf("conflicting %s responses", name)
+}
+
 func convergeAdvance(
 	ctx context.Context,
 	advancer issueDeliveryAdvancer,
@@ -247,6 +355,7 @@ func convergeAdvance(
 		last = outcome
 		request.Decision, request.Repair = nil, nil
 		request.QualificationReview, request.QualificationCorrection = nil, nil
+		request.CandidateReviews, request.SpecialistReviews = nil, nil
 		request.NonLocal = nil
 
 		if authorizationAvailable &&

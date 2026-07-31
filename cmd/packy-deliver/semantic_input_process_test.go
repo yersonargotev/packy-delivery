@@ -16,7 +16,7 @@ func TestAdvanceSemanticInputHelpNamesExactTypedJSONFilesAsProcess(t *testing.T)
 	for _, want := range []string{
 		"--decision PATH            PATH to a file containing exactly one Decision JSON value",
 		"--repair PATH              PATH to a file containing exactly one RepairDecision JSON value",
-		"--review-content PATH      PATH to a file containing exactly one review-content JSON object",
+		"--review-content PATH      Review JSON file or packet directory; may be repeated",
 		"--ci-attribution PATH      PATH to a file containing exactly one JSON array of CI failure attributions",
 	} {
 		if !strings.Contains(stdout, want) {
