@@ -9,7 +9,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,6 +26,7 @@ const (
 	advanceProcessHelperEnvironment = "PACKY_ADVANCE_PROCESS_HELPER"
 	advanceProcessRepositoryEnv     = "PACKY_ADVANCE_PROCESS_REPOSITORY"
 	advanceProcessSignalsEnv        = "PACKY_ADVANCE_PROCESS_SIGNALS"
+	advanceProcessContenderEnv      = "PACKY_ADVANCE_PROCESS_CONTENDER"
 )
 
 func TestAdvanceProcessLifecycle(t *testing.T) {
@@ -49,50 +49,76 @@ func TestAdvanceProcessLifecycle(t *testing.T) {
 		}
 		fixture.assertProcessAlive(process.command.Process.Pid)
 		fixture.assertValidatorAlive()
-		fixture.assertStatusContention()
+		operation := fixture.assertStatusContention()
+		fixture.assertConcurrentAdvanceHasDistinctOperation(operation)
+		fixture.assertSameStatusOperation(operation)
 
 		watch := fixture.startWatch()
-		watch.waitForContention()
+		watch.waitForContention(operation.ID)
 		fixture.releaseValidator()
 		watch.waitForAvailability()
 		process.wait()
+		watch.waitForOperationState("completed")
 		fixture.assertSignals("started", "released", "exited", "lock-released")
 		fixture.assertNoSignal("cancelled")
 		fixture.assertValidatorExited()
+		fixture.assertValidatorDescendantExited()
 	})
 
 	t.Run("actual Advance context cancellation", func(t *testing.T) {
 		fixture := newAdvanceProcessFixture(t, binary)
 		process := fixture.startAdvance()
 		process.waitForSignal(filepath.Join(fixture.signals, "started"))
-		fixture.assertStatusContention()
+		operation := fixture.assertStatusContention()
 
 		watch := fixture.startWatch()
-		watch.waitForContention()
-		if err := process.command.Process.Signal(syscall.SIGUSR1); err != nil {
+		watch.waitForContention(operation.ID)
+		if err := process.command.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatalf("cancel Advance context: %v", err)
 		}
 		watch.waitForAvailability()
 		process.wait()
+		watch.waitForOperationState("cancelled")
 		fixture.assertSignals("started", "cancelled", "exited", "lock-released")
 		fixture.assertNoSignal("released")
 		fixture.assertValidatorExited()
+		fixture.assertValidatorDescendantExited()
 	})
 
 	t.Run("normal completion", func(t *testing.T) {
 		fixture := newAdvanceProcessFixture(t, binary)
 		process := fixture.startAdvance()
 		process.waitForSignal(filepath.Join(fixture.signals, "started"))
-		fixture.assertStatusContention()
+		operation := fixture.assertStatusContention()
 
 		watch := fixture.startWatch()
-		watch.waitForContention()
+		watch.waitForContention(operation.ID)
 		fixture.releaseValidator()
 		watch.waitForAvailability()
 		process.wait()
+		watch.waitForOperationState("completed")
 		fixture.assertSignals("started", "released", "exited", "lock-released")
 		fixture.assertNoSignal("cancelled")
 		fixture.assertValidatorExited()
+		fixture.assertValidatorDescendantExited()
+	})
+
+	t.Run("validator failure", func(t *testing.T) {
+		fixture := newAdvanceProcessFixture(t, binary)
+		fixture.failValidator()
+		process := fixture.startAdvance()
+		process.waitForSignal(filepath.Join(fixture.signals, "started"))
+		operation := fixture.assertStatusContention()
+
+		watch := fixture.startWatch()
+		watch.waitForContention(operation.ID)
+		fixture.releaseValidator()
+		watch.waitForAvailability()
+		process.waitForFailure()
+		watch.waitForOperationState("failed")
+		fixture.assertSignals("started", "released", "exited", "lock-released")
+		fixture.assertValidatorExited()
+		fixture.assertValidatorDescendantExited()
 	})
 }
 
@@ -105,16 +131,30 @@ func TestAdvanceProcessHelper(t *testing.T) {
 	}
 	repository := os.Getenv(advanceProcessRepositoryEnv)
 	signals := os.Getenv(advanceProcessSignalsEnv)
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGUSR1)
+	ctx, cancel := commandContext([]string{"advance"})
 	defer cancel()
-	module := newProcessLifecycleModule(t, repository, signals)
+	contender := os.Getenv(advanceProcessContenderEnv) != ""
+	var module *issuedelivery.Module
+	if contender {
+		module = newProcessContentionModule(t)
+	} else {
+		module = newProcessLifecycleModule(t, repository, signals)
+	}
 	cmd := command{AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
 		return module, nil
 	}}
+	var output bytes.Buffer
 	err := cmd.run(ctx, []string{
 		"advance", "--repository", repository, "--issue", "44",
 		"--risk-profile", "low-risk",
-	}, &bytes.Buffer{})
+	}, &output)
+	if contender {
+		_, _ = os.Stdout.Write(output.Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	assertProcessIssueLockAvailable(t, repository)
 	writeProcessSignal(signals, "lock-released")
 	if ctx.Err() != nil {
@@ -126,6 +166,19 @@ func TestAdvanceProcessHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func newProcessContentionModule(t *testing.T) *issuedelivery.Module {
+	t.Helper()
+	module, err := issuedelivery.New(issuedelivery.Config{
+		Git:    productionGitObserver{runner: execRunner{}},
+		GitHub: &commandMutableTrackerObserver{},
+		Clock:  &commandClock{now: time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return module
 }
 
 type processValidationRunner struct {
@@ -361,9 +414,20 @@ func newAdvanceProcessFixture(t *testing.T, binary string) *advanceProcessFixtur
 	validator := []byte(`#!/bin/sh
 set -eu
 printf '%s\n' "$$" > "$PACKY_ADVANCE_PROCESS_SIGNALS/validator-pid"
+sleep 100000 &
+descendant=$!
+printf '%s\n' "$descendant" > "$PACKY_ADVANCE_PROCESS_SIGNALS/validator-descendant-pid"
+cleanup() {
+  kill "$descendant" 2>/dev/null || true
+  wait "$descendant" 2>/dev/null || true
+}
+trap cleanup EXIT
 : > "$PACKY_ADVANCE_PROCESS_SIGNALS/started"
 IFS= read -r _ < "$PACKY_ADVANCE_PROCESS_SIGNALS/release"
 : > "$PACKY_ADVANCE_PROCESS_SIGNALS/released"
+if [ -f "$PACKY_ADVANCE_PROCESS_SIGNALS/fail" ]; then
+  exit 17
+fi
 `)
 	if err := os.WriteFile(filepath.Join(repository, "scripts", "validate-packy.sh"), validator, 0o700); err != nil {
 		t.Fatal(err)
@@ -459,7 +523,7 @@ func (f *advanceProcessFixture) startAdvance() *managedProcess {
 		advanceProcessRepositoryEnv:     f.repository,
 		advanceProcessSignalsEnv:        f.signals,
 	})
-	return startManagedProcess(f.t, command, syscall.SIGUSR1)
+	return startManagedProcess(f.t, command, syscall.SIGTERM)
 }
 
 func (f *advanceProcessFixture) startWatch() *runningWatch {
@@ -472,7 +536,16 @@ func (f *advanceProcessFixture) startWatch() *runningWatch {
 	return &runningWatch{managedProcess: startManagedProcess(f.t, command, os.Kill)}
 }
 
-func (f *advanceProcessFixture) assertStatusContention() {
+type processOperation struct {
+	ID                  string `json:"id"`
+	Kind                string `json:"kind"`
+	Phase               string `json:"phase"`
+	State               string `json:"state"`
+	StartedAt           string `json:"started_at"`
+	ValidationSessionID string `json:"validation_session_id"`
+}
+
+func (f *advanceProcessFixture) assertStatusContention() processOperation {
 	f.t.Helper()
 	command := exec.Command(
 		f.binary, "status", "--repository", f.repository, "--issue", "44", "--output", "json",
@@ -487,6 +560,54 @@ func (f *advanceProcessFixture) assertStatusContention() {
 			f.t.Fatalf("status did not report %s: %s", expected, output)
 		}
 	}
+	var report struct {
+		Operation *processOperation `json:"operation"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(output)).Decode(&report); err != nil {
+		f.t.Fatal(err)
+	}
+	if report.Operation == nil || len(report.Operation.ID) != 32 ||
+		report.Operation.Kind != "advance" || report.Operation.Phase != "validation-session" || report.Operation.State != "active" ||
+		report.Operation.StartedAt == "" || report.Operation.ValidationSessionID == "" {
+		f.t.Fatalf("status operation metadata is incomplete: %#v\n%s", report.Operation, output)
+	}
+	if report.Operation.ID == report.Operation.ValidationSessionID {
+		f.t.Fatalf("operation identity must be distinct from validation session identity: %#v", report.Operation)
+	}
+	return *report.Operation
+}
+
+func (f *advanceProcessFixture) assertSameStatusOperation(want processOperation) {
+	f.t.Helper()
+	if got := f.assertStatusContention(); got != want {
+		f.t.Fatalf("live operation identity changed: got %#v want %#v", got, want)
+	}
+}
+
+func (f *advanceProcessFixture) assertConcurrentAdvanceHasDistinctOperation(owner processOperation) {
+	f.t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestAdvanceProcessHelper$")
+	command.Env = replacedEnvironment(f.environment, map[string]string{
+		advanceProcessHelperEnvironment: "1",
+		advanceProcessContenderEnv:      "1",
+		advanceProcessRepositoryEnv:     f.repository,
+		advanceProcessSignalsEnv:        f.signals,
+	})
+	output, err := command.CombinedOutput()
+	if err != nil {
+		f.t.Fatalf("concurrent Advance: %v\n%s", err, output)
+	}
+	var report struct {
+		PauseCause string            `json:"pause_cause"`
+		Operation  *processOperation `json:"operation"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(output)).Decode(&report); err != nil {
+		f.t.Fatal(err)
+	}
+	if report.PauseCause != "lock-contention" || report.Operation == nil ||
+		report.Operation.ID == owner.ID || report.Operation.State != "completed" {
+		f.t.Fatalf("concurrent Advance operation = %#v, owner = %#v\n%s", report.Operation, owner, output)
+	}
 }
 
 func (f *advanceProcessFixture) releaseValidator() {
@@ -500,6 +621,13 @@ func (f *advanceProcessFixture) releaseValidator() {
 		f.t.Fatal(err)
 	}
 	if err = release.Close(); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *advanceProcessFixture) failValidator() {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.signals, "fail"), []byte("\n"), 0o600); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -546,6 +674,27 @@ func (f *advanceProcessFixture) assertValidatorExited() {
 	}
 }
 
+func (f *advanceProcessFixture) assertValidatorDescendantExited() {
+	f.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(f.signals, "validator-descendant-pid"))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	exited, _, err := pollUntil(10*time.Second, nil, func() (bool, error) {
+		return errors.Is(unix.Kill(pid, 0), unix.ESRCH), nil
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if !exited {
+		f.t.Fatalf("validator descendant process %d survived unexpectedly", pid)
+	}
+}
+
 func (f *advanceProcessFixture) validatorPID() int {
 	f.t.Helper()
 	raw, err := os.ReadFile(filepath.Join(f.signals, "validator-pid"))
@@ -568,6 +717,21 @@ func (p *managedProcess) wait() {
 		p.mu.Unlock()
 		if err != nil {
 			p.t.Fatalf("Advance helper: %v\nstdout=%s\nstderr=%s", err, p.stdout.String(), p.stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		p.t.Fatalf("Advance helper did not exit\nstdout=%s\nstderr=%s", p.stdout.String(), p.stderr.String())
+	}
+}
+
+func (p *managedProcess) waitForFailure() {
+	p.t.Helper()
+	select {
+	case <-p.done:
+		p.mu.Lock()
+		err := p.err
+		p.mu.Unlock()
+		if err == nil {
+			p.t.Fatalf("Advance helper succeeded unexpectedly\nstdout=%s\nstderr=%s", p.stdout.String(), p.stderr.String())
 		}
 	case <-time.After(10 * time.Second):
 		p.t.Fatalf("Advance helper did not exit\nstdout=%s\nstderr=%s", p.stdout.String(), p.stderr.String())
@@ -602,9 +766,11 @@ type runningWatch struct {
 	*managedProcess
 }
 
-func (w *runningWatch) waitForContention() {
+func (w *runningWatch) waitForContention(operationID string) {
 	w.t.Helper()
 	w.waitForOutput(`"pause_cause":"lock-contention"`)
+	w.waitForOutput(`"id":"` + operationID + `"`)
+	w.waitForOutput(`"phase":"validation-session"`)
 }
 
 func (w *runningWatch) waitForAvailability() {
@@ -624,6 +790,14 @@ func (w *runningWatch) waitForAvailability() {
 		if !strings.Contains(w.stdout.String(), expected) {
 			w.t.Fatalf("watch did not report %s: %s", expected, w.stdout.String())
 		}
+	}
+}
+
+func (w *runningWatch) waitForOperationState(state string) {
+	w.t.Helper()
+	if !strings.Contains(w.stdout.String(), `"operation":`) ||
+		!strings.Contains(w.stdout.String(), `"state":"`+state+`"`) {
+		w.t.Fatalf("watch did not report terminal operation state %q: %s", state, w.stdout.String())
 	}
 }
 

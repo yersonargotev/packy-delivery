@@ -213,6 +213,7 @@ type Outcome struct {
 	PauseCause               PauseCause
 	NextAction               NextAction
 	IssueLockContended       bool
+	Operation                *Operation
 	RunSchema                string
 	BlockerKind              BlockerKind
 	SupersedesRunID          string

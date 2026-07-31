@@ -253,6 +253,9 @@ func (m *Module) advanceValidationSession(
 	if started == nil || started.ID != session.ID || started.State != ValidationSessionStarted {
 		return nil, Outcome{}, true, errors.New("persisted validation session start does not match execution")
 	}
+	if err := advanceOperationProgress(ctx, OperationPhaseValidationSession, started.ID); err != nil {
+		return nil, Outcome{}, true, err
+	}
 	return m.executeStartedValidationSession(
 		ctx, store, persisted, candidate, boundaries, started,
 	)
@@ -276,6 +279,9 @@ func (m *Module) executeStartedValidationSession(
 			),
 		},
 	)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		executeErr = ctxErr
+	}
 	completed := m.clock.Now().UTC()
 	if executeErr != nil {
 		session.State = ValidationSessionFailed
@@ -317,6 +323,23 @@ func (m *Module) executeStartedValidationSession(
 	resultSHA, err := validationSessionResultDigest(result)
 	if err != nil {
 		return nil, Outcome{}, true, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		session.State = ValidationSessionFailed
+		session.CompletedAt = completed.Format(timeFormat)
+		appendValidationInvalidation(
+			&record, session.ID, candidate.ID,
+			ValidationInvalidationFailedExecution, completed,
+		)
+		outcome, persistErr := m.persistAssuranceTransition(
+			store, record, StateBlocked,
+			"candidate validation session execution failed",
+			"validation-session-failed",
+		)
+		if persistErr != nil {
+			return nil, Outcome{}, true, persistErr
+		}
+		return nil, outcome, true, fmt.Errorf("execute candidate validation session: %w", ctxErr)
 	}
 	session.State = ValidationSessionCompleted
 	session.CompletedAt = completed.Format(timeFormat)

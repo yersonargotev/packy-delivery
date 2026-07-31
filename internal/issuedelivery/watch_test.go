@@ -238,3 +238,79 @@ func TestWatchLockRecoveryOnlyProbesGitAndLock(t *testing.T) {
 		t.Fatal("lock recovery changed run store")
 	}
 }
+
+func TestWatchReloadsMonotonicOperationProgressWhileContended(t *testing.T) {
+	module, git, _ := moduleFixture(t, 356)
+	if _, err := module.Advance(context.Background(), Request{
+		RepositoryPath: "/repo", IssueNumber: 356,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := newAdvanceOperation(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := make(chan struct{})
+	advancePhase := make(chan struct{})
+	phaseUpdated := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- module.store.withAdvanceOperationLock(
+			context.Background(), git.value.CommonDir, 356, &operation,
+			func(ctx context.Context, _ lockedIssueStore) error {
+				close(locked)
+				<-advancePhase
+				if err := advanceOperationProgress(ctx, OperationPhaseValidationSession, strings.Repeat("a", 64)); err != nil {
+					return err
+				}
+				close(phaseUpdated)
+				<-release
+				return nil
+			},
+		)
+	}()
+	<-locked
+	polls := 0
+	module.waiter = &watchTestWaiter{
+		timeout: 10 * time.Second,
+		poll: func() {
+			polls++
+			if polls == 1 {
+				close(advancePhase)
+				<-phaseUpdated
+				return
+			}
+			close(release)
+			if err := <-done; err != nil {
+				t.Errorf("finish Advance operation: %v", err)
+			}
+		},
+	}
+	var events []WatchEvent
+	err = module.Watch(context.Background(), WatchRequest{
+		RepositoryPath: "/repo", IssueNumber: 356,
+		Interval: MinimumWatchInterval, Timeout: 10 * time.Second,
+	}, func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events=%#v", events)
+	}
+	for _, event := range events {
+		if event.Outcome.Operation == nil || event.Outcome.Operation.ID != operation.ID {
+			t.Fatalf("operation identity changed: %#v", events)
+		}
+	}
+	if events[0].Outcome.Operation.Phase != OperationPhaseAdvance ||
+		events[1].Outcome.Operation.Phase != OperationPhaseValidationSession ||
+		events[1].Outcome.Operation.ValidationSessionID == "" ||
+		events[2].Outcome.Operation.State != OperationCompleted ||
+		events[2].Outcome.IssueLockContended {
+		t.Fatalf("operation progress is not monotonic: %#v", events)
+	}
+}

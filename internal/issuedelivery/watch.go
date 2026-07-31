@@ -148,6 +148,11 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 					}
 				} else if available {
 					outcome = *lastSuccessful
+					operation, err := m.store.loadOperation(git.CommonDir, request.IssueNumber)
+					if err != nil {
+						return statusObserverError(ctx, StatusErrorRunState, "load Advance operation", err)
+					}
+					outcome.Operation = operation
 					outcome.IssueLockContended = false
 					outcome.NextAction = ActionRetryAdvance
 					outcome.StatusObservation = &StatusObservation{
@@ -161,6 +166,12 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 					}
 				} else {
 					outcome = *lastSuccessful
+					operation, err := m.store.loadOperation(git.CommonDir, request.IssueNumber)
+					if err != nil {
+						observeErr = statusObserverError(ctx, StatusErrorRunState, "load Advance operation", err)
+					} else {
+						outcome.Operation = operation
+					}
 				}
 			}
 		} else {
@@ -275,6 +286,12 @@ func sameWatchEvent(left, right WatchEvent) bool {
 		left.Outcome.State != right.Outcome.State ||
 		left.Outcome.PauseCause != right.Outcome.PauseCause ||
 		left.Outcome.NextAction != right.Outcome.NextAction {
+		return false
+	}
+	if (left.Outcome.Operation == nil) != (right.Outcome.Operation == nil) {
+		return false
+	}
+	if left.Outcome.Operation != nil && *left.Outcome.Operation != *right.Outcome.Operation {
 		return false
 	}
 	leftStatus, rightStatus := left.Outcome.StatusObservation, right.Outcome.StatusObservation

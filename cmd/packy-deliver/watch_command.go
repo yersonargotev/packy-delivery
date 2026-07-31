@@ -40,6 +40,7 @@ type watchEvent struct {
 	NextAction       issuedelivery.NextAction              `json:"next_action,omitempty"`
 	RelevantIdentity *issuedelivery.StatusRelevantIdentity `json:"relevant_identity,omitempty"`
 	ErrorClass       issuedelivery.StatusErrorClass        `json:"error_class,omitempty"`
+	Operation        *issuedelivery.Operation              `json:"operation,omitempty"`
 }
 
 type watchTimeoutError struct {
@@ -141,6 +142,7 @@ func watchEventFromDomain(observed issuedelivery.WatchEvent) watchEvent {
 		RunID:      outcome.RunID, State: outcome.State,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		ErrorClass: observed.ErrorClass,
+		Operation:  outcome.Operation,
 	}
 	if outcome.StatusObservation != nil {
 		identity := outcome.StatusObservation.Current
@@ -174,9 +176,23 @@ func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
 	if event.ErrorClass != "" {
 		errorClass = " error=" + string(event.ErrorClass)
 	}
+	operation := ""
+	if event.Operation != nil {
+		operation = fmt.Sprintf(
+			" operation=%s kind=%s phase=%s state=%s started=%s",
+			event.Operation.ID,
+			event.Operation.Kind,
+			event.Operation.Phase,
+			event.Operation.State,
+			event.Operation.StartedAt,
+		)
+		if event.Operation.ValidationSessionID != "" {
+			operation += " validation-session=" + event.Operation.ValidationSessionID
+		}
+	}
 	_, err := fmt.Fprintf(
 		stdout,
-		"watch[%d] at=%s run=%s state=%s pause=%s next=%s%s%s\n",
+		"watch[%d] at=%s run=%s state=%s pause=%s next=%s%s%s%s\n",
 		event.Sequence,
 		event.ObservedAt,
 		event.RunID,
@@ -184,6 +200,7 @@ func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
 		event.PauseCause,
 		event.NextAction,
 		identity,
+		operation,
 		errorClass,
 	)
 	return err

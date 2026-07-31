@@ -18,6 +18,7 @@ import (
 )
 
 type advanceOptions struct {
+	Context                 context.Context
 	RepositoryPath          string
 	IssueNumber             int
 	SpecificationNumber     int
@@ -87,6 +88,7 @@ type advanceReport struct {
 }
 
 type compactAdvanceReport struct {
+	Operation               *issuedelivery.Operation                      `json:"operation,omitempty"`
 	RunID                   string                                        `json:"run_id"`
 	State                   issuedelivery.State                           `json:"state"`
 	Reason                  string                                        `json:"reason"`
@@ -207,6 +209,7 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	if c.AdvanceFactory == nil {
 		return errors.New("Advance adapter is unavailable")
 	}
+	options.Context = ctx
 	advancer, err := c.AdvanceFactory(options)
 	if err != nil {
 		return fmt.Errorf("configure Advance: %w", err)
@@ -435,7 +438,8 @@ func compactReportFromOutcome(
 		return compactAdvanceReport{}, fmt.Errorf("build compact run projection: %w", err)
 	}
 	report := compactAdvanceReport{
-		RunID: outcome.RunID, State: outcome.State, Reason: outcome.Reason,
+		Operation: outcome.Operation,
+		RunID:     outcome.RunID, State: outcome.State, Reason: outcome.Reason,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		BlockerKind: outcome.BlockerKind, SupersedesRunID: outcome.SupersedesRunID,
 		Decision: outcome.Decision, Repair: outcome.Repair,
@@ -495,6 +499,14 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 		report.RunID, report.State, report.PauseCause, report.NextAction)
 	if report.Reason != "" {
 		fmt.Fprintf(&out, "reason: %s\n", report.Reason)
+	}
+	if operation := report.Operation; operation != nil {
+		fmt.Fprintf(&out, "operation: %s kind=%s phase=%s state=%s started=%s",
+			operation.ID, operation.Kind, operation.Phase, operation.State, operation.StartedAt)
+		if operation.ValidationSessionID != "" {
+			fmt.Fprintf(&out, " validation-session=%s", operation.ValidationSessionID)
+		}
+		out.WriteByte('\n')
 	}
 	if report.BlockerKind != "" {
 		fmt.Fprintf(&out, "blocker: %s\n", report.BlockerKind)

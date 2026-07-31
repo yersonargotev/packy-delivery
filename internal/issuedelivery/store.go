@@ -32,6 +32,128 @@ type activeRun struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+func (store lockedIssueStore) storeOperation(operation Operation) error {
+	raw, err := json.Marshal(operation)
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteAt(store.directory, "active-operation.json", raw); err != nil {
+		return fmt.Errorf("store active Advance operation: %w", err)
+	}
+	return nil
+}
+
+func (fileRunStore) loadOperation(commonDir string, issue int) (*Operation, error) {
+	issueFD, err := openIssueDirectory(commonDir, issue, false)
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(issueFD)
+	raw, err := readFileAt(issueFD, "active-operation.json")
+	if errors.Is(err, unix.ENOENT) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load active Advance operation: %w", err)
+	}
+	var operation Operation
+	if err := json.Unmarshal(raw, &operation); err != nil {
+		return nil, fmt.Errorf("decode active Advance operation: %w", err)
+	}
+	if operation.Schema != operationSchema || operation.ID == "" || operation.Kind != OperationKindAdvance ||
+		operationPhaseRank(operation.Phase) == 0 || operation.StartedAt == "" || !validOperationState(operation.State) {
+		return nil, errors.New("active Advance operation metadata is invalid")
+	}
+	return &operation, nil
+}
+
+func validOperationState(state OperationState) bool {
+	return state == OperationActive || state == OperationCompleted ||
+		state == OperationFailed || state == OperationCancelled
+}
+
+func (s fileRunStore) withAdvanceOperationLock(
+	ctx context.Context,
+	commonDir string,
+	issue int,
+	operation *Operation,
+	fn func(context.Context, lockedIssueStore) error,
+) (runErr error) {
+	if ctx == nil || operation == nil || fn == nil {
+		return errors.New("Advance operation lock requires a context, operation, and callback")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	issueFD, err := openIssueDirectory(commonDir, issue, true)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(issueFD)
+	operationLockFD, err := unix.Openat(
+		issueFD, "operation.lock",
+		unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0600,
+	)
+	if err != nil {
+		return fmt.Errorf("open Advance operation lock: %w", err)
+	}
+	defer unix.Close(operationLockFD)
+	if err := requireRegularFD(operationLockFD, "operation.lock"); err != nil {
+		return err
+	}
+	if err := unix.Flock(operationLockFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return errIssueRunActive
+		}
+		return fmt.Errorf("lock Advance operation metadata: %w", err)
+	}
+	defer unix.Flock(operationLockFD, unix.LOCK_UN)
+
+	store := lockedIssueStore{directory: issueFD}
+	if err := store.storeOperation(*operation); err != nil {
+		return err
+	}
+	advanceLockFD, err := unix.Openat(
+		issueFD, "advance.lock",
+		unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0600,
+	)
+	if err != nil {
+		operation.State = OperationFailed
+		return errors.Join(fmt.Errorf("open issue delivery lock: %w", err), store.storeOperation(*operation))
+	}
+	defer unix.Close(advanceLockFD)
+	if err := requireRegularFD(advanceLockFD, "advance.lock"); err != nil {
+		operation.State = OperationFailed
+		return errors.Join(err, store.storeOperation(*operation))
+	}
+	if err := unix.Flock(advanceLockFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		operation.State = OperationCompleted
+		persistErr := store.storeOperation(*operation)
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return errors.Join(errIssueRunActive, persistErr)
+		}
+		return errors.Join(fmt.Errorf("lock issue delivery run: %w", err), persistErr)
+	}
+	defer unix.Flock(advanceLockFD, unix.LOCK_UN)
+	defer func() {
+		switch {
+		case errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded):
+			operation.State = OperationCancelled
+		case runErr != nil:
+			operation.State = OperationFailed
+		default:
+			operation.State = OperationCompleted
+		}
+		runErr = errors.Join(runErr, store.storeOperation(*operation))
+	}()
+	return fn(contextWithOperation(ctx, store, operation), store)
+}
+
 func (fileRunStore) issueLockAvailable(ctx context.Context, commonDir string, issue int) (bool, error) {
 	if ctx == nil {
 		return false, errors.New("issue delivery lock probe requires a context")

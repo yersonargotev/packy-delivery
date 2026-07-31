@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/yersonargotev/packy-delivery/internal/deliveryevidence"
 )
@@ -23,9 +24,13 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 	if err != nil {
 		return Outcome{}, fmt.Errorf("observe Git: %w", err)
 	}
+	operation, err := newAdvanceOperation(time.Now())
+	if err != nil {
+		return Outcome{}, err
+	}
 
 	var outcome Outcome
-	err = m.store.withIssueLock(ctx, git.CommonDir, request.IssueNumber, func(store lockedIssueStore) error {
+	err = m.store.withAdvanceOperationLock(ctx, git.CommonDir, request.IssueNumber, &operation, func(ctx context.Context, store lockedIssueStore) error {
 		tracker, err := m.github.ObserveIssue(ctx, git, request.IssueNumber)
 		if err != nil {
 			return fmt.Errorf("observe GitHub issue: %w", err)
@@ -167,6 +172,7 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 		return nil
 	})
 	if errors.Is(err, errIssueRunActive) {
+		operation.State = OperationCompleted
 		outcome = Outcome{
 			State: StateWaiting, Reason: "another Advance call is active for this issue",
 			IssueLockContended: true,
@@ -176,6 +182,7 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 	if err != nil {
 		return Outcome{}, err
 	}
+	outcome.Operation = &operation
 	return outcomeWithPause(outcome), nil
 }
 

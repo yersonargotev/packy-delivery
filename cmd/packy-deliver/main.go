@@ -13,10 +13,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yersonargotev/packy-delivery/internal/deliveryevidence"
@@ -39,7 +41,7 @@ func (e *commandRejectedError) Error() string { return e.err.Error() }
 func (e *commandRejectedError) Unwrap() error { return e.err }
 
 func (execRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
-	c := exec.CommandContext(ctx, name, args...)
+	c := ownedCommandContext(ctx, name, args...)
 	output, err := c.Output()
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) {
@@ -80,7 +82,7 @@ type ValidationRunner interface {
 type execValidationRunner struct{}
 
 func (execValidationRunner) Run(ctx context.Context, repository string, sandbox deliveryevidence.SandboxFacts) error {
-	c := exec.CommandContext(ctx, "./scripts/validate-packy.sh")
+	c := ownedCommandContext(ctx, "./scripts/validate-packy.sh")
 	c.Dir = repository
 	c.Env = replacedEnvironment(os.Environ(), map[string]string{
 		"HOME":                         sandbox.HomeRoot,
@@ -91,6 +93,22 @@ func (execValidationRunner) Run(ctx context.Context, repository string, sandbox 
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
+}
+
+func ownedCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return command
 }
 
 func replacedEnvironment(current []string, replacements map[string]string) []string {
@@ -163,6 +181,8 @@ type issueObservation struct {
 }
 
 func main() {
+	ctx, stop := commandContext(os.Args[1:])
+	defer stop()
 	if err := (command{
 		Git: execRunner{}, GitHub: execRunner{}, Validation: execValidationRunner{},
 		Now: time.Now, AdvanceFactory: newProductionAdvancer, StatusFactory: newProductionStatuser,
@@ -170,10 +190,17 @@ func main() {
 		InputTemplateFactory: newProductionInputTemplateMaterializer,
 		ReviewPacketFactory:  newProductionReviewPacketMaterializer,
 		LegacyPrefixRequired: true,
-	}).run(context.Background(), os.Args[1:], os.Stdout); err != nil {
+	}).run(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(commandExitCode(err))
 	}
+}
+
+func commandContext(args []string) (context.Context, context.CancelFunc) {
+	if len(args) > 0 && args[0] == "advance" {
+		return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	}
+	return context.WithCancel(context.Background())
 }
 
 func (c command) run(ctx context.Context, args []string, stdout io.Writer) error {
