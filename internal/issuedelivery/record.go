@@ -292,6 +292,36 @@ func validateCandidates(record runRecord) error {
 			}
 			required[axis] = true
 		}
+		batchIterations := make(map[int]bool, len(candidate.ReviewBatches))
+		for _, batch := range candidate.ReviewBatches {
+			if batch.Iteration < 1 || batchIterations[batch.Iteration] ||
+				len(batch.RequiredAxes) == 0 {
+				return fmt.Errorf("issue delivery candidate review batch history is invalid")
+			}
+			if _, err := time.Parse(timeFormat, batch.CompletedAt); err != nil {
+				return fmt.Errorf("issue delivery candidate review batch history is invalid")
+			}
+			batchIterations[batch.Iteration] = true
+			batchAxes := make(map[deliveryevidence.ReviewAxis]bool, len(batch.RequiredAxes))
+			for _, axis := range batch.RequiredAxes {
+				if (axis != deliveryevidence.ReviewStandards && axis != deliveryevidence.ReviewSpec) ||
+					batchAxes[axis] {
+					return fmt.Errorf("issue delivery candidate review batch history is invalid")
+				}
+				batchAxes[axis] = true
+			}
+			for axis := range batchAxes {
+				matched := false
+				for _, review := range candidate.Reviews {
+					if review.Iteration == batch.Iteration && review.Axis == axis && review.Completed {
+						matched = true
+					}
+				}
+				if !matched {
+					return fmt.Errorf("issue delivery candidate review batch history is invalid")
+				}
+			}
+		}
 		findingIDs := make(map[string]bool)
 		var reviewedAcceptance []AcceptanceProof
 		specReviewCompleted := false
@@ -396,7 +426,17 @@ func validateCandidates(record runRecord) error {
 				return fmt.Errorf("issue delivery exhaustive candidate acceptance is incomplete: %w", err)
 			}
 		}
-		for _, proof := range []*ValidationProof{candidate.Focused, candidate.Exhaustive} {
+		validationProofs := []*ValidationProof{candidate.Focused, candidate.Exhaustive}
+		historyCompletions := make(map[string]bool, len(candidate.ExhaustiveHistory))
+		for historyIndex := range candidate.ExhaustiveHistory {
+			proof := &candidate.ExhaustiveHistory[historyIndex]
+			if proof.Kind != "exhaustive" || historyCompletions[proof.CompletedAt] {
+				return fmt.Errorf("issue delivery candidate contains duplicate exhaustive history")
+			}
+			historyCompletions[proof.CompletedAt] = true
+			validationProofs = append(validationProofs, proof)
+		}
+		for _, proof := range validationProofs {
 			if proof == nil {
 				continue
 			}
@@ -407,6 +447,14 @@ func validateCandidates(record runRecord) error {
 				!filepath.IsAbs(proof.Result.ConfigRoot) || filepath.Clean(proof.Result.ConfigRoot) != proof.Result.ConfigRoot ||
 				proof.Result.HomeRoot == proof.Result.ConfigRoot {
 				return fmt.Errorf("issue delivery candidate contains an invalid validation proof")
+			}
+			if proof.Kind == "exhaustive" &&
+				(proof.Result.Command != "./scripts/validate-packy.sh" ||
+					proof.Result.ValidatorIdentity != "scripts/validate-packy.sh" ||
+					!runIDPattern.MatchString(proof.Result.CheckoutSHA256) ||
+					!runIDPattern.MatchString(proof.Result.ValidatorSHA256) ||
+					!proof.Result.WorkspaceClean) {
+				return fmt.Errorf("issue delivery candidate contains an invalid exhaustive proof")
 			}
 		}
 		if candidate.Focused != nil && candidate.Focused.Kind != "focused" {
@@ -601,6 +649,9 @@ func validatePersistedRepairDecision(
 	allowPartial bool,
 ) error {
 	decision := candidate.RepairDecision
+	if err := validateRepairHistory(candidate); err != nil {
+		return err
+	}
 	if err := validateLastRepairBatch(schema, candidate); err != nil {
 		return err
 	}
@@ -634,6 +685,23 @@ func validatePersistedRepairDecision(
 		}
 	} else if decision.Class == RepairBounded && !accepted {
 		return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
+	}
+	return nil
+}
+
+func validateRepairHistory(candidate Candidate) error {
+	seen := make(map[string]bool, len(candidate.RepairHistory))
+	for _, batch := range candidate.RepairHistory {
+		if seen[batch.RequestID] || strings.TrimSpace(batch.RequestID) == "" ||
+			batch.Decision.CandidateID != candidate.ID || len(batch.Decision.Findings) == 0 {
+			return fmt.Errorf("issue delivery candidate contains an invalid canonical repair history")
+		}
+		seen[batch.RequestID] = true
+		for _, current := range candidate.RepairBatches {
+			if current.RequestID == batch.RequestID && !reflect.DeepEqual(current, batch) {
+				return fmt.Errorf("issue delivery candidate contains an invalid canonical repair history")
+			}
+		}
 	}
 	return nil
 }

@@ -18,18 +18,7 @@ func projectAutomaticAssurance(record *runRecord) error {
 	var expectedReviews []deliveryevidence.CandidateReviewReceipt
 	var expectedAdjudications []deliveryevidence.AssuranceAdjudicationReceipt
 	var expectedExhaustive []deliveryevidence.ExhaustiveAssuranceReceipt
-	reviewTimes := phaseCompletionTimes(record.Timing, "review")
-	reviewTime := 0
 	reviewIDs := make(map[string]string)
-	adjudicationGenerations := make(map[string]int)
-	adjudicationRequests := make(map[string]deliveryevidence.AssuranceAdjudicationReceipt)
-	for _, receipt := range record.Evidence.AssuranceAdjudications {
-		if receipt.Generation > adjudicationGenerations[receipt.CandidateID] {
-			adjudicationGenerations[receipt.CandidateID] = receipt.Generation
-		}
-		adjudicationRequests[receipt.CandidateID+"\x00"+receipt.RequestID] = receipt
-	}
-
 	for candidateIndex := range record.Candidates {
 		candidate := &record.Candidates[candidateIndex]
 		byIteration := make(map[int][]CandidateReview)
@@ -46,6 +35,44 @@ func projectAutomaticAssurance(record *runRecord) error {
 		for _, iteration := range iterations {
 			reviews := byIteration[iteration]
 			sort.Slice(reviews, func(i, j int) bool { return reviews[i].Axis < reviews[j].Axis })
+			var batch *CandidateReviewBatch
+			for batchIndex := range candidate.ReviewBatches {
+				if candidate.ReviewBatches[batchIndex].Iteration == iteration {
+					batch = &candidate.ReviewBatches[batchIndex]
+					break
+				}
+			}
+			requiredAxes := candidate.RequiredReviews
+			if batch != nil {
+				requiredAxes = batch.RequiredAxes
+			} else if iteration < currentReviewIteration(candidate) {
+				requiredAxes = make([]deliveryevidence.ReviewAxis, 0, len(reviews))
+				for _, review := range reviews {
+					requiredAxes = append(requiredAxes, review.Axis)
+				}
+			}
+			completed := make(map[deliveryevidence.ReviewAxis]bool, len(reviews))
+			for _, review := range reviews {
+				completed[review.Axis] = true
+			}
+			fullBatch := true
+			for _, required := range requiredAxes {
+				if !completed[required] {
+					fullBatch = false
+					break
+				}
+			}
+			if !fullBatch {
+				continue
+			}
+			if batch == nil {
+				completedAt := latestPhaseCompletion(record.Timing, "review")
+				candidate.ReviewBatches = append(candidate.ReviewBatches, CandidateReviewBatch{
+					Iteration: iteration, RequiredAxes: append([]deliveryevidence.ReviewAxis(nil), requiredAxes...),
+					CompletedAt: completedAt,
+				})
+				batch = &candidate.ReviewBatches[len(candidate.ReviewBatches)-1]
+			}
 			axes := make([]deliveryevidence.ReviewAxis, 0, len(reviews))
 			for _, review := range reviews {
 				axes = append(axes, review.Axis)
@@ -69,15 +96,10 @@ func projectAutomaticAssurance(record *runRecord) error {
 			}
 			sum := sha256.Sum256(raw)
 			findingsDigest := hex.EncodeToString(sum[:])
-			completedAt := record.UpdatedAt
-			if reviewTime < len(reviewTimes) {
-				completedAt = reviewTimes[reviewTime]
-			}
-			reviewTime++
 			receipt := deliveryevidence.CandidateReviewReceipt{
 				CandidateID: candidate.ID, Iteration: iteration, Axes: axes,
 				FindingsSHA256: findingsDigest, CommitSHA: candidate.CommitSHA,
-				TreeSHA: candidate.TreeSHA, CompletedAt: completedAt,
+				TreeSHA: candidate.TreeSHA, CompletedAt: batch.CompletedAt,
 			}
 			receipt.Identity = deliveryevidence.CandidateReviewReceiptIdentity(
 				receipt.CandidateID, receipt.Iteration, receipt.Axes, receipt.FindingsSHA256,
@@ -88,14 +110,32 @@ func projectAutomaticAssurance(record *runRecord) error {
 				reviewIDs[reviewReferenceKey(candidate.ID, iteration, axis)] = receipt.Identity
 			}
 		}
-		generationOffset := 0
-		if len(candidate.RepairBatches) > 0 {
-			firstKey := candidate.ID + "\x00" + candidate.RepairBatches[0].RequestID
-			if _, retained := adjudicationRequests[firstKey]; !retained {
-				generationOffset = adjudicationGenerations[candidate.ID]
+		repairBatches := append([]RepairBatchReceipt(nil), candidate.RepairBatches...)
+		if candidate.LastRepairBatch != nil {
+			found := false
+			for _, batch := range repairBatches {
+				if batch.RequestID == candidate.LastRepairBatch.RequestID {
+					found = true
+				}
+			}
+			if !found {
+				repairBatches = append(repairBatches, *candidate.LastRepairBatch)
 			}
 		}
-		for batchIndex, batch := range candidate.RepairBatches {
+		historyRequests := make(map[string]int, len(candidate.RepairHistory))
+		for index, batch := range candidate.RepairHistory {
+			historyRequests[batch.RequestID] = index + 1
+		}
+		for _, batch := range repairBatches {
+			if position := historyRequests[batch.RequestID]; position > 0 {
+				candidate.RepairHistory[position-1] = batch
+			} else {
+				candidate.RepairHistory = append(candidate.RepairHistory, batch)
+				historyRequests[batch.RequestID] = len(candidate.RepairHistory)
+			}
+		}
+		repairBatches = append([]RepairBatchReceipt(nil), candidate.RepairHistory...)
+		for batchIndex, batch := range repairBatches {
 			findings := make([]deliveryevidence.AssuranceFindingDecision, len(batch.Decision.Findings))
 			for index, finding := range batch.Decision.Findings {
 				findings[index] = deliveryevidence.AssuranceFindingDecision{
@@ -103,9 +143,9 @@ func projectAutomaticAssurance(record *runRecord) error {
 				}
 			}
 			sort.Slice(findings, func(i, j int) bool { return findings[i].FindingID < findings[j].FindingID })
-			generation := generationOffset + batchIndex + 1
+			generation := batchIndex + 1
 			receipt := deliveryevidence.AssuranceAdjudicationReceipt{
-				RequestID: batch.RequestID, CandidateID: candidate.ID, Generation: generation,
+				RequestID: batch.RequestID, CandidateID: batch.Decision.CandidateID, Generation: generation,
 				Class: string(batch.Decision.Class), CompatiblePrefix: batch.CompatiblePrefix, Findings: findings,
 			}
 			receipt.Identity = deliveryevidence.AssuranceAdjudicationReceiptIdentity(
@@ -114,8 +154,13 @@ func projectAutomaticAssurance(record *runRecord) error {
 			)
 			expectedAdjudications = append(expectedAdjudications, receipt)
 		}
+		exhaustiveProofs := append([]ValidationProof(nil), candidate.ExhaustiveHistory...)
 		if candidate.Exhaustive != nil {
-			result := candidate.Exhaustive.Result
+			exhaustiveProofs = append(exhaustiveProofs, *candidate.Exhaustive)
+		}
+		for proofIndex := range exhaustiveProofs {
+			proof := exhaustiveProofs[proofIndex]
+			result := proof.Result
 			receipt := deliveryevidence.ExhaustiveAssuranceReceipt{
 				Repository: record.Repository, CandidateID: candidate.ID,
 				CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA,
@@ -123,12 +168,15 @@ func projectAutomaticAssurance(record *runRecord) error {
 				ValidatorSHA256:            result.ValidatorSHA256,
 				ValidatorIdentityExpiresAt: result.ValidatorIdentityExpiresAt,
 				Command:                    result.Command, HomeRoot: result.HomeRoot, ConfigRoot: result.ConfigRoot,
-				Sandboxed: result.Sandboxed, CompletedAt: candidate.Exhaustive.CompletedAt,
+				Sandboxed: result.Sandboxed, CompletedAt: proof.CompletedAt,
 			}
 			receipt.Identity = deliveryevidence.ExhaustiveAssuranceReceiptIdentity(receipt)
 			expectedExhaustive = append(expectedExhaustive, receipt)
-			for proofIndex := range candidate.Acceptance {
-				reference := candidate.Acceptance[proofIndex].ValidationReceipt
+			if candidate.Exhaustive == nil || proofIndex != len(exhaustiveProofs)-1 {
+				continue
+			}
+			for acceptanceIndex := range candidate.Acceptance {
+				reference := candidate.Acceptance[acceptanceIndex].ValidationReceipt
 				if reference != nil {
 					if reference.ReceiptID != "" && reference.ReceiptID != receipt.Identity {
 						return fmt.Errorf("acceptance validation receipt identity conflicts with canonical assurance")
@@ -165,15 +213,18 @@ func projectAutomaticAssurance(record *runRecord) error {
 	}
 
 	expectedPhases := projectAssurancePhases(*record)
-	mergedReviews, err := mergeReceipts(record.Evidence.CandidateReviewReceipts, expectedReviews,
+	mergedReviews, err := reconcileReceipts(record.Evidence.CandidateReviewReceipts, expectedReviews,
 		func(value deliveryevidence.CandidateReviewReceipt) string {
 			return fmt.Sprintf("%s\x00%d", value.CandidateID, value.Iteration)
 		}, "candidate review")
 	if err != nil {
 		return err
 	}
-	mergedAdjudications, err := mergeAdjudicationReceipts(
+	mergedAdjudications, err := reconcileReceipts(
 		record.Evidence.AssuranceAdjudications, expectedAdjudications,
+		func(value deliveryevidence.AssuranceAdjudicationReceipt) string {
+			return value.CandidateID + "\x00" + value.RequestID
+		}, "adjudication",
 	)
 	if err != nil {
 		return err
@@ -181,7 +232,7 @@ func projectAutomaticAssurance(record *runRecord) error {
 	if err := requireReceiptPrefix(record.Evidence.AssurancePhases, expectedPhases, "phase"); err != nil {
 		return err
 	}
-	mergedExhaustive, err := mergeReceipts(record.Evidence.ExhaustiveAssurance, expectedExhaustive,
+	mergedExhaustive, err := reconcileReceipts(record.Evidence.ExhaustiveAssurance, expectedExhaustive,
 		func(value deliveryevidence.ExhaustiveAssuranceReceipt) string {
 			return value.CandidateID + "\x00" + value.CompletedAt
 		},
@@ -204,8 +255,8 @@ func validatePersistedAutomaticAssurance(record runRecord) error {
 		len(record.Evidence.AssuranceAdjudications) == 0 &&
 		len(record.Evidence.AssurancePhases) == 0 &&
 		len(record.Evidence.ExhaustiveAssurance) == 0 {
-		if hasAnyReceiptReferences(record.Candidates) {
-			return fmt.Errorf("persisted automatic assurance references lack canonical receipts")
+		if hasAnyReceiptReferences(record.Candidates) || hasAutomaticAssuranceHistory(record.Candidates) {
+			return fmt.Errorf("persisted automatic assurance history or references lack canonical receipts")
 		}
 		return nil
 	}
@@ -234,6 +285,16 @@ func validatePersistedAutomaticAssurance(record runRecord) error {
 		return fmt.Errorf("persisted automatic assurance projection is incomplete")
 	}
 	return nil
+}
+
+func hasAutomaticAssuranceHistory(candidates []Candidate) bool {
+	for _, candidate := range candidates {
+		if len(candidate.ReviewBatches) != 0 || len(candidate.RepairHistory) != 0 ||
+			len(candidate.ExhaustiveHistory) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func hasAnyReceiptReferences(candidates []Candidate) bool {
@@ -315,67 +376,44 @@ func requireReceiptPrefix[T any](persisted, expected []T, kind string) error {
 	return nil
 }
 
-func mergeReceipts[T any](persisted, expected []T, key func(T) string, kind string) ([]T, error) {
-	out := append([]T(nil), persisted...)
-	positions := make(map[string]int, len(persisted))
-	for index, receipt := range persisted {
-		positions[key(receipt)] = index
+func reconcileReceipts[T any](persisted, expected []T, key func(T) string, kind string) ([]T, error) {
+	if len(persisted) == 0 && len(expected) == 0 {
+		return nil, nil
 	}
+	expectedByKey := make(map[string]T, len(expected))
 	for _, receipt := range expected {
-		if index, ok := positions[key(receipt)]; ok {
-			if !reflect.DeepEqual(out[index], receipt) {
-				return nil, fmt.Errorf("persisted %s assurance projection conflicts with authoritative run", kind)
-			}
-			continue
+		semanticKey := key(receipt)
+		if _, duplicate := expectedByKey[semanticKey]; duplicate {
+			return nil, fmt.Errorf("authoritative %s assurance facts contain a duplicate semantic key", kind)
 		}
-		positions[key(receipt)] = len(out)
-		out = append(out, receipt)
+		expectedByKey[semanticKey] = receipt
 	}
-	return out, nil
-}
-
-func mergeAdjudicationReceipts(
-	persisted, expected []deliveryevidence.AssuranceAdjudicationReceipt,
-) ([]deliveryevidence.AssuranceAdjudicationReceipt, error) {
-	out := append([]deliveryevidence.AssuranceAdjudicationReceipt(nil), persisted...)
-	positions := make(map[string]int, len(out))
-	for index, receipt := range out {
-		positions[receipt.CandidateID+"\x00"+receipt.RequestID] = index
+	seen := make(map[string]bool, len(persisted))
+	out := make([]T, 0, len(expected))
+	for _, receipt := range persisted {
+		semanticKey := key(receipt)
+		expectedReceipt, known := expectedByKey[semanticKey]
+		if seen[semanticKey] || !known {
+			return nil, fmt.Errorf("persisted %s assurance projection conflicts with authoritative run", kind)
+		}
+		seen[semanticKey] = true
+		out = append(out, expectedReceipt)
 	}
 	for _, receipt := range expected {
-		key := receipt.CandidateID + "\x00" + receipt.RequestID
-		index, ok := positions[key]
-		if !ok {
-			positions[key] = len(out)
+		if !seen[key(receipt)] {
 			out = append(out, receipt)
-			continue
 		}
-		if reflect.DeepEqual(out[index], receipt) {
-			continue
-		}
-		prior := out[index]
-		prior.CompatiblePrefix = true
-		prior.Identity = deliveryevidence.AssuranceAdjudicationReceiptIdentity(
-			prior.RequestID, prior.CandidateID, prior.Generation, prior.Class,
-			prior.CompatiblePrefix, prior.Findings,
-		)
-		if !out[index].CompatiblePrefix && receipt.CompatiblePrefix && reflect.DeepEqual(prior, receipt) {
-			out[index] = receipt
-			continue
-		}
-		return nil, fmt.Errorf("persisted adjudication assurance projection conflicts with authoritative run")
 	}
 	return out, nil
 }
 
-func phaseCompletionTimes(timings []Timing, phase string) []string {
-	var out []string
-	for _, timing := range timings {
-		if timing.Phase == phase {
-			out = append(out, timing.CompletedAt)
+func latestPhaseCompletion(timings []Timing, phase string) string {
+	for index := len(timings) - 1; index >= 0; index-- {
+		if timings[index].Phase == phase {
+			return timings[index].CompletedAt
 		}
 	}
-	return out
+	return ""
 }
 
 func reviewReferenceKey(candidateID string, iteration int, axis deliveryevidence.ReviewAxis) string {

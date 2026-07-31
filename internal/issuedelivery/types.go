@@ -336,6 +336,12 @@ type CandidateReview struct {
 	Completed   bool                             `json:"completed"`
 }
 
+type CandidateReviewBatch struct {
+	Iteration    int                           `json:"iteration"`
+	RequiredAxes []deliveryevidence.ReviewAxis `json:"required_axes"`
+	CompletedAt  string                        `json:"completed_at"`
+}
+
 type SpecialistReviewRequest struct {
 	RunID       string
 	CandidateID string
@@ -532,14 +538,17 @@ type Candidate struct {
 	RequiredReviews     []deliveryevidence.ReviewAxis        `json:"required_reviews"`
 	ReviewIteration     int                                  `json:"review_iteration,omitempty"`
 	Reviews             []CandidateReview                    `json:"reviews"`
+	ReviewBatches       []CandidateReviewBatch               `json:"review_batches,omitempty"`
 	RequiredSpecialists []SensitiveBoundary                  `json:"required_specialists"`
 	SpecialistReviews   []SpecialistReview                   `json:"specialist_reviews"`
 	BoundaryProofs      []BoundaryProof                      `json:"boundary_proofs"`
 	Acceptance          []AcceptanceProof                    `json:"acceptance,omitempty"`
 	Focused             *ValidationProof                     `json:"focused,omitempty"`
 	Exhaustive          *ValidationProof                     `json:"exhaustive,omitempty"`
+	ExhaustiveHistory   []ValidationProof                    `json:"exhaustive_history,omitempty"`
 	RepairDecision      *RepairDecision                      `json:"repair_decision,omitempty"`
 	RepairBatches       []RepairBatchReceipt                 `json:"repair_batches,omitempty"`
+	RepairHistory       []RepairBatchReceipt                 `json:"repair_history,omitempty"`
 	LastRepairBatch     *RepairBatchReceipt                  `json:"last_repair_batch,omitempty"`
 }
 

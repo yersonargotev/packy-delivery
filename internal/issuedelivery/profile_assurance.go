@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -109,9 +110,24 @@ func invalidateForProfileEscalation(record *runRecord, candidate *Candidate) {
 		candidate.ReviewIteration = len(candidate.Reviews) + 1
 	}
 	candidate.Acceptance = nil
+	retainExhaustiveProof(candidate)
 	candidate.Exhaustive = nil
 	record.Evidence.ValidationReceipts = []deliveryevidence.ValidationReceipt{}
 	invalidateAcceptance(record.Evidence, record.QualificationCorrections)
+}
+
+func retainExhaustiveProof(candidate *Candidate) {
+	if candidate.Exhaustive != nil {
+		alreadyRetained := false
+		for _, proof := range candidate.ExhaustiveHistory {
+			if reflect.DeepEqual(proof, *candidate.Exhaustive) {
+				alreadyRetained = true
+			}
+		}
+		if !alreadyRetained {
+			candidate.ExhaustiveHistory = append(candidate.ExhaustiveHistory, *candidate.Exhaustive)
+		}
+	}
 }
 
 func (m *Module) executeSpecialistReviews(
