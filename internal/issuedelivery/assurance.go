@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +44,14 @@ func (m *Module) advanceAssurance(
 	}
 
 	candidate := latestCandidate(&record)
+	if len(request.CandidateReviews) != 0 && len(request.SpecialistReviews) != 0 {
+		return Outcome{}, errors.New("one Advance call cannot supply candidate and specialist packet responses")
+	}
+	if len(request.CandidateReviews) != 0 || len(request.SpecialistReviews) != 0 {
+		if candidate == nil || candidate.CommitSHA != git.HeadSHA || candidate.TreeSHA != git.TreeSHA {
+			return Outcome{}, errors.New("review packet response does not match the exact current candidate")
+		}
+	}
 	if record.Schema != legacyRunSchema && candidate == nil &&
 		git.HeadSHA == record.Evidence.StartingBaseSHA {
 		const reason = "qualification is approved; awaiting candidate development"
@@ -130,6 +139,38 @@ func (m *Module) advanceAssurance(
 				"risk-observation",
 			)
 		}
+	}
+
+	if len(request.CandidateReviews) != 0 {
+		changed, err := reconcileCandidatePacketResponses(&record, candidate, request.CandidateReviews)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if changed {
+			if ids := unresolvedFindingIDs(candidate); len(ids) > 0 && len(missingReviewAxes(candidate)) == 0 {
+				record.PendingRepair = repairDecisionRequest(record.Schema, candidate.ID, ids)
+				return m.persistAssuranceTransition(store, record, StateNeedsDecision, "review findings require one batch adjudication", "review")
+			}
+			return m.persistAssuranceTransition(store, record, StateNeedsReview, "candidate packet responses were persisted", "review")
+		}
+		return outcomeFromRecord(record), nil
+	}
+	if len(request.SpecialistReviews) != 0 {
+		if len(missingReviewAxes(candidate)) != 0 || len(unresolvedFindingIDs(candidate)) != 0 {
+			return Outcome{}, errors.New("specialist packet responses require completed candidate axes without unresolved findings")
+		}
+		changed, err := reconcileSpecialistPacketResponses(&record, candidate, request.SpecialistReviews)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if changed {
+			if ids := unresolvedFindingIDs(candidate); len(ids) > 0 && len(missingSpecialistBoundaries(candidate)) == 0 {
+				record.PendingRepair = repairDecisionRequest(record.Schema, candidate.ID, ids)
+				return m.persistAssuranceTransition(store, record, StateNeedsDecision, "review findings require one batch adjudication", "specialist-review")
+			}
+			return m.persistAssuranceTransition(store, record, StateNeedsReview, "specialist packet responses were persisted", "specialist-review")
+		}
+		return outcomeFromRecord(record), nil
 	}
 
 	if record.LocalReadiness != nil &&
@@ -420,6 +461,65 @@ func (m *Module) advanceAssurance(
 	)
 }
 
+func reconcileCandidatePacketResponses(record *runRecord, candidate *Candidate, supplied []CandidateReview) (bool, error) {
+	seenAxes := map[deliveryevidence.ReviewAxis]bool{}
+	var additions []CandidateReview
+	for _, review := range supplied {
+		if seenAxes[review.Axis] {
+			return false, fmt.Errorf("duplicate candidate packet response for axis %q", review.Axis)
+		}
+		seenAxes[review.Axis] = true
+		expectedIteration := currentReviewIteration(candidate)
+		expected := candidatePacketID(*record, *candidate, review.Axis, expectedIteration)
+		expectedSHA := candidatePacketSHA256(*record, *candidate, review.Axis, expectedIteration)
+		if err := validateCandidateReview(review, *candidate, candidate.RequiredReviews, expectedIteration, expected, expectedSHA); err != nil {
+			return false, err
+		}
+		if !review.Completed {
+			continue
+		}
+		review = qualifyCandidateReviewFindings(review)
+		matched := false
+		for _, persisted := range candidate.Reviews {
+			if persisted.Axis != review.Axis || persisted.Iteration != review.Iteration {
+				continue
+			}
+			matched = true
+			if !reflect.DeepEqual(persisted, review) {
+				return false, errors.New("candidate packet response conflicts with the already persisted response")
+			}
+		}
+		if !matched {
+			additions = append(additions, review)
+		}
+	}
+	if err := validateReviewBatch(*candidate, additions); err != nil {
+		return false, err
+	}
+	for _, review := range additions {
+		if review.Axis == deliveryevidence.ReviewSpec && phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
+			evidence := *record.Evidence
+			evidence.AcceptanceMatrix = append([]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...)
+			reviewed := *candidate
+			reviewed.Reviews = append(append([]CandidateReview(nil), candidate.Reviews...), review)
+			if err := admitAcceptanceProofs(&evidence, &reviewed, review.Acceptance); err != nil {
+				return false, fmt.Errorf("Spec review acceptance proof is invalid: %w", err)
+			}
+		}
+		candidate.Reviews = append(candidate.Reviews, review)
+		if review.Axis == deliveryevidence.ReviewSpec {
+			candidate.Acceptance = append([]AcceptanceProof(nil), review.Acceptance...)
+		}
+	}
+	sort.Slice(candidate.Reviews, func(i, j int) bool {
+		if candidate.Reviews[i].Iteration != candidate.Reviews[j].Iteration {
+			return candidate.Reviews[i].Iteration < candidate.Reviews[j].Iteration
+		}
+		return candidate.Reviews[i].Axis < candidate.Reviews[j].Axis
+	})
+	return len(additions) != 0, nil
+}
+
 func (m *Module) applyRepairDecision(
 	store lockedIssueStore,
 	record runRecord,
@@ -596,9 +696,12 @@ func (m *Module) executeReviews(
 		}
 		if err := validateCandidateReview(
 			result.review, candidate, axes, iteration,
+			expectedCandidatePacketID(record, candidate, result.review.Axis),
+			candidatePacketSHA256(record, candidate, result.review.Axis, iteration),
 		); err != nil {
 			return nil, err
 		}
+		result.review = qualifyCandidateReviewFindings(result.review)
 		if result.review.Axis == deliveryevidence.ReviewSpec && result.review.Completed &&
 			phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
 			evidence := *record.Evidence
@@ -751,11 +854,21 @@ func validateCandidateReview(
 	candidate Candidate,
 	requested []deliveryevidence.ReviewAxis,
 	expectedIteration int,
+	expectedPacketID ...string,
 ) error {
 	if review.CandidateID != candidate.ID || !containsAxis(requested, review.Axis) || review.Findings == nil ||
 		review.Iteration != expectedIteration || review.CommitSHA != candidate.CommitSHA ||
 		review.TreeSHA != candidate.TreeSHA {
 		return errors.New("candidate review does not match its exact request")
+	}
+	if review.PacketID != "" && (len(expectedPacketID) < 1 || review.PacketID != expectedPacketID[0]) {
+		return errors.New("candidate review does not match its exact current packet")
+	}
+	if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
+		return fmt.Errorf("candidate review source: %w", err)
+	}
+	if review.PacketID != "" && (len(expectedPacketID) != 2 || review.PacketSHA256 != expectedPacketID[1]) {
+		return errors.New("candidate review does not match its exact current packet SHA-256")
 	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete candidate review cannot contain findings")
@@ -763,10 +876,12 @@ func validateCandidateReview(
 	if !review.Completed && len(review.Acceptance) != 0 {
 		return errors.New("incomplete candidate review cannot contain acceptance proof")
 	}
+	seenFindings := make(map[string]bool, len(review.Findings))
 	for _, finding := range review.Findings {
-		if finding.Axis != review.Axis || strings.TrimSpace(finding.ID) == "" {
+		if finding.Axis != review.Axis || strings.TrimSpace(finding.ID) == "" || seenFindings[finding.ID] {
 			return errors.New("candidate review contains an invalid finding")
 		}
+		seenFindings[finding.ID] = true
 	}
 	if review.Axis != deliveryevidence.ReviewSpec && len(review.Acceptance) != 0 {
 		return errors.New("only the Spec review may author semantic acceptance proof")
@@ -790,15 +905,16 @@ func validateReviewBatch(candidate Candidate, reviews []CandidateReview) error {
 	seen := make(map[string]bool)
 	for _, review := range candidate.Reviews {
 		for _, finding := range review.Findings {
-			seen[finding.ID] = true
+			seen[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range reviews {
 		for _, finding := range review.Findings {
-			if seen[finding.ID] {
+			key := packetFindingKey(review.PacketID, finding.ID)
+			if seen[key] {
 				return fmt.Errorf("duplicate candidate review finding ID %q", finding.ID)
 			}
-			seen[finding.ID] = true
+			seen[key] = true
 		}
 	}
 	return nil

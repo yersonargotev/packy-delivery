@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -971,6 +972,113 @@ func TestAdvanceCommandAdmitsOnlyTypedSemanticContent(t *testing.T) {
 	}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "exactly one JSON value") {
 		t.Fatalf("multiple semantic JSON values accepted: %v", err)
+	}
+}
+
+func TestAdvanceCommandMergesRepeatedReviewContentDeterministically(t *testing.T) {
+	root := t.TempDir()
+	repository := t.TempDir()
+	write := func(name string, content advanceReviewContent) string {
+		t.Helper()
+		path := filepath.Join(root, name+".json")
+		raw, err := json.Marshal(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	standards := issuedelivery.CandidateReview{
+		CandidateID: "candidate-1", Axis: deliveryevidence.ReviewStandards, Completed: true,
+	}
+	spec := issuedelivery.CandidateReview{
+		CandidateID: "candidate-1", Axis: deliveryevidence.ReviewSpec, Completed: true,
+	}
+	qualification := issuedelivery.QualificationReview{
+		AuthoritySHA256: strings.Repeat("a", 64), AcceptanceMatrixSHA256: strings.Repeat("b", 64),
+		Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+	}
+	first := write("first", advanceReviewContent{
+		Reviews: []issuedelivery.CandidateReview{standards}, QualificationReview: &qualification,
+	})
+	second := write("second", advanceReviewContent{
+		Reviews: []issuedelivery.CandidateReview{spec}, QualificationReview: &qualification,
+	})
+	fake := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{{
+		RunID: "run-1", State: issuedelivery.StateNeedsReview, Reason: "reviews remain pending",
+	}}}
+	var configured advanceOptions
+	cmd := command{AdvanceFactory: func(options advanceOptions) (issueDeliveryAdvancer, error) {
+		configured = options
+		return fake, nil
+	}}
+	err := cmd.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361",
+		"--review-content", first, "--review-content", second, "--review-content", first,
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configured.Reviews) != 2 ||
+		configured.Reviews[0].Axis != deliveryevidence.ReviewStandards ||
+		configured.Reviews[1].Axis != deliveryevidence.ReviewSpec ||
+		configured.QualificationReview == nil ||
+		!reflect.DeepEqual(*configured.QualificationReview, qualification) {
+		t.Fatalf("merged review content = %#v", configured)
+	}
+
+	conflict := standards
+	conflict.Completed = false
+	conflictingPath := write("conflict", advanceReviewContent{
+		Reviews: []issuedelivery.CandidateReview{conflict},
+	})
+	factoryCalled := false
+	cmd.AdvanceFactory = func(advanceOptions) (issueDeliveryAdvancer, error) {
+		factoryCalled = true
+		return fake, nil
+	}
+	err = cmd.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361",
+		"--review-content", first, "--review-content", conflictingPath,
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "conflicting candidate review") {
+		t.Fatalf("conflicting repeated review content accepted: %v", err)
+	}
+	if factoryCalled {
+		t.Fatal("conflicting review content reached the Advance factory")
+	}
+}
+
+func TestConvergentAdvanceConsumesPacketResponsesOnce(t *testing.T) {
+	fake := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{
+		{
+			RunID: "run-1", State: issuedelivery.StateNeedsReview,
+			Reason:     "packet responses persisted",
+			PauseCause: issuedelivery.PauseDeterministicAdvance,
+			NextAction: issuedelivery.ActionAdvance,
+		},
+		{
+			RunID: "run-1", State: issuedelivery.StateWaiting,
+			Reason:     "remaining review response is pending",
+			PauseCause: issuedelivery.PauseIndependentReview,
+			NextAction: issuedelivery.ActionProvideCandidateReview,
+		},
+	}}
+	request := issuedelivery.Request{
+		RepositoryPath: "/repo", IssueNumber: 30,
+		CandidateReviews: []issuedelivery.CandidateReview{{
+			PacketID: strings.Repeat("a", 64), CandidateID: "candidate-1",
+			Axis: deliveryevidence.ReviewStandards,
+		}},
+	}
+	if _, err := convergeAdvance(context.Background(), fake, request, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.requests) != 2 || len(fake.requests[0].CandidateReviews) != 1 ||
+		len(fake.requests[1].CandidateReviews) != 0 {
+		t.Fatalf("convergent packet requests = %#v", fake.requests)
 	}
 }
 

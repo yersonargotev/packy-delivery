@@ -13,3 +13,13 @@ func atomicExchangeInputTemplate(left, right string) error {
 		unix.RENAME_EXCHANGE,
 	)
 }
+
+func atomicPublishReviewPacketDirectory(staging, target string) error {
+	return unix.Renameat2(
+		unix.AT_FDCWD,
+		staging,
+		unix.AT_FDCWD,
+		target,
+		unix.RENAME_NOREPLACE,
+	)
+}

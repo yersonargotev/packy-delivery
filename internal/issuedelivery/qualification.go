@@ -15,6 +15,9 @@ import (
 )
 
 type QualificationReview struct {
+	PacketID               string                           `json:"packet_id,omitempty"`
+	PacketSHA256           string                           `json:"packet_sha256,omitempty"`
+	ResponseSHA256         string                           `json:"response_sha256,omitempty"`
 	AuthoritySHA256        string                           `json:"authority_sha256"`
 	AcceptanceMatrixSHA256 string                           `json:"acceptance_matrix_sha256"`
 	Findings               []deliveryevidence.ReviewFinding `json:"findings"`
@@ -174,6 +177,20 @@ func validateQualificationReview(record runRecord, review QualificationReview) e
 	if review.AcceptanceMatrixSHA256 != digest {
 		return errors.New("qualification review does not match the current acceptance matrix")
 	}
+	if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
+		return fmt.Errorf("qualification review source: %w", err)
+	}
+	if review.PacketID != "" {
+		packets, packetErr := reviewPacketsFromRecord(
+			record, GitObservation{}, ReviewPacketRequest{Kind: ReviewPacketQualification},
+		)
+		if packetErr != nil || len(packets) != 1 || review.PacketID != packets[0].PacketID {
+			return errors.New("qualification review does not match its exact current packet")
+		}
+		if review.PacketSHA256 != packets[0].SHA256 {
+			return errors.New("qualification review does not match its exact current packet SHA-256")
+		}
+	}
 	links := make(map[string]string, len(record.Evidence.Scope.OwnedNow))
 	for _, entry := range record.Evidence.Scope.OwnedNow {
 		links[entry.Identity] = entry.EvidenceLink
@@ -228,6 +245,9 @@ func validateQualificationHistory(record runRecord) error {
 			!runIDPattern.MatchString(review.AcceptanceMatrixSHA256) ||
 			review.Findings == nil || !review.Completed {
 			return errors.New("qualification history contains an invalid review")
+		}
+		if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
+			return fmt.Errorf("qualification history contains an invalid review source: %w", err)
 		}
 		seen := make(map[string]bool, len(review.Findings))
 		for _, finding := range review.Findings {

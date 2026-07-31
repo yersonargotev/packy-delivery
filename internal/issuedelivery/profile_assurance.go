@@ -149,37 +149,57 @@ func (m *Module) executeSpecialistReviews(
 		if err != nil {
 			return nil, fmt.Errorf("execute %s specialist review: %w", boundary, err)
 		}
-		if err := validateSpecialistReview(review, candidate, boundary); err != nil {
+		if err := validateSpecialistReview(
+			review, candidate, boundary,
+			expectedSpecialistPacketID(record, candidate, boundary),
+			specialistPacketSHA256(record, candidate, boundary),
+		); err != nil {
 			return nil, err
 		}
+		review = qualifySpecialistReviewFindings(review)
 		reviews = append(reviews, review)
 	}
 	seen := map[string]bool{}
 	for _, review := range candidate.Reviews {
 		for _, finding := range review.Findings {
-			seen[finding.ID] = true
+			seen[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range candidate.SpecialistReviews {
 		for _, finding := range review.Findings {
-			seen[finding.ID] = true
+			seen[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range reviews {
 		for _, finding := range review.Findings {
-			if seen[finding.ID] {
+			key := packetFindingKey(review.PacketID, finding.ID)
+			if seen[key] {
 				return nil, fmt.Errorf("duplicate candidate finding ID %q", finding.ID)
 			}
-			seen[finding.ID] = true
+			seen[key] = true
 		}
 	}
 	return reviews, nil
 }
 
-func validateSpecialistReview(review SpecialistReview, candidate Candidate, boundary SensitiveBoundary) error {
+func validateSpecialistReview(
+	review SpecialistReview,
+	candidate Candidate,
+	boundary SensitiveBoundary,
+	expectedPacketID ...string,
+) error {
 	if review.CandidateID != candidate.ID || review.Boundary != boundary ||
 		review.Specialist != specialistForBoundary(boundary) || review.Findings == nil {
 		return errors.New("specialist review does not match its exact boundary request")
+	}
+	if review.PacketID != "" && (len(expectedPacketID) < 1 || review.PacketID != expectedPacketID[0]) {
+		return errors.New("specialist review does not match its exact current packet")
+	}
+	if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
+		return fmt.Errorf("specialist review source: %w", err)
+	}
+	if review.PacketID != "" && (len(expectedPacketID) != 2 || review.PacketSHA256 != expectedPacketID[1]) {
+		return errors.New("specialist review does not match its exact current packet SHA-256")
 	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete specialist review cannot contain findings")
@@ -195,6 +215,66 @@ func validateSpecialistReview(review SpecialistReview, candidate Candidate, boun
 		seen[finding.ID] = true
 	}
 	return nil
+}
+
+func reconcileSpecialistPacketResponses(record *runRecord, candidate *Candidate, supplied []SpecialistReview) (bool, error) {
+	seenBoundaries := map[SensitiveBoundary]bool{}
+	seenFindings := map[string]bool{}
+	for _, review := range candidate.Reviews {
+		for _, finding := range review.Findings {
+			seenFindings[packetFindingKey(review.PacketID, finding.ID)] = true
+		}
+	}
+	for _, review := range candidate.SpecialistReviews {
+		for _, finding := range review.Findings {
+			seenFindings[packetFindingKey(review.PacketID, finding.ID)] = true
+		}
+	}
+	var additions []SpecialistReview
+	for _, review := range supplied {
+		if seenBoundaries[review.Boundary] {
+			return false, fmt.Errorf("duplicate specialist packet response for boundary %q", review.Boundary)
+		}
+		seenBoundaries[review.Boundary] = true
+		expected := specialistPacketID(*record, *candidate, review.Boundary)
+		expectedSHA := specialistPacketSHA256(*record, *candidate, review.Boundary)
+		if err := validateSpecialistReview(review, *candidate, review.Boundary, expected, expectedSHA); err != nil {
+			return false, err
+		}
+		if !containsBoundary(candidate.RequiredSpecialists, review.Boundary) {
+			return false, errors.New("specialist packet response is not required for the exact candidate")
+		}
+		if !review.Completed {
+			continue
+		}
+		review = qualifySpecialistReviewFindings(review)
+		matched := false
+		for _, persisted := range candidate.SpecialistReviews {
+			if persisted.Boundary != review.Boundary {
+				continue
+			}
+			matched = true
+			if !reflect.DeepEqual(persisted, review) {
+				return false, errors.New("specialist packet response conflicts with the already persisted response")
+			}
+		}
+		if matched {
+			continue
+		}
+		for _, finding := range review.Findings {
+			key := packetFindingKey(review.PacketID, finding.ID)
+			if seenFindings[key] {
+				return false, fmt.Errorf("duplicate candidate finding ID %q", finding.ID)
+			}
+			seenFindings[key] = true
+		}
+		additions = append(additions, review)
+	}
+	candidate.SpecialistReviews = append(candidate.SpecialistReviews, additions...)
+	sort.Slice(candidate.SpecialistReviews, func(i, j int) bool {
+		return candidate.SpecialistReviews[i].Boundary < candidate.SpecialistReviews[j].Boundary
+	})
+	return len(additions) != 0, nil
 }
 
 func missingSpecialistBoundaries(candidate *Candidate) []SensitiveBoundary {
