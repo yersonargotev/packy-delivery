@@ -37,14 +37,16 @@ func TestCommandRejectionClassificationUsesExitAndHTTPStatus(t *testing.T) {
 	tests := []struct {
 		name      string
 		command   string
+		args      []string
 		script    string
 		transient bool
 	}{
-		{"git rejection", "git", "exit 1", false},
-		{"gh no response", "gh", "exit 1", true},
-		{"gh not found", "gh", "echo 'gh: Not Found (HTTP 404)' >&2; exit 1", false},
-		{"gh service unavailable", "gh", "echo 'gh: unavailable (HTTP 503)' >&2; exit 1", true},
-		{"gh authentication required", "gh", "exit 4", false},
+		{"git local rejection", "git", []string{"rev-parse", "origin/main"}, "exit 1", false},
+		{"git remote read", "git", []string{"ls-remote", "origin"}, "exit 1", true},
+		{"gh no response", "gh", nil, "exit 1", true},
+		{"gh not found", "gh", nil, "echo 'gh: Not Found (HTTP 404)' >&2; exit 1", false},
+		{"gh service unavailable", "gh", nil, "echo 'gh: unavailable (HTTP 503)' >&2; exit 1", true},
+		{"gh authentication required", "gh", nil, "exit 4", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -54,7 +56,7 @@ func TestCommandRejectionClassificationUsesExitAndHTTPStatus(t *testing.T) {
 			if !errors.As(err, &exitError) {
 				t.Fatalf("error=%T %v", err, err)
 			}
-			if got := commandRejectionIsTransient(test.command, exitError); got != test.transient {
+			if got := commandRejectionIsTransient(test.command, test.args, exitError); got != test.transient {
 				t.Fatalf("transient=%t want %t stderr=%q", got, test.transient, exitError.Stderr)
 			}
 		})

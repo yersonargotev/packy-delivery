@@ -45,13 +45,21 @@ func (execRunner) Output(ctx context.Context, name string, args ...string) ([]by
 	if errors.As(err, &exitError) {
 		return output, &commandRejectedError{
 			err:       err,
-			transient: commandRejectionIsTransient(name, exitError),
+			transient: commandRejectionIsTransient(name, args, exitError),
 		}
 	}
 	return output, err
 }
 
-func commandRejectionIsTransient(name string, err *exec.ExitError) bool {
+func commandRejectionIsTransient(name string, args []string, err *exec.ExitError) bool {
+	if name == "git" {
+		for _, arg := range args {
+			if arg == "ls-remote" {
+				return true
+			}
+		}
+		return false
+	}
 	if name != "gh" || err.ExitCode() == 4 {
 		return false
 	}
