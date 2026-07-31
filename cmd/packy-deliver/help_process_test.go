@@ -6,7 +6,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestHelpCommandsAsProcess(t *testing.T) {
@@ -22,7 +26,7 @@ func TestHelpCommandsAsProcess(t *testing.T) {
 			if exitCode != 0 {
 				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
 			}
-			for _, command := range []string{"advance", "status", "version", "legacy-v1"} {
+			for _, command := range []string{"advance", "status", "watch", "version", "legacy-v1"} {
 				if !strings.Contains(stdout, command) {
 					t.Errorf("stdout does not list %q:\n%s", command, stdout)
 				}
@@ -32,6 +36,94 @@ func TestHelpCommandsAsProcess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWatchHelpCommandsAsProcess(t *testing.T) {
+	binary := buildPackyDeliverForHelpTest(t)
+
+	for _, args := range [][]string{
+		{"watch", "--help"},
+		{"watch", "-h"},
+		{"watch", "--issue", "361", "--help"},
+		{"help", "watch"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			stdout, stderr, exitCode := runPackyDeliverForHelpTest(t, binary, args...)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
+			}
+			for _, value := range []string{
+				"--repository", "--issue", "--interval", "--timeout", "--output",
+				"100ms", "24h", "code 2",
+			} {
+				if !strings.Contains(stdout, value) {
+					t.Errorf("stdout does not contain %q:\n%s", value, stdout)
+				}
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q", stderr)
+			}
+		})
+	}
+}
+
+func TestWatchTimeoutAndInterruptionAsProcess(t *testing.T) {
+	binary := buildPackyDeliverForHelpTest(t)
+
+	t.Run("timeout has distinct exit", func(t *testing.T) {
+		repository, unlock := prepareLockContendedWatchRepository(t)
+		defer unlock()
+		stdout, stderr, exitCode := runPackyDeliverForHelpTest(
+			t,
+			binary,
+			"watch",
+			"--repository", repository,
+			"--issue", "29",
+			"--interval", "100ms",
+			"--timeout", "1s",
+			"--output", "jsonl",
+		)
+		if exitCode != 2 || !strings.Contains(stderr, "watch timed out after 1s") {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+		}
+		if strings.Count(strings.TrimSpace(stdout), "\n") != 0 ||
+			!strings.Contains(stdout, `"pause_cause":"lock-contention"`) {
+			t.Fatalf("timeout output=%q", stdout)
+		}
+	})
+
+	t.Run("interrupt uses signal exit", func(t *testing.T) {
+		repository, unlock := prepareLockContendedWatchRepository(t)
+		defer unlock()
+		command := exec.Command(
+			binary,
+			"watch",
+			"--repository", repository,
+			"--issue", "29",
+			"--interval", "100ms",
+			"--timeout", "10s",
+			"--output", "jsonl",
+		)
+		command.Env = helpTestEnvironment(t)
+		var stdout, stderr bytes.Buffer
+		command.Stdout, command.Stderr = &stdout, &stderr
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(250 * time.Millisecond)
+		if err := command.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+		err := command.Wait()
+		exitError, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("interrupt error=%T %v stdout=%q stderr=%q", err, err, stdout.String(), stderr.String())
+		}
+		status, ok := exitError.Sys().(syscall.WaitStatus)
+		if !ok || !status.Signaled() || status.Signal() != syscall.SIGINT {
+			t.Fatalf("wait status=%v stdout=%q stderr=%q", status, stdout.String(), stderr.String())
+		}
+	})
 }
 
 func TestAdvanceHelpCommandsAsProcess(t *testing.T) {
@@ -228,4 +320,53 @@ func helpTestEnvironment(t *testing.T) []string {
 		"HOME":            home,
 		"XDG_CONFIG_HOME": config,
 	})
+}
+
+func prepareLockContendedWatchRepository(t *testing.T) (string, func()) {
+	t.Helper()
+	repository := t.TempDir()
+	environment := helpTestEnvironment(t)
+	runGit := func(args ...string) {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		command.Env = environment
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("watch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README.md")
+	runGit("-c", "user.name=Packy Test", "-c", "user.email=packy@example.test", "commit", "-m", "fixture")
+	runGit("remote", "add", "origin", "git@github.com:yersonargotev/packy.git")
+	runGit("update-ref", "refs/remotes/origin/main", "HEAD")
+
+	issueDirectory := filepath.Join(
+		repository,
+		".git",
+		"packy",
+		"issue-delivery",
+		"issue-29",
+	)
+	if err := os.MkdirAll(issueDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(
+		filepath.Join(issueDirectory, "advance.lock"),
+		os.O_CREATE|os.O_RDWR,
+		0o600,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		lock.Close()
+		t.Fatal(err)
+	}
+	return repository, func() {
+		_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+		_ = lock.Close()
+	}
 }

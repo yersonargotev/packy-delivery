@@ -212,7 +212,7 @@ func TestStatusCommandObservesExactlyOnceAndMatchesCompactAdvance(t *testing.T) 
 	advancer := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{outcome}}
 	cmd := command{
 		Now: func() time.Time { return now },
-		StatusFactory: func() (issueDeliveryStatuser, error) {
+		StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
 			return statuser, nil
 		},
 		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
@@ -263,7 +263,7 @@ func TestStatusCommandTextUsesCompactProjectionForEveryRunState(t *testing.T) {
 	for _, outcome := range tests {
 		t.Run(string(outcome.State)+"-"+outcome.RunID, func(t *testing.T) {
 			fake := &fakeIssueDeliveryStatuser{outcome: outcome}
-			cmd := command{StatusFactory: func() (issueDeliveryStatuser, error) {
+			cmd := command{StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
 				return fake, nil
 			}}
 			var output bytes.Buffer
@@ -288,7 +288,7 @@ func TestStatusCommandTextUsesCompactProjectionForEveryRunState(t *testing.T) {
 func TestStatusCommandRejectsInvalidInputAndObservationFailure(t *testing.T) {
 	repository := t.TempDir()
 	fake := &fakeIssueDeliveryStatuser{err: errors.New("corrupt persisted run")}
-	cmd := command{StatusFactory: func() (issueDeliveryStatuser, error) {
+	cmd := command{StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
 		return fake, nil
 	}}
 	for _, args := range [][]string{
@@ -377,7 +377,7 @@ func TestStatusCommandHighestSeamUsesGitCommonDirectoryAndReadOnlyModule(t *test
 	git.calls, tracker.calls = 0, 0
 	*effects = statusEffectCounters{}
 	before := statusSnapshotRegularFiles(t, common)
-	cmd := command{StatusFactory: func() (issueDeliveryStatuser, error) {
+	cmd := command{StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
 		return module, nil
 	}}
 	var output bytes.Buffer

@@ -23,7 +23,34 @@ type issueDeliveryStatuser interface {
 	Status(context.Context, issuedelivery.StatusRequest) (issuedelivery.Outcome, error)
 }
 
-type statusFactory func() (issueDeliveryStatuser, error)
+type statusFactory func(statusOptions) (issueDeliveryStatuser, error)
+
+type productionStatusNonLocalObserver struct {
+	gateway productionNonLocalGateway
+}
+
+func (observer productionStatusNonLocalObserver) ObserveNonLocal(
+	ctx context.Context,
+	request issuedelivery.NonLocalObserveRequest,
+) (issuedelivery.NonLocalObservation, error) {
+	observation, err := observer.gateway.observeNonLocal(ctx, request, false)
+	if err != nil {
+		var commandError *remoteObservationCommandError
+		if errors.As(err, &commandError) {
+			return issuedelivery.NonLocalObservation{}, issuedelivery.NewStatusError(
+				issuedelivery.StatusErrorExternalRead,
+				true,
+				err,
+			)
+		}
+		return issuedelivery.NonLocalObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorIdentity,
+			false,
+			err,
+		)
+	}
+	return observation, nil
+}
 
 func (c command) status(ctx context.Context, args []string, stdout io.Writer) error {
 	f := flag.NewFlagSet("packy-deliver status", flag.ContinueOnError)
@@ -53,7 +80,7 @@ func (c command) status(ctx context.Context, args []string, stdout io.Writer) er
 	if c.StatusFactory == nil {
 		return errors.New("Status adapter is unavailable")
 	}
-	observer, err := c.StatusFactory()
+	observer, err := c.StatusFactory(options)
 	if err != nil {
 		return fmt.Errorf("configure Status: %w", err)
 	}
@@ -92,10 +119,15 @@ func containsStatusHelpFlag(args []string) bool {
 	})
 }
 
-func newProductionStatuser() (issueDeliveryStatuser, error) {
+func newProductionStatuser(options statusOptions) (issueDeliveryStatuser, error) {
 	runner := execRunner{}
 	return issuedelivery.New(issuedelivery.Config{
 		Git:    productionGitObserver{runner: runner},
 		GitHub: productionTrackerObserver{runner: runner},
+		NonLocalObserver: productionStatusNonLocalObserver{
+			gateway: productionNonLocalGateway{
+				runner: runner, repository: options.RepositoryPath,
+			},
+		},
 	})
 }

@@ -229,6 +229,7 @@ type Outcome struct {
 	NonLocal                 *NonLocalDelivery
 	Timing                   []Timing
 	EffectiveProfile         deliveryevidence.DeliveryRiskProfile
+	StatusObservation        *StatusObservation
 }
 
 type AuthorityItem struct {

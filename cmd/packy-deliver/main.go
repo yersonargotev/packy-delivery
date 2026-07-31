@@ -72,6 +72,7 @@ type command struct {
 	GitHub               Runner
 	Validation           ValidationRunner
 	Now                  func() time.Time
+	Wait                 func(context.Context, time.Duration) error
 	AdvanceFactory       advanceFactory
 	StatusFactory        statusFactory
 	InputTemplateFactory inputTemplateFactory
@@ -128,13 +129,13 @@ func main() {
 		LegacyPrefixRequired: true,
 	}).run(context.Background(), os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }
 
 func (c command) run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("command is required: advance, input-template, status, version, or a legacy v1 command")
+		return errors.New("command is required: advance, input-template, status, watch, version, or a legacy v1 command")
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -150,6 +151,9 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			case "status":
 				_, err := io.WriteString(stdout, statusUsage)
 				return err
+			case "watch":
+				_, err := io.WriteString(stdout, watchUsage)
+				return err
 			case "input-template":
 				_, err := io.WriteString(stdout, inputTemplateUsage)
 				return err
@@ -158,7 +162,7 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 				return err
 			}
 		}
-		return errors.New("help accepts only the optional commands advance, input-template, status, or legacy-v1")
+		return errors.New("help accepts only the optional commands advance, input-template, status, watch, or legacy-v1")
 	case "advance":
 		if containsAdvanceHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
@@ -180,6 +184,12 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			return err
 		}
 		return c.status(ctx, args[1:], stdout)
+	case "watch":
+		if containsWatchHelpFlag(args[1:]) {
+			_, err := io.WriteString(stdout, watchUsage)
+			return err
+		}
+		return c.watch(ctx, args[1:], stdout)
 	case "input-template":
 		if containsInputTemplateHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, inputTemplateUsage)
@@ -246,10 +256,11 @@ Commands:
   advance        Advance resumable issue delivery
   input-template Materialize a draft for the exact pending semantic input
   status         Observe one schema-v2 delivery run
+  watch          Wait for an actionable external or lock result
   version        Print the build version
   legacy-v1      Run a historical v1 command
 
-Run "packy-deliver help <command>" for advance, input-template, status, or legacy-v1 options.
+Run "packy-deliver help <command>" for advance, input-template, status, watch, or legacy-v1 options.
 `
 
 const statusUsage = `Usage: packy-deliver status [options]
@@ -261,6 +272,20 @@ Options:
 
 Status performs one observation-only schema-v2 query. It does not advance the
 run, execute validation or review, consume semantic input, or write delivery state.
+`
+
+const watchUsage = `Usage: packy-deliver watch [options]
+
+Options:
+  --repository PATH          Absolute repository containing the delivery run (required)
+  --issue NUMBER             Packy issue number (required)
+  --interval DURATION        Poll interval from 100ms through 5m (required)
+  --timeout DURATION         Overall timeout from 1s through 24h (required)
+  --output FORMAT            Event format: text or jsonl (default "text")
+
+Watch emits one initial event and then only semantic changes. It polls only
+external-result and lock-contention pauses, performs observation-only reads,
+and never invokes Advance or persists delivery state. Timeout exits with code 2.
 `
 
 const inputTemplateUsage = `Usage: packy-deliver input-template [options]
@@ -1370,4 +1395,29 @@ func (c command) now() time.Time {
 		return c.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (c command) wait(ctx context.Context, duration time.Duration) error {
+	if c.Wait != nil {
+		return c.Wait(ctx, duration)
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func commandExitCode(err error) int {
+	type exitCoder interface {
+		ExitCode() int
+	}
+	var coded exitCoder
+	if errors.As(err, &coded) {
+		return coded.ExitCode()
+	}
+	return 1
 }

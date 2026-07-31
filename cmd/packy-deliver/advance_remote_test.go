@@ -100,6 +100,91 @@ func TestProductionNonLocalObservationRefreshesAndBindsOriginMain(t *testing.T) 
 	}
 }
 
+func TestProductionStatusNonLocalObservationUsesOnlyReadCommands(t *testing.T) {
+	head, main := strings.Repeat("b", 40), strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
+		[]byte(head + "\trefs/heads/chore/issue-361-remote-adapter\n" +
+			main + "\trefs/heads/main\n"),
+		[]byte(`[]`),
+	}}
+	observer := productionStatusNonLocalObserver{
+		gateway: productionNonLocalGateway{runner: runner, repository: "/packy"},
+	}
+	observation, err := observer.ObserveNonLocal(
+		context.Background(),
+		issuedelivery.NonLocalObserveRequest{
+			Repository: packyRemoteRepository(),
+			Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+			Branch:     "chore/issue-361-remote-adapter", BaseRef: "main", HeadSHA: head,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Branch == nil || observation.Branch.HeadSHA != head ||
+		observation.PullRequests == nil || observation.Checks == nil {
+		t.Fatalf("observation=%#v", observation)
+	}
+	for _, call := range runner.calls {
+		command := call.name + " " + strings.Join(call.args, " ")
+		for _, forbidden := range []string{
+			"git fetch", "git push", "gh pr create", "gh pr merge", "gh run rerun",
+		} {
+			if strings.Contains(command, forbidden) {
+				t.Fatalf("status observation used mutation command %q", command)
+			}
+		}
+	}
+}
+
+func TestProductionStatusNonLocalObservationClassifiesCommandFailureAsTransient(t *testing.T) {
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil},
+		errs:    []error{errors.New("temporary transport failure")},
+	}
+	observer := productionStatusNonLocalObserver{
+		gateway: productionNonLocalGateway{runner: runner},
+	}
+	_, err := observer.ObserveNonLocal(
+		context.Background(),
+		issuedelivery.NonLocalObserveRequest{
+			Repository: packyRemoteRepository(),
+			Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+			Branch:     "chore/issue-361-remote-adapter",
+			BaseRef:    "main",
+			HeadSHA:    strings.Repeat("b", 40),
+		},
+	)
+	class, transient, ok := issuedelivery.StatusErrorDetails(err)
+	if !ok || class != issuedelivery.StatusErrorExternalRead || !transient {
+		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+	}
+}
+
+func TestProductionStatusNonLocalObservationClassifiesInvalidIdentityAsPermanent(t *testing.T) {
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{[]byte(`{"id":"unexpected","nameWithOwner":"another/repository"}`)},
+	}
+	observer := productionStatusNonLocalObserver{
+		gateway: productionNonLocalGateway{runner: runner},
+	}
+	_, err := observer.ObserveNonLocal(
+		context.Background(),
+		issuedelivery.NonLocalObserveRequest{
+			Repository: packyRemoteRepository(),
+			Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+			Branch:     "chore/issue-361-remote-adapter",
+			BaseRef:    "main",
+			HeadSHA:    strings.Repeat("b", 40),
+		},
+	)
+	class, transient, ok := issuedelivery.StatusErrorDetails(err)
+	if !ok || class != issuedelivery.StatusErrorIdentity || transient {
+		t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+	}
+}
+
 func TestProductionNonLocalChecksProjectGitHubResponsesBeforeStrictDecode(t *testing.T) {
 	head, base := strings.Repeat("b", 40), strings.Repeat("a", 40)
 	runner := &fakeRemoteRunner{outputs: [][]byte{
