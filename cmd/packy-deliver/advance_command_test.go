@@ -200,6 +200,8 @@ func TestAdvanceCommandCallsDeepModuleAndSynthesizesOnlyExactRemoteAuthorization
 		{
 			RunID: "run-1", State: issuedelivery.StateWaiting, Reason: "local ready",
 			Candidate: candidate, LocalReadiness: readiness,
+			PauseCause: issuedelivery.PauseNonLocalAuthorization,
+			NextAction: issuedelivery.ActionAuthorizeNonLocal,
 		},
 		{
 			RunID: "run-1", State: issuedelivery.StateWaiting,
