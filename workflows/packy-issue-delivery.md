@@ -153,8 +153,12 @@ non-local authorization are consumed once and are not replayed on later
 iterations. Convergence stops before semantic input, independent review,
 external result, non-local authorization (unless explicitly authorized),
 candidate repair, lock contention, legacy-v1 handling, invariant block, or
-completion. A repeated outcome signature or 32 deterministic transitions fails
-closed as an `advance-convergence` invariant block with
+completion. The repeated-outcome signature includes the latest persisted timing
+sequence, phase, and completion receipt, so identical cleanup reasons with new
+persisted progress continue while a no-progress loop stops. Authorization
+handoff is outside the deterministic-transition budget. A repeated outcome
+signature or the 32nd deterministic result fails closed as an
+`advance-convergence` invariant block with
 `inspect-blocked-transition`; it does not rewrite the persisted run.
 
 The caller supplies only genuine judgment: ambiguous scope classification,

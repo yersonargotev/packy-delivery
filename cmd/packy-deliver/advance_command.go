@@ -240,7 +240,8 @@ func convergeAdvance(
 	authorizationAvailable := authorizeRemote
 	seen := map[string]bool{}
 	var last issuedelivery.Outcome
-	for transition := 0; transition < maxConvergentAdvanceTransitions; transition++ {
+	deterministicTransitions := 0
+	for {
 		outcome, err := advancer.Advance(ctx, request)
 		if err != nil {
 			return issuedelivery.Outcome{}, err
@@ -266,11 +267,14 @@ func convergeAdvance(
 			return convergenceBlockedOutcome(outcome, "deterministic Advance repeated the same state signature"), nil
 		}
 		seen[signature] = true
+		deterministicTransitions++
+		if deterministicTransitions >= maxConvergentAdvanceTransitions {
+			return convergenceBlockedOutcome(
+				last,
+				fmt.Sprintf("deterministic Advance reached its %d-transition limit", maxConvergentAdvanceTransitions),
+			), nil
+		}
 	}
-	return convergenceBlockedOutcome(
-		last,
-		fmt.Sprintf("deterministic Advance exceeded %d transitions", maxConvergentAdvanceTransitions),
-	), nil
 }
 
 func advanceOutcomeSignature(outcome issuedelivery.Outcome) string {
@@ -293,9 +297,16 @@ func advanceOutcomeSignature(outcome issuedelivery.Outcome) string {
 			remoteStage = "authorized"
 		}
 	}
+	persistedProgress := ""
+	if len(outcome.Timing) > 0 {
+		latest := outcome.Timing[len(outcome.Timing)-1]
+		persistedProgress = fmt.Sprintf(
+			"%d:%s:%s", latest.Sequence, latest.Phase, latest.CompletedAt,
+		)
+	}
 	return strings.Join([]string{
 		outcome.RunID, string(outcome.State), outcome.Reason, string(outcome.PauseCause),
-		string(outcome.NextAction), candidateID, remoteStage,
+		string(outcome.NextAction), candidateID, remoteStage, persistedProgress,
 	}, "\x00")
 }
 

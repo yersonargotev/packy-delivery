@@ -172,6 +172,43 @@ func TestAdvanceCommandConvergenceGuardsFailClosed(t *testing.T) {
 			t.Fatalf("cap calls=%d", len(fake.requests))
 		}
 	})
+	t.Run("authorization does not consume transition budget", func(t *testing.T) {
+		candidate := &issuedelivery.Candidate{
+			ID: "candidate", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
+		}
+		readiness := &issuedelivery.LocalReadiness{
+			CandidateID: candidate.ID, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+			Branch: "feat/issue-8", ReadyAt: "2026-07-30T12:00:00.000000000Z",
+		}
+		outcomes := []issuedelivery.Outcome{{
+			RunID: "run", State: issuedelivery.StateWaiting, Candidate: candidate,
+			LocalReadiness: readiness, PauseCause: issuedelivery.PauseNonLocalAuthorization,
+			NextAction: issuedelivery.ActionAuthorizeNonLocal,
+		}}
+		for index := 0; index < maxConvergentAdvanceTransitions; index++ {
+			outcomes = append(outcomes, issuedelivery.Outcome{
+				RunID: "run", State: issuedelivery.StateNeedsReview,
+				Reason:     fmt.Sprintf("transition-%d", index),
+				PauseCause: issuedelivery.PauseDeterministicAdvance,
+				NextAction: issuedelivery.ActionAdvance,
+			})
+		}
+		fake := &fakeIssueDeliveryAdvancer{outcomes: outcomes}
+		got, err := convergeAdvance(context.Background(), fake, issuedelivery.Request{}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertConvergenceBlock(t, got)
+		if len(fake.requests) != maxConvergentAdvanceTransitions+1 ||
+			fake.requests[1].NonLocal == nil {
+			t.Fatalf("authorization consumed deterministic budget: calls=%#v", fake.requests)
+		}
+		for index := 2; index < len(fake.requests); index++ {
+			if fake.requests[index].NonLocal != nil {
+				t.Fatalf("authorization was reused at call %d", index+1)
+			}
+		}
+	})
 }
 
 func TestAdvanceCommandRendersTypedConvergenceBlock(t *testing.T) {

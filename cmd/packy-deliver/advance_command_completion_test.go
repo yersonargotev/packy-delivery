@@ -11,7 +11,8 @@ import (
 )
 
 type commandCompletionLocal struct {
-	observation issuedelivery.LocalCompletionObservation
+	observation      issuedelivery.LocalCompletionObservation
+	removedWorktrees []string
 }
 
 func (l *commandCompletionLocal) ObserveLocalCompletion(
@@ -21,10 +22,18 @@ func (l *commandCompletionLocal) ObserveLocalCompletion(
 	return l.observation, nil
 }
 
-func (*commandCompletionLocal) EnsureManagedWorktreeAbsent(
-	context.Context,
-	issuedelivery.RemoveManagedWorktreeRequest,
+func (l *commandCompletionLocal) EnsureManagedWorktreeAbsent(
+	_ context.Context,
+	request issuedelivery.RemoveManagedWorktreeRequest,
 ) error {
+	l.removedWorktrees = append(l.removedWorktrees, request.Path)
+	remaining := l.observation.Worktrees[:0]
+	for _, worktree := range l.observation.Worktrees {
+		if worktree.Path != request.Path {
+			remaining = append(remaining, worktree)
+		}
+	}
+	l.observation.Worktrees = remaining
 	return nil
 }
 
@@ -224,6 +233,18 @@ func TestAdvanceCommandRealModuleReportsCompletion(t *testing.T) {
 	if merged.NonLocal == nil || merged.NonLocal.Merge == nil {
 		t.Fatalf("fixture did not reach an adopted merge: %#v", merged)
 	}
+	local.observation.Worktrees = []issuedelivery.ManagedWorktreeObservation{
+		{
+			Path: t.TempDir(), Branch: ready.LocalReadiness.Branch,
+			HeadSHA: ready.Candidate.CommitSHA, RunID: ready.RunID,
+			CandidateID: ready.Candidate.ID, Clean: true,
+		},
+		{
+			Path: t.TempDir(), Branch: ready.LocalReadiness.Branch,
+			HeadSHA: ready.Candidate.CommitSHA, RunID: ready.RunID,
+			CandidateID: ready.Candidate.ID, Clean: true,
+		},
+	}
 	cmd := command{
 		Now: func() time.Time { return time.Date(2026, 7, 30, 11, 0, 0, 0, time.UTC) },
 		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
@@ -236,10 +257,17 @@ func TestAdvanceCommandRealModuleReportsCompletion(t *testing.T) {
 		report.NextAction != issuedelivery.ActionNone {
 		t.Fatalf("real Module completion report = %#v", report)
 	}
+	if len(local.removedWorktrees) != 2 ||
+		local.removedWorktrees[0] == local.removedWorktrees[1] {
+		t.Fatalf("managed worktree effects=%#v", local.removedWorktrees)
+	}
 	resumed := runAdvanceCommandReport(t, cmd, repository)
 	if resumed.State != issuedelivery.StateCompleted ||
 		resumed.RunID != report.RunID ||
 		resumed.NonLocal == nil || resumed.NonLocal.Merge == nil {
 		t.Fatalf("completed effects were not adopted on resume: %#v", resumed)
+	}
+	if len(local.removedWorktrees) != 2 {
+		t.Fatalf("completed resume duplicated cleanup: %#v", local.removedWorktrees)
 	}
 }
