@@ -32,6 +32,60 @@ type activeRun struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+func (fileRunStore) observeIssue(
+	ctx context.Context,
+	commonDir string,
+	issue int,
+	fn func(lockedIssueStore) error,
+) error {
+	if ctx == nil {
+		return errors.New("issue delivery observation requires a context")
+	}
+	if fn == nil {
+		return errors.New("issue delivery observation requires an operation")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	issueFD, err := openIssueDirectory(commonDir, issue, false)
+	if errors.Is(err, unix.ENOENT) {
+		return errors.New("issue delivery run does not exist")
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(issueFD)
+
+	lockFD, err := unix.Openat(
+		issueFD, "advance.lock",
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if errors.Is(err, unix.ENOENT) {
+		return errors.New("issue delivery run lock does not exist")
+	}
+	if err != nil {
+		return fmt.Errorf("open issue delivery lock for observation: %w", err)
+	}
+	defer unix.Close(lockFD)
+	if err := requireRegularFD(lockFD, "advance.lock"); err != nil {
+		return err
+	}
+	if err := unix.Flock(lockFD, unix.LOCK_SH|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return errIssueRunActive
+		}
+		return fmt.Errorf("lock issue delivery run for observation: %w", err)
+	}
+	defer unix.Flock(lockFD, unix.LOCK_UN)
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fn(lockedIssueStore{directory: issueFD})
+}
+
 func (fileRunStore) withIssueLock(
 	ctx context.Context,
 	commonDir string,

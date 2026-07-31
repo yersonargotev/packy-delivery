@@ -66,6 +66,55 @@ func TestAdvanceHelpCommandsAsProcess(t *testing.T) {
 	}
 }
 
+func TestStatusHelpCommandsAsProcess(t *testing.T) {
+	binary := buildPackyDeliverForHelpTest(t)
+
+	for _, args := range [][]string{
+		{"status", "--help"},
+		{"status", "-h"},
+		{"status", "--issue", "361", "--help"},
+		{"help", "status"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			stdout, stderr, exitCode := runPackyDeliverForHelpTest(t, binary, args...)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
+			}
+			for _, option := range []string{"--repository", "--issue", "--output", "observation-only"} {
+				if !strings.Contains(stdout, option) {
+					t.Errorf("stdout does not contain %q:\n%s", option, stdout)
+				}
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q", stderr)
+			}
+		})
+	}
+}
+
+func TestLegacyStatusHelpCommandsAsProcess(t *testing.T) {
+	binary := buildPackyDeliverForHelpTest(t)
+
+	for _, args := range [][]string{
+		{"legacy-v1", "status", "--help"},
+		{"legacy-v1", "status", "-h"},
+		{"help", "legacy-v1"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			stdout, stderr, exitCode := runPackyDeliverForHelpTest(t, binary, args...)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr)
+			}
+			if !strings.Contains(stdout, "status") || !strings.Contains(stdout, "--bundle") {
+				t.Errorf("stdout does not document legacy bundle status:\n%s", stdout)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q", stderr)
+			}
+		})
+	}
+}
+
 func TestUnknownAndLegacyCommandsAsProcess(t *testing.T) {
 	binary := buildPackyDeliverForHelpTest(t)
 

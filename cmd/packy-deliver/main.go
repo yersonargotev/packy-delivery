@@ -73,6 +73,7 @@ type command struct {
 	Validation           ValidationRunner
 	Now                  func() time.Time
 	AdvanceFactory       advanceFactory
+	StatusFactory        statusFactory
 	LegacyPrefixRequired bool
 }
 
@@ -121,7 +122,8 @@ type issueObservation struct {
 func main() {
 	if err := (command{
 		Git: execRunner{}, GitHub: execRunner{}, Validation: execValidationRunner{},
-		Now: time.Now, AdvanceFactory: newProductionAdvancer, LegacyPrefixRequired: true,
+		Now: time.Now, AdvanceFactory: newProductionAdvancer, StatusFactory: newProductionStatuser,
+		LegacyPrefixRequired: true,
 	}).run(context.Background(), os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -138,11 +140,20 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			_, err := io.WriteString(stdout, rootUsage)
 			return err
 		}
-		if args[0] == "help" && len(args) == 2 && args[1] == "advance" {
-			_, err := io.WriteString(stdout, advanceUsage)
-			return err
+		if args[0] == "help" && len(args) == 2 {
+			switch args[1] {
+			case "advance":
+				_, err := io.WriteString(stdout, advanceUsage)
+				return err
+			case "status":
+				_, err := io.WriteString(stdout, statusUsage)
+				return err
+			case "legacy-v1":
+				_, err := io.WriteString(stdout, legacyV1Usage)
+				return err
+			}
 		}
-		return fmt.Errorf("help accepts only the optional command %q", "advance")
+		return errors.New("help accepts only the optional commands advance, status, or legacy-v1")
 	case "advance":
 		if containsAdvanceHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
@@ -153,9 +164,17 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		if len(args) == 1 {
 			return errors.New("legacy-v1 requires one historical v1 subcommand")
 		}
+		if args[1] == "status" && containsStatusHelpFlag(args[2:]) {
+			_, err := io.WriteString(stdout, legacyStatusUsage)
+			return err
+		}
 		return c.runLegacy(ctx, args[1:], stdout)
 	case "status":
-		return c.status(args[1:], stdout)
+		if containsStatusHelpFlag(args[1:]) {
+			_, err := io.WriteString(stdout, statusUsage)
+			return err
+		}
+		return c.status(ctx, args[1:], stdout)
 	case "version":
 		if len(args) != 1 {
 			return errors.New("version does not accept arguments")
@@ -177,6 +196,20 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 }
 
 func containsAdvanceHelpFlag(args []string) bool {
+	return containsHelpFlag(args, func(arg string) bool {
+		switch arg {
+		case "-repository", "--repository", "-issue", "--issue", "-spec", "--spec",
+			"-risk-profile", "--risk-profile", "-decision", "--decision",
+			"-repair", "--repair", "-review-content", "--review-content",
+			"-ci-attribution", "--ci-attribution", "-output", "--output":
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func containsHelpFlag(args []string, takesValue func(string) bool) bool {
 	skipValue := false
 	for _, arg := range args {
 		if skipValue {
@@ -189,11 +222,7 @@ func containsAdvanceHelpFlag(args []string) bool {
 		if strings.Contains(arg, "=") {
 			continue
 		}
-		switch arg {
-		case "-repository", "--repository", "-issue", "--issue", "-spec", "--spec",
-			"-risk-profile", "--risk-profile", "-decision", "--decision",
-			"-repair", "--repair", "-review-content", "--review-content",
-			"-ci-attribution", "--ci-attribution", "-output", "--output":
+		if takesValue(arg) {
 			skipValue = true
 		}
 	}
@@ -204,11 +233,36 @@ const rootUsage = `Usage: packy-deliver <command> [options]
 
 Commands:
   advance    Advance resumable issue delivery
-  status     Show delivery status
+  status     Observe one schema-v2 delivery run
   version    Print the build version
   legacy-v1 Run a historical v1 command
 
-Run "packy-deliver help advance" for advance options.
+Run "packy-deliver help <command>" for advance, status, or legacy-v1 options.
+`
+
+const statusUsage = `Usage: packy-deliver status [options]
+
+Options:
+  --repository PATH          Absolute repository containing the delivery run (required)
+  --issue NUMBER             Packy issue number (required)
+  --output FORMAT            Compact report format: json or text (default "json")
+
+Status performs one observation-only schema-v2 query. It does not advance the
+run, execute validation or review, consume semantic input, or write delivery state.
+`
+
+const legacyV1Usage = `Usage: packy-deliver legacy-v1 <historical-subcommand> [options]
+
+Historical schema-v1 commands include:
+  status --bundle PATH       Render canonical bundle status
+
+Run "packy-deliver legacy-v1 status --help" for bundle status options.
+`
+
+const legacyStatusUsage = `Usage: packy-deliver legacy-v1 status --bundle PATH
+
+Render the canonical status of an explicit schema-v1 or legacy evidence bundle.
+This command does not inspect or migrate schema-v2 Delivery Runs.
 `
 
 const advanceUsage = `Usage: packy-deliver advance [options]
@@ -240,6 +294,8 @@ func isLegacyCommand(name string) bool {
 
 func (c command) runLegacy(ctx context.Context, args []string, stdout io.Writer) error {
 	switch args[0] {
+	case "status":
+		return c.legacyStatus(args[1:], stdout)
 	case "initialize":
 		return c.initialize(ctx, args[1:], stdout)
 	case "record-iteration":
@@ -791,7 +847,7 @@ func matchDependencies(qualified []deliveryevidence.DependencyDisposition, obser
 	return nil
 }
 
-func (c command) status(args []string, stdout io.Writer) error {
+func (c command) legacyStatus(args []string, stdout io.Writer) error {
 	f := flag.NewFlagSet("deliveryevidence status", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	var path string

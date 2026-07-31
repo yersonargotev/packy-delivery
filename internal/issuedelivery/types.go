@@ -149,6 +149,11 @@ type Request struct {
 	NonLocal                *NonLocalAuthorization
 }
 
+type StatusRequest struct {
+	RepositoryPath string
+	IssueNumber    int
+}
+
 type Timing struct {
 	Sequence    int    `json:"sequence"`
 	Phase       string `json:"phase"`
