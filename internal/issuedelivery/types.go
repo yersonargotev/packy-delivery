@@ -228,6 +228,7 @@ type Outcome struct {
 	LocalReadiness           *LocalReadiness
 	NonLocal                 *NonLocalDelivery
 	Timing                   []Timing
+	EffectiveProfile         deliveryevidence.DeliveryRiskProfile
 }
 
 type AuthorityItem struct {

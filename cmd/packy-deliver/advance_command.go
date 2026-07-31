@@ -82,8 +82,8 @@ type compactAdvanceReport struct {
 	Decision                *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                  *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
 	QualificationCorrection *issuedelivery.QualificationCorrectionRequest `json:"qualification_correction,omitempty"`
-	ValidationSession       *issuedelivery.ValidationSession              `json:"validation_session,omitempty"`
-	ValidationInvalidations []issuedelivery.ValidationInvalidation        `json:"validation_invalidations,omitempty"`
+	Timing                  issuedelivery.CompactTimingProjection         `json:"timing_summary"`
+	Assurance               issuedelivery.CompactAssuranceProjection      `json:"assurance"`
 	Candidate               *compactCandidateIdentity                     `json:"candidate,omitempty"`
 	Branch                  *issuedelivery.RemoteBranchObservation        `json:"branch,omitempty"`
 	PullRequest             *compactPullRequestIdentity                   `json:"pull_request,omitempty"`
@@ -211,7 +211,7 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	if options.FullReport {
 		report, err = reportFromOutcome(outcome, c.now())
 	} else {
-		report = compactReportFromOutcome(outcome)
+		report, err = compactReportFromOutcome(outcome, c.now())
 	}
 	if err != nil {
 		return err
@@ -317,24 +317,25 @@ func convergenceBlockedOutcome(outcome issuedelivery.Outcome, reason string) iss
 	return outcome
 }
 
-func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceReport {
+func compactReportFromOutcome(
+	outcome issuedelivery.Outcome,
+	now time.Time,
+) (compactAdvanceReport, error) {
+	run, err := issuedelivery.BuildCompactRunProjection(outcome, now)
+	if err != nil {
+		return compactAdvanceReport{}, fmt.Errorf("build compact run projection: %w", err)
+	}
 	report := compactAdvanceReport{
 		RunID: outcome.RunID, State: outcome.State, Reason: outcome.Reason,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		BlockerKind: outcome.BlockerKind, SupersedesRunID: outcome.SupersedesRunID,
 		Decision: outcome.Decision, Repair: outcome.Repair,
 		QualificationCorrection: outcome.QualificationCorrection,
-		ValidationInvalidations: append(
-			[]issuedelivery.ValidationInvalidation(nil),
-			outcome.ValidationInvalidations...,
-		),
-	}
-	if len(outcome.ValidationSessions) > 0 {
-		latest := outcome.ValidationSessions[len(outcome.ValidationSessions)-1]
-		report.ValidationSession = &latest
+		Timing:                  run.Timing,
+		Assurance:               run.Assurance,
 	}
 	if outcome.BlockerKind != "" {
-		return report
+		return report, nil
 	}
 	if remote := outcome.NonLocal; remote != nil {
 		switch {
@@ -362,13 +363,13 @@ func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceRepor
 				}
 			}
 		}
-		return report
+		return report, nil
 	}
 	if outcome.LocalReadiness != nil {
 		report.Branch = &issuedelivery.RemoteBranchObservation{
 			Name: outcome.LocalReadiness.Branch, HeadSHA: outcome.LocalReadiness.CommitSHA,
 		}
-		return report
+		return report, nil
 	}
 	if outcome.Candidate != nil {
 		report.Candidate = &compactCandidateIdentity{
@@ -376,7 +377,7 @@ func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceRepor
 			TreeSHA: outcome.Candidate.TreeSHA,
 		}
 	}
-	return report
+	return report, nil
 }
 
 func renderCompactAdvanceReport(report compactAdvanceReport) string {
@@ -388,6 +389,47 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 	}
 	if report.BlockerKind != "" {
 		fmt.Fprintf(&out, "blocker: %s\n", report.BlockerKind)
+	}
+	for _, category := range report.Timing.Categories {
+		fmt.Fprintf(&out, "timing: %s=%dns\n", category.Category, category.DurationNanoseconds)
+	}
+	if wait := report.Timing.OpenExternalWaitNanoseconds; wait != nil {
+		fmt.Fprintf(&out, "open external wait: %dns\n", *wait)
+	}
+	objective := report.Timing.Objective
+	fmt.Fprintf(&out, "timing objective: profile=%s applicable=%t\n",
+		objective.Profile, objective.Applicable)
+	if objective.PRReadiness != nil {
+		observed := "pending"
+		if objective.PRReadiness.ObservedNanoseconds != nil {
+			observed = fmt.Sprintf("%dns", *objective.PRReadiness.ObservedNanoseconds)
+		}
+		fmt.Fprintf(&out, "pr readiness objective: observed=%s maximum=%dns comparison=%s\n",
+			observed, objective.PRReadiness.MaximumNanoseconds, objective.PRReadiness.Comparison)
+	}
+	if objective.EndToEnd != nil {
+		fmt.Fprintf(&out, "end-to-end objective: observed=%dns range=%dns..%dns comparison=%s\n",
+			objective.EndToEnd.ObservedNanoseconds, objective.EndToEnd.MinimumNanoseconds,
+			objective.EndToEnd.MaximumNanoseconds, objective.EndToEnd.Comparison)
+	}
+	for _, receipt := range report.Assurance.RetainedReviewReceipts {
+		fmt.Fprintf(&out, "retained review receipt: %s iteration=%d\n",
+			receipt.Identity, receipt.Iteration)
+	}
+	for _, artifact := range report.Assurance.ReusedValidationArtifacts {
+		fmt.Fprintf(&out, "reused validation artifact: %s session=%s completion=%s",
+			artifact.Kind, artifact.SessionID, artifact.ValidationCompletionSHA256)
+		if artifact.Boundary != "" {
+			fmt.Fprintf(&out, " boundary=%s", artifact.Boundary)
+		}
+		if artifact.ReceiptIdentity != "" {
+			fmt.Fprintf(&out, " receipt=%s", artifact.ReceiptIdentity)
+		}
+		out.WriteByte('\n')
+	}
+	for _, invalidation := range report.Assurance.Invalidations {
+		fmt.Fprintf(&out, "validation invalidation: %s session=%s candidate=%s observed=%s\n",
+			invalidation.Class, invalidation.SessionID, invalidation.CandidateID, invalidation.ObservedAt)
 	}
 	if report.Candidate != nil {
 		fmt.Fprintf(&out, "candidate: %s commit=%s tree=%s\n",

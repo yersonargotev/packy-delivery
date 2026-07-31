@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yersonargotev/packy-delivery/internal/deliveryevidence"
 	"github.com/yersonargotev/packy-delivery/internal/issuedelivery"
@@ -38,7 +39,7 @@ func TestCompactAdvanceReportSnapshotsEveryPauseCause(t *testing.T) {
 			}
 			jsonOutput := runAdvanceOutput(t, outcome)
 			wantJSON := fmt.Sprintf(
-				"{\n  \"run_id\": \"run-snapshot\",\n  \"state\": %q,\n  \"reason\": \"pause\",\n  \"pause_cause\": %q,\n  \"next_action\": %q\n}\n",
+				"{\n  \"run_id\": \"run-snapshot\",\n  \"state\": %q,\n  \"reason\": \"pause\",\n  \"pause_cause\": %q,\n  \"next_action\": %q,\n  \"timing_summary\": {\n    \"categories\": [\n      {\n        \"category\": \"active-work\",\n        \"duration_nanoseconds\": 0\n      },\n      {\n        \"category\": \"review\",\n        \"duration_nanoseconds\": 0\n      },\n      {\n        \"category\": \"validation\",\n        \"duration_nanoseconds\": 0\n      },\n      {\n        \"category\": \"external-ci-wait\",\n        \"duration_nanoseconds\": 0\n      },\n      {\n        \"category\": \"merge\",\n        \"duration_nanoseconds\": 0\n      },\n      {\n        \"category\": \"cleanup\",\n        \"duration_nanoseconds\": 0\n      }\n    ],\n    \"objective\": {\n      \"applicable\": false\n    }\n  },\n  \"assurance\": {}\n}\n",
 				test.state, test.cause, test.action,
 			)
 			if jsonOutput != wantJSON {
@@ -46,7 +47,14 @@ func TestCompactAdvanceReportSnapshotsEveryPauseCause(t *testing.T) {
 			}
 			textOutput := runAdvanceOutput(t, outcome, "--output", "text")
 			wantText := fmt.Sprintf(
-				"run: run-snapshot\nstate: %s\npause cause: %s\nnext action: %s\nreason: pause\n",
+				"run: run-snapshot\nstate: %s\npause cause: %s\nnext action: %s\nreason: pause\n"+
+					"timing: active-work=0ns\n"+
+					"timing: review=0ns\n"+
+					"timing: validation=0ns\n"+
+					"timing: external-ci-wait=0ns\n"+
+					"timing: merge=0ns\n"+
+					"timing: cleanup=0ns\n"+
+					"timing objective: profile= applicable=false\n",
 				test.state, test.cause, test.action,
 			)
 			if textOutput != wantText {
@@ -69,7 +77,8 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 		}},
 		ValidationSessions: []issuedelivery.ValidationSession{{
 			ID: strings.Repeat("f", 64), Attempt: 1,
-			State: issuedelivery.ValidationSessionStarted,
+			State:    issuedelivery.ValidationSessionStarted,
+			HomeRoot: "/Users/operator/private-home", ConfigRoot: "/Users/operator/private-config",
 		}},
 		ValidationInvalidations: []issuedelivery.ValidationInvalidation{{
 			SessionID: strings.Repeat("f", 64), CandidateID: candidate.ID,
@@ -87,6 +96,11 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 		!reflect.DeepEqual(decoded.ValidationInvalidations, outcome.ValidationInvalidations) ||
 		len(decoded.QualificationReviews) != len(outcome.QualificationReviews) {
 		t.Fatal("full canonical report lost outcome fields")
+	}
+	compact := runAdvanceOutput(t, outcome)
+	if strings.Contains(compact, "/Users/operator") ||
+		strings.Contains(compact, `"validation_session"`) {
+		t.Fatalf("compact projection leaked raw validation details: %s", compact)
 	}
 }
 
@@ -150,7 +164,7 @@ func TestRepeatedCompactAdvanceReportsAreMateriallySmaller(t *testing.T) {
 		compactBytes += len(compact)
 		fullBytes += len(full)
 		for _, excluded := range []string{
-			"qualification_reviews", "evidence", "reviews", "timing", "timing_report",
+			"qualification_reviews", "evidence", "reviews", "timing_report",
 		} {
 			if strings.Contains(compact, `"`+excluded+`"`) {
 				t.Fatalf("compact report contains %q history: %s", excluded, compact)
@@ -216,7 +230,10 @@ func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			outcome := base
 			outcome.NonLocal = &test.remote
-			report := compactReportFromOutcome(outcome)
+			report, err := compactReportFromOutcome(outcome, time.Unix(0, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
 			if report.Candidate != nil {
 				t.Fatalf("remote progress leaked candidate identity: %#v", report)
 			}
@@ -225,13 +242,20 @@ func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 	}
 	authorized := base
 	authorized.NonLocal = &issuedelivery.NonLocalDelivery{}
-	authorizedReport := compactReportFromOutcome(authorized)
+	authorizedReport, err := compactReportFromOutcome(authorized, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if authorizedReport.Branch == nil || authorizedReport.Candidate != nil {
 		t.Fatalf("post-authorization projection=%#v", authorizedReport)
 	}
 	blocked := base
 	blocked.BlockerKind = issuedelivery.BlockerPullRequest
-	if report := compactReportFromOutcome(blocked); report.BlockerKind != issuedelivery.BlockerPullRequest ||
+	report, err := compactReportFromOutcome(blocked, time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BlockerKind != issuedelivery.BlockerPullRequest ||
 		report.Candidate != nil || report.Branch != nil || report.PullRequest != nil ||
 		report.CI != nil || report.Merge != nil {
 		t.Fatalf("blocker identity=%#v", report)
