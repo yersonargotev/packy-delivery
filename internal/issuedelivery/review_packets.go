@@ -438,13 +438,8 @@ func specialistPacketBinding(record runRecord, candidate Candidate, boundary Sen
 	packet.Boundary, packet.Specialist, packet.Generation = boundary, specialistForBoundary(boundary), len(record.Candidates)
 	bindPacketCandidate(&packet, candidate)
 	packet.RequiredBoundaryProof = boundaryProofObligation(record, candidate, boundary)
-	for _, review := range candidate.SpecialistReviews {
-		if review.Boundary != boundary {
-			continue
-		}
-		// The persisted response for this boundary is the response being replayed,
-		// not prior packet context.
-	}
+	// The persisted response for this boundary is the response being replayed,
+	// not prior packet context.
 	addRelevantAdjudications(&packet, record.Evidence.Adjudications)
 	addRelevantAssuranceAdjudications(&packet, record.Evidence.AssuranceAdjudications)
 	_ = finalizeReviewPacket(&packet)
