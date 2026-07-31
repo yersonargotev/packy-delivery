@@ -74,6 +74,7 @@ type command struct {
 	Now                  func() time.Time
 	AdvanceFactory       advanceFactory
 	StatusFactory        statusFactory
+	InputTemplateFactory inputTemplateFactory
 	LegacyPrefixRequired bool
 }
 
@@ -123,6 +124,7 @@ func main() {
 	if err := (command{
 		Git: execRunner{}, GitHub: execRunner{}, Validation: execValidationRunner{},
 		Now: time.Now, AdvanceFactory: newProductionAdvancer, StatusFactory: newProductionStatuser,
+		InputTemplateFactory: newProductionInputTemplateMaterializer,
 		LegacyPrefixRequired: true,
 	}).run(context.Background(), os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -132,7 +134,7 @@ func main() {
 
 func (c command) run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("command is required: advance, status, version, or a legacy v1 command")
+		return errors.New("command is required: advance, input-template, status, version, or a legacy v1 command")
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
@@ -148,12 +150,15 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			case "status":
 				_, err := io.WriteString(stdout, statusUsage)
 				return err
+			case "input-template":
+				_, err := io.WriteString(stdout, inputTemplateUsage)
+				return err
 			case "legacy-v1":
 				_, err := io.WriteString(stdout, legacyV1Usage)
 				return err
 			}
 		}
-		return errors.New("help accepts only the optional commands advance, status, or legacy-v1")
+		return errors.New("help accepts only the optional commands advance, input-template, status, or legacy-v1")
 	case "advance":
 		if containsAdvanceHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
@@ -175,6 +180,12 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 			return err
 		}
 		return c.status(ctx, args[1:], stdout)
+	case "input-template":
+		if containsInputTemplateHelpFlag(args[1:]) {
+			_, err := io.WriteString(stdout, inputTemplateUsage)
+			return err
+		}
+		return c.inputTemplate(ctx, args[1:])
 	case "version":
 		if len(args) != 1 {
 			return errors.New("version does not accept arguments")
@@ -232,12 +243,13 @@ func containsHelpFlag(args []string, takesValue func(string) bool) bool {
 const rootUsage = `Usage: packy-deliver <command> [options]
 
 Commands:
-  advance    Advance resumable issue delivery
-  status     Observe one schema-v2 delivery run
-  version    Print the build version
-  legacy-v1 Run a historical v1 command
+  advance        Advance resumable issue delivery
+  input-template Materialize a draft for the exact pending semantic input
+  status         Observe one schema-v2 delivery run
+  version        Print the build version
+  legacy-v1      Run a historical v1 command
 
-Run "packy-deliver help <command>" for advance, status, or legacy-v1 options.
+Run "packy-deliver help <command>" for advance, input-template, status, or legacy-v1 options.
 `
 
 const statusUsage = `Usage: packy-deliver status [options]
@@ -249,6 +261,22 @@ Options:
 
 Status performs one observation-only schema-v2 query. It does not advance the
 run, execute validation or review, consume semantic input, or write delivery state.
+`
+
+const inputTemplateUsage = `Usage: packy-deliver input-template [options]
+
+Options:
+  --repository PATH          Absolute repository containing the delivery run (required)
+  --issue NUMBER             Packy issue number (required)
+  --kind KIND                decision, qualification-review, qualification-correction,
+                             repair, or ci-attribution (required)
+  --output PATH              Exact draft file to create (required)
+  --force                    Atomically replace an existing regular output file
+
+Input-template copies the exact mechanical identities from the current schema-v2
+pending request. Judgment fields remain visible invalid placeholders. The draft is
+not accepted input until those placeholders are replaced, then the same file can be
+passed unchanged to Advance through its matching semantic-input option.
 `
 
 const legacyV1Usage = `Usage: packy-deliver legacy-v1 <historical-subcommand> [options]
