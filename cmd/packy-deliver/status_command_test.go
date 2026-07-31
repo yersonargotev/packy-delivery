@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yersonargotev/packy-delivery/internal/deliveryevidence"
 	"github.com/yersonargotev/packy-delivery/internal/issuedelivery"
@@ -192,10 +193,17 @@ func (f *fakeIssueDeliveryStatuser) Status(
 
 func TestStatusCommandObservesExactlyOnceAndMatchesCompactAdvance(t *testing.T) {
 	repository := t.TempDir()
+	waitStarted := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	now := waitStarted.Add(3 * time.Minute)
 	outcome := issuedelivery.Outcome{
 		RunID: "run-25", State: issuedelivery.StateWaiting,
 		Reason: "awaiting external result", PauseCause: issuedelivery.PauseExternalResult,
 		NextAction: issuedelivery.ActionObserveExternalResult,
+		Timing: []issuedelivery.Timing{{
+			Sequence: 1, Phase: "ci-wait", To: issuedelivery.StateWaiting,
+			StartedAt:   waitStarted.Add(-time.Minute).Format(time.RFC3339Nano),
+			CompletedAt: waitStarted.Format(time.RFC3339Nano),
+		}},
 		Candidate: &issuedelivery.Candidate{
 			ID: "candidate-25", CommitSHA: strings.Repeat("a", 40), TreeSHA: strings.Repeat("b", 40),
 		},
@@ -203,6 +211,7 @@ func TestStatusCommandObservesExactlyOnceAndMatchesCompactAdvance(t *testing.T) 
 	statuser := &fakeIssueDeliveryStatuser{outcome: outcome}
 	advancer := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{outcome}}
 	cmd := command{
+		Now: func() time.Time { return now },
 		StatusFactory: func() (issueDeliveryStatuser, error) {
 			return statuser, nil
 		},
@@ -223,6 +232,9 @@ func TestStatusCommandObservesExactlyOnceAndMatchesCompactAdvance(t *testing.T) 
 	}
 	if statusOutput.String() != advanceOutput.String() {
 		t.Fatalf("compact output differs:\nstatus:\n%s\nadvance:\n%s", statusOutput.String(), advanceOutput.String())
+	}
+	if !strings.Contains(statusOutput.String(), `"open_external_wait_nanoseconds": 180000000000`) {
+		t.Fatalf("compact output lacks current open external wait: %s", statusOutput.String())
 	}
 	if len(statuser.requests) != 1 {
 		t.Fatalf("Status calls = %d, want 1", len(statuser.requests))

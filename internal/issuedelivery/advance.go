@@ -274,8 +274,9 @@ func outcomeFromRecord(record runRecord) Outcome {
 		ValidationInvalidations: append(
 			[]ValidationInvalidation(nil), record.ValidationInvalidations...,
 		),
-		NonLocal: record.NonLocal,
-		Timing:   append([]Timing(nil), record.Timing...),
+		NonLocal:         record.NonLocal,
+		Timing:           append([]Timing(nil), record.Timing...),
+		EffectiveProfile: record.EffectiveProfile,
 	}
 }
 

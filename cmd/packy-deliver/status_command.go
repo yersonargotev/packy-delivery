@@ -64,7 +64,10 @@ func (c command) status(ctx context.Context, args []string, stdout io.Writer) er
 	if err != nil {
 		return err
 	}
-	report := compactReportFromOutcome(outcome)
+	report, err := compactReportFromOutcome(outcome, c.now())
+	if err != nil {
+		return err
+	}
 	if options.Output == "text" {
 		_, err = io.WriteString(stdout, renderCompactAdvanceReport(report))
 		return err
