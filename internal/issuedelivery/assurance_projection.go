@@ -26,15 +26,15 @@ func projectAutomaticAssurance(record *runRecord) error {
 	var expectedAdjudications []deliveryevidence.AssuranceAdjudicationReceipt
 	var expectedExhaustive []deliveryevidence.ExhaustiveAssuranceReceipt
 	reviewIDs := make(map[string]string)
-	reviewTimingGroups := contiguousReviewTimingGroups(record.Timing)
-	reviewTimingGroupIndex := 0
+	reviewTimingGroups := reviewTimingGroupsByCandidate(*record)
 	for candidateIndex := range record.Candidates {
 		candidate := &record.Candidates[candidateIndex]
+		candidateTimingGroups := reviewTimingGroups[candidate.ID]
+		delete(reviewTimingGroups, candidate.ID)
+		reviewTimingGroupIndex := 0
 		byIteration := make(map[int][]CandidateReview)
 		for _, review := range candidate.Reviews {
-			if review.Completed {
-				byIteration[review.Iteration] = append(byIteration[review.Iteration], review)
-			}
+			byIteration[review.Iteration] = append(byIteration[review.Iteration], review)
 		}
 		iterations := make([]int, 0, len(byIteration))
 		for iteration := range byIteration {
@@ -55,11 +55,16 @@ func projectAutomaticAssurance(record *runRecord) error {
 			if batch != nil {
 				requiredAxes = batch.RequiredAxes
 			} else if iteration < currentReviewIteration(candidate) {
-				return fmt.Errorf("historical review iteration lacks authoritative review batch")
+				completedAxes := completedReviewAxes(reviews)
+				if !preAssuranceMigration || !reflect.DeepEqual(completedAxes, candidate.RequiredReviews) {
+					return fmt.Errorf("historical review iteration lacks authoritative review batch")
+				}
 			}
 			completed := make(map[deliveryevidence.ReviewAxis]bool, len(reviews))
 			for _, review := range reviews {
-				completed[review.Axis] = true
+				if review.Completed {
+					completed[review.Axis] = true
+				}
 			}
 			fullBatch := true
 			for _, required := range requiredAxes {
@@ -68,14 +73,17 @@ func projectAutomaticAssurance(record *runRecord) error {
 					break
 				}
 			}
-			if !fullBatch {
-				continue
-			}
 			var closingTiming Timing
-			if reviewTimingGroupIndex < len(reviewTimingGroups) {
-				closingTiming = reviewTimingGroups[reviewTimingGroupIndex]
+			if reviewTimingGroupIndex < len(candidateTimingGroups) {
+				closingTiming = candidateTimingGroups[reviewTimingGroupIndex]
 			}
 			reviewTimingGroupIndex++
+			if !fullBatch {
+				if iteration != currentReviewIteration(candidate) {
+					return fmt.Errorf("incomplete review iteration has ambiguous authoritative timing closure")
+				}
+				continue
+			}
 			if batch != nil && (closingTiming.Sequence == 0 ||
 				batch.TimingSequence != closingTiming.Sequence ||
 				batch.CompletedAt != closingTiming.CompletedAt) {
@@ -127,6 +135,16 @@ func projectAutomaticAssurance(record *runRecord) error {
 			for _, axis := range axes {
 				reviewIDs[reviewReferenceKey(candidate.ID, iteration, axis)] = receipt.Identity
 			}
+		}
+		if reviewTimingGroupIndex < len(candidateTimingGroups) {
+			if reviewTimingGroupIndex+1 != len(candidateTimingGroups) ||
+				byIteration[currentReviewIteration(candidate)] != nil {
+				return fmt.Errorf("candidate review timing closures are not one-to-one with review iterations")
+			}
+			reviewTimingGroupIndex++
+		}
+		if reviewTimingGroupIndex != len(candidateTimingGroups) {
+			return fmt.Errorf("candidate review timing closures are not one-to-one with review iterations")
 		}
 		repairBatches := append([]RepairBatchReceipt(nil), candidate.RepairBatches...)
 		if candidate.LastRepairBatch != nil {
@@ -221,6 +239,11 @@ func projectAutomaticAssurance(record *runRecord) error {
 				return fmt.Errorf("acceptance review receipt identity conflicts with canonical assurance")
 			}
 			reference.ReceiptID = id
+		}
+	}
+	for _, groups := range reviewTimingGroups {
+		if len(groups) != 0 {
+			return fmt.Errorf("review timing closures belong to an unknown candidate lifecycle")
 		}
 	}
 
@@ -549,17 +572,36 @@ func latestPhaseTiming(timings []Timing, phase string) (Timing, bool) {
 	return Timing{}, false
 }
 
-func contiguousReviewTimingGroups(timings []Timing) []Timing {
-	var groups []Timing
+func reviewTimingGroupsByCandidate(record runRecord) map[string][]Timing {
+	groups := make(map[string][]Timing)
+	candidateIndex := -1
+	candidateID := ""
+	timings := record.Timing
 	for index, timing := range timings {
+		if (timing.Phase == "implementation" || timing.Phase == "repair") &&
+			candidateIndex+1 < len(record.Candidates) {
+			candidateIndex++
+			candidateID = record.Candidates[candidateIndex].ID
+		}
 		if timing.Phase != "review" {
 			continue
 		}
 		if index+1 == len(timings) || timings[index+1].Phase != "review" {
-			groups = append(groups, timing)
+			groups[candidateID] = append(groups[candidateID], timing)
 		}
 	}
 	return groups
+}
+
+func completedReviewAxes(reviews []CandidateReview) []deliveryevidence.ReviewAxis {
+	var axes []deliveryevidence.ReviewAxis
+	for _, review := range reviews {
+		if review.Completed {
+			axes = append(axes, review.Axis)
+		}
+	}
+	sort.Slice(axes, func(i, j int) bool { return axes[i] < axes[j] })
+	return axes
 }
 
 func reviewReferenceKey(candidateID string, iteration int, axis deliveryevidence.ReviewAxis) string {

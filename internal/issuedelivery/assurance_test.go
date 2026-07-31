@@ -470,9 +470,10 @@ func TestLegacyReviewBatchMigrationUsesContiguousReviewTimingClosures(t *testing
 			{
 				ID: "candidate-1", CommitSHA: sha("b"), TreeSHA: sha("c"),
 				RequiredReviews: []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards},
-				ReviewIteration: 1,
+				ReviewIteration: 2,
 				Reviews: []CandidateReview{
 					review("candidate-1", 1, deliveryevidence.ReviewStandards),
+					review("candidate-1", 2, deliveryevidence.ReviewStandards),
 				},
 			},
 			{
@@ -485,24 +486,25 @@ func TestLegacyReviewBatchMigrationUsesContiguousReviewTimingClosures(t *testing
 			},
 		},
 		Timing: []Timing{
-			timing(1, "review", "2026-07-30T01:00:01.000000000Z"),
+			timing(1, "implementation", "2026-07-30T01:00:01.000000000Z"),
 			timing(2, "review", "2026-07-30T01:00:02.000000000Z"),
-			timing(3, "adjudication", "2026-07-30T01:00:03.000000000Z"),
-			timing(4, "review", "2026-07-30T01:00:04.000000000Z"),
-			timing(5, "adjudication", "2026-07-30T01:00:05.000000000Z"),
-			timing(6, "review", "2026-07-30T01:00:06.000000000Z"),
+			timing(3, "review", "2026-07-30T01:00:03.000000000Z"),
+			timing(4, "adjudication", "2026-07-30T01:00:04.000000000Z"),
+			timing(5, "review", "2026-07-30T01:00:05.000000000Z"),
+			timing(6, "repair", "2026-07-30T01:00:06.000000000Z"),
 			timing(7, "review", "2026-07-30T01:00:07.000000000Z"),
 		},
 	}
 	if err := projectAutomaticAssurance(&record); err != nil {
 		t.Fatal(err)
 	}
-	if got := record.Candidates[0].ReviewBatches[0]; got.TimingSequence != 2 ||
-		got.CompletedAt != record.Timing[1].CompletedAt {
-		t.Fatalf("first candidate migrated review closure=%#v", got)
+	if batches := record.Candidates[0].ReviewBatches; len(batches) != 2 ||
+		batches[0].TimingSequence != 3 || batches[0].CompletedAt != record.Timing[2].CompletedAt ||
+		batches[1].TimingSequence != 5 || batches[1].CompletedAt != record.Timing[4].CompletedAt {
+		t.Fatalf("first candidate migrated review closures=%#v", batches)
 	}
 	if batches := record.Candidates[1].ReviewBatches; len(batches) != 1 ||
-		batches[0].TimingSequence != 4 || batches[0].CompletedAt != record.Timing[3].CompletedAt {
+		batches[0].TimingSequence != 7 || batches[0].CompletedAt != record.Timing[6].CompletedAt {
 		t.Fatalf("second candidate migrated review closures=%#v", batches)
 	}
 	rebound := record
@@ -516,6 +518,46 @@ func TestLegacyReviewBatchMigrationUsesContiguousReviewTimingClosures(t *testing
 		record.Candidates[0].ReviewBatches[0].CompletedAt
 	if err := projectAutomaticAssurance(&rebound); err == nil {
 		t.Fatal("candidate review batch rebound to another candidate timing was admitted")
+	}
+	surplus := record
+	surplus.Timing = append([]Timing(nil), record.Timing...)
+	surplus.Timing = append(surplus.Timing, timing(
+		len(surplus.Timing)+1, "review", "2026-07-30T01:00:08.000000000Z",
+	))
+	if err := projectAutomaticAssurance(&surplus); err == nil {
+		t.Fatal("surplus candidate review timing closure was admitted")
+	}
+
+	partialThenComplete := record
+	partialThenComplete.Evidence = &deliveryevidence.Bundle{
+		Schema: deliveryevidence.SchemaV2, Repository: record.Repository,
+	}
+	partialThenComplete.Candidates = append([]Candidate(nil), record.Candidates...)
+	partialThenComplete.Candidates[0].ReviewIteration = 1
+	partialThenComplete.Candidates[0].RequiredReviews = []deliveryevidence.ReviewAxis{
+		deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+	}
+	partialThenComplete.Candidates[0].Reviews = []CandidateReview{{
+		CandidateID: "candidate-1", Iteration: 1, Axis: deliveryevidence.ReviewStandards,
+		CommitSHA: sha("b"), TreeSHA: sha("c"), Completed: true,
+		Findings: []deliveryevidence.ReviewFinding{},
+	}}
+	partialThenComplete.Candidates[0].ReviewBatches = nil
+	partialThenComplete.Candidates[1].ReviewBatches = nil
+	partialThenComplete.Timing = []Timing{
+		record.Timing[0], record.Timing[1], record.Timing[2],
+		record.Timing[5], record.Timing[6],
+	}
+	for index := range partialThenComplete.Timing {
+		partialThenComplete.Timing[index].Sequence = index + 1
+	}
+	if err := projectAutomaticAssurance(&partialThenComplete); err != nil {
+		t.Fatalf("earlier incomplete candidate shifted later review closure: %v", err)
+	}
+	if receipts := partialThenComplete.Evidence.CandidateReviewReceipts; len(receipts) != 1 ||
+		receipts[0].CandidateID != "candidate-2" ||
+		receipts[0].CompletedAt != partialThenComplete.Timing[4].CompletedAt {
+		t.Fatalf("earlier incomplete candidate misassigned later review receipt: %#v", receipts)
 	}
 }
 
