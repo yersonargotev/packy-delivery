@@ -5,7 +5,7 @@ description: Deliver a named Packy GitHub issue end to end through a local imple
 
 # Deliver Packy Issue
 
-Compatible release: v0.2.1
+Compatible release: v0.3.0
 
 Read the complete [workflow contract](../../../workflows/packy-issue-delivery.md)
 and [repository instructions](../../../AGENTS.md) before mutating project or
@@ -36,6 +36,11 @@ brew upgrade packy-delivery
 Never install or upgrade it silently. Never combine a mismatched executable,
 contract, and skill against an existing Delivery Run.
 
+After the version preflight, use `packy-deliver help` and
+`packy-deliver help advance` as the executable authority for current command
+and option syntax. Do not infer syntax from source searches or historical
+invocations.
+
 Create or resume the issue's `Delivery Run`, then invoke the contract's
 `packy-deliver advance` repeatedly. Supply genuine decisions,
 review results, and adjudications only when the returned state requires them.
@@ -53,6 +58,11 @@ when performing an explicit audit; do not carry full qualification, review, or
 timing histories through routine repeated calls. Use `--output text` only for a
 human status display—the JSON and text forms carry the same pause cause and next
 action.
+
+Treat `--decision`, `--repair`, `--review-content`, and `--ci-attribution` as
+paths to files containing exactly one typed JSON value. Bind the content to the
+exact pending request or observed CI identity returned by `Advance`; never pass
+inline JSON or free-form prose and never invent or replay a stale identity.
 
 When `Advance` returns `provide-qualification-correction`, submit one complete
 correction that echoes the returned request ID, authority hash, reviewed matrix

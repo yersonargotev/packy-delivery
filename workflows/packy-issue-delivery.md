@@ -1,7 +1,7 @@
 # Packy Issue Delivery
 
 Status: Active
-Release: v0.2.1
+Release: v0.3.0
 
 ## Goal
 
