@@ -238,13 +238,35 @@ func (m *Module) advanceAssurance(
 	if hasAcceptedFindings(candidate.RepairDecision) {
 		return outcomeWithReason(record, StateNeedsReview, "accepted findings must be repaired as one candidate batch"), nil
 	}
-	if missing := missingBoundaryProofs(candidate); len(missing) > 0 {
-		proofs, err := m.executeBoundaryProofs(ctx, record, *candidate, missing)
+	var validationSession *ValidationSession
+	if record.Schema != legacyRunSchema && m.validationSession != nil {
+		session, outcome, handled, err := m.advanceValidationSession(
+			ctx, store, record, *candidate, request,
+		)
 		if err != nil {
-			return m.persistAssuranceTransition(
-				store, record, StateBlocked, "required sandboxed high-risk boundary proof is invalid",
-				"boundary-validation",
+			return outcome, err
+		}
+		if handled {
+			return outcome, nil
+		}
+		validationSession = session
+	}
+	if missing := missingBoundaryProofs(candidate); len(missing) > 0 {
+		var proofs []BoundaryProof
+		if validationSession != nil {
+			proofs = boundaryProofsFromValidationSession(
+				*validationSession, *candidate, missing,
+				m.clock.Now().UTC().Format(timeFormat),
 			)
+		} else {
+			var err error
+			proofs, err = m.executeBoundaryProofs(ctx, record, *candidate, missing)
+			if err != nil {
+				return m.persistAssuranceTransition(
+					store, record, StateBlocked, "required sandboxed high-risk boundary proof is invalid",
+					"boundary-validation",
+				)
+			}
 		}
 		candidate.BoundaryProofs = append(candidate.BoundaryProofs, proofs...)
 		sort.Slice(candidate.BoundaryProofs, func(i, j int) bool {
@@ -256,15 +278,21 @@ func (m *Module) advanceAssurance(
 		)
 	}
 	if candidate.Exhaustive == nil {
-		if err := validateSandboxRoot(m.sandboxRoot); err != nil {
-			return m.persistAssuranceTransition(
-				store, record, StateBlocked, "configured validation sandbox is not physically isolated",
-				"exhaustive-validation",
-			)
-		}
-		result, err := m.validation.Exhaustive(ctx, m.validationRequest(record, *candidate))
-		if err != nil {
-			return Outcome{}, fmt.Errorf("run exhaustive validation: %w", err)
+		var result ValidationResult
+		if validationSession != nil {
+			result = exhaustiveResultFromValidationSession(*validationSession)
+		} else {
+			if err := validateSandboxRoot(m.sandboxRoot); err != nil {
+				return m.persistAssuranceTransition(
+					store, record, StateBlocked, "configured validation sandbox is not physically isolated",
+					"exhaustive-validation",
+				)
+			}
+			var err error
+			result, err = m.validation.Exhaustive(ctx, m.validationRequest(record, *candidate))
+			if err != nil {
+				return Outcome{}, fmt.Errorf("run exhaustive validation: %w", err)
+			}
 		}
 		if err := m.validateValidationResult(result, *candidate, true); err != nil {
 			return m.persistAssuranceTransition(
@@ -303,7 +331,7 @@ func (m *Module) advanceAssurance(
 		}
 		completed := m.clock.Now().UTC()
 		completedAt := completed.Format(time.RFC3339Nano)
-		nextEvidence, err = deliveryevidence.RecordExhaustiveValidation(
+		nextEvidence, err := deliveryevidence.RecordExhaustiveValidation(
 			nextEvidence,
 			deliveryevidence.ExhaustiveValidationResult{
 				Observation: deliveryevidence.ValidationObservation{
@@ -321,7 +349,8 @@ func (m *Module) advanceAssurance(
 		)
 		if err != nil {
 			return m.persistAssuranceTransition(
-				store, record, StateBlocked, "canonical exhaustive validation receipt is invalid",
+				store, record, StateBlocked,
+				"canonical exhaustive validation receipt is invalid: "+err.Error(),
 				"exhaustive-validation",
 			)
 		}
@@ -346,6 +375,10 @@ func (m *Module) advanceAssurance(
 		}
 		candidate.Exhaustive = &ValidationProof{
 			Kind: "exhaustive", Result: result, CompletedAt: completedAt,
+		}
+		if validationSession != nil {
+			candidate.Exhaustive.ValidationCompletionSHA256 =
+				validationSession.CompletionSHA256
 		}
 		if record.Schema != legacyRunSchema {
 			candidate.Exhaustive.TimingSequence = len(record.Timing)

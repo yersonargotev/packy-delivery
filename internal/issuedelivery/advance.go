@@ -268,6 +268,12 @@ func outcomeFromRecord(record runRecord) Outcome {
 		QualificationCorrections: append(
 			[]QualificationCorrection(nil), record.QualificationCorrections...,
 		),
+		ValidationSessions: append(
+			[]ValidationSession(nil), record.ValidationSessions...,
+		),
+		ValidationInvalidations: append(
+			[]ValidationInvalidation(nil), record.ValidationInvalidations...,
+		),
 		NonLocal: record.NonLocal,
 		Timing:   append([]Timing(nil), record.Timing...),
 	}

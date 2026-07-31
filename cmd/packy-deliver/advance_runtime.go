@@ -51,6 +51,14 @@ type productionBoundaryExecutor struct {
 	mu         *sync.Mutex
 }
 
+type productionValidationSessionExecutor struct {
+	repository string
+	runner     Runner
+	validation ValidationRunner
+	acceptance []issuedelivery.AcceptanceProof
+	boundary   productionBoundaryExecutor
+}
+
 func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error) {
 	runner := execRunner{}
 	sandboxRoot, err := productionSandboxRoot(
@@ -60,6 +68,10 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 		return nil, err
 	}
 	validation := execValidationRunner{}
+	boundary := productionBoundaryExecutor{
+		repository: options.RepositoryPath, runner: runner,
+		validation: validation, mu: &sync.Mutex{},
+	}
 	return issuedelivery.New(issuedelivery.Config{
 		Git: productionGitObserver{runner: runner},
 		GitHub: productionTrackerObserver{
@@ -75,9 +87,11 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 		},
 		Risk:       productionCandidateRiskObserver{runner: runner},
 		Specialist: suppliedSpecialistExecutor{reviews: options.Specialists},
-		Boundary: productionBoundaryExecutor{
-			repository: options.RepositoryPath, runner: runner,
-			validation: validation, mu: &sync.Mutex{},
+		Boundary:   boundary,
+		ValidationSession: productionValidationSessionExecutor{
+			repository: options.RepositoryPath, runner: runner, validation: validation,
+			acceptance: append([]issuedelivery.AcceptanceProof(nil), options.Acceptance...),
+			boundary:   boundary,
 		},
 		NonLocal: productionNonLocalGateway{
 			runner: runner, repository: options.RepositoryPath,
@@ -87,6 +101,169 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 		SandboxRoot:     sandboxRoot,
 		DeclaredProfile: options.DeclaredProfile,
 	})
+}
+
+func (e productionValidationSessionExecutor) ObserveValidationSession(
+	ctx context.Context,
+	request issuedelivery.ValidationSessionObserveRequest,
+) (issuedelivery.ValidationSessionObservation, error) {
+	repository, err := filepath.Abs(e.repository)
+	if err != nil {
+		return issuedelivery.ValidationSessionObservation{}, err
+	}
+	repository, err = filepath.EvalSymlinks(repository)
+	if err != nil {
+		return issuedelivery.ValidationSessionObservation{}, err
+	}
+	head, err := e.runner.Output(ctx, "git", "-C", repository, "rev-parse", "HEAD^{commit}")
+	if err != nil {
+		return issuedelivery.ValidationSessionObservation{}, err
+	}
+	tree, err := e.runner.Output(ctx, "git", "-C", repository, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return issuedelivery.ValidationSessionObservation{}, err
+	}
+	status, err := e.runner.Output(
+		ctx, "git", "-C", repository, "status", "--porcelain=v1", "--untracked-files=normal",
+	)
+	if err != nil {
+		return issuedelivery.ValidationSessionObservation{}, err
+	}
+	validator, err := os.ReadFile(filepath.Join(repository, "scripts", "validate-packy.sh"))
+	if err != nil {
+		return issuedelivery.ValidationSessionObservation{}, err
+	}
+	checkoutDigest := sha256.Sum256([]byte(repository))
+	validatorDigest := sha256.Sum256(validator)
+	instrumentation := append(
+		[]issuedelivery.ValidationInstrumentation(nil),
+		request.RequiredInstrumentation...,
+	)
+	sort.Slice(instrumentation, func(i, j int) bool {
+		return instrumentation[i] < instrumentation[j]
+	})
+	boundaries := append([]issuedelivery.SensitiveBoundary(nil), request.CoveredBoundaries...)
+	sort.Slice(boundaries, func(i, j int) bool { return boundaries[i] < boundaries[j] })
+	return issuedelivery.ValidationSessionObservation{
+		CheckoutSHA256:    fmt.Sprintf("%x", checkoutDigest),
+		CommitSHA:         strings.TrimSpace(string(head)),
+		TreeSHA:           strings.TrimSpace(string(tree)),
+		WorkspaceClean:    len(status) == 0,
+		ValidatorIdentity: "scripts/validate-packy.sh",
+		ValidatorSHA256:   fmt.Sprintf("%x", validatorDigest),
+		Command:           "./scripts/validate-packy.sh",
+		HomeRoot:          request.HomeRoot,
+		ConfigRoot:        request.ConfigRoot,
+		Instrumentation:   instrumentation,
+		CoveredBoundaries: boundaries,
+	}, nil
+}
+
+func (e productionValidationSessionExecutor) ExecuteValidationSession(
+	ctx context.Context,
+	request issuedelivery.ValidationSessionExecuteRequest,
+) (issuedelivery.ValidationSessionResult, error) {
+	if e.boundary.mu == nil {
+		return issuedelivery.ValidationSessionResult{}, errors.New(
+			"candidate validation session serialization is unavailable",
+		)
+	}
+	e.boundary.mu.Lock()
+	defer e.boundary.mu.Unlock()
+
+	session := request.Session
+	before, err := e.boundary.operatorStateDigest(ctx, session.HomeRoot, session.ConfigRoot)
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	sandboxBefore, err := sandboxSnapshotDigest(session.HomeRoot, session.ConfigRoot)
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	if err := e.validation.Run(ctx, e.repository, deliveryevidence.SandboxFacts{
+		HomeRoot: session.HomeRoot, ConfigHomeRoot: session.ConfigRoot, Sandboxed: true,
+	}); err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	after, err := e.boundary.operatorStateDigest(ctx, session.HomeRoot, session.ConfigRoot)
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	if before != after {
+		return issuedelivery.ValidationSessionResult{}, errors.New(
+			"protected repository state changed during candidate validation session",
+		)
+	}
+	sandboxAfter, err := sandboxSnapshotDigest(session.HomeRoot, session.ConfigRoot)
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	head, err := e.runner.Output(ctx, "git", "-C", e.repository, "rev-parse", "HEAD^{commit}")
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	tree, err := e.runner.Output(ctx, "git", "-C", e.repository, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	status, err := e.runner.Output(
+		ctx, "git", "-C", e.repository, "status", "--porcelain=v1", "--untracked-files=normal",
+	)
+	if err != nil {
+		return issuedelivery.ValidationSessionResult{}, err
+	}
+	result := issuedelivery.ValidationSessionResult{
+		SessionID:                 session.ID,
+		CommitSHA:                 strings.TrimSpace(string(head)),
+		TreeSHA:                   strings.TrimSpace(string(tree)),
+		WorkspaceClean:            len(status) == 0,
+		OperatorStateBeforeSHA256: before,
+		OperatorStateAfterSHA256:  after,
+		SandboxBeforeSHA256:       sandboxBefore,
+		SandboxAfterSHA256:        sandboxAfter,
+		Succeeded:                 true,
+		Completed:                 true,
+	}
+	if result.CommitSHA != session.CommitSHA || result.TreeSHA != session.TreeSHA ||
+		!result.WorkspaceClean {
+		return issuedelivery.ValidationSessionResult{}, errors.New(
+			"candidate changed during validation session",
+		)
+	}
+	phaseOwned := false
+	for _, row := range request.AcceptanceRows {
+		if len(row.Obligations) == 0 {
+			continue
+		}
+		phaseOwned = true
+		result.Traceability = append(result.Traceability, issuedelivery.ValidationTrace{
+			Identity: row.Identity, CandidateID: session.CandidateID,
+			Phase:     deliveryevidence.AssuranceExhaustiveValidation,
+			CommitSHA: session.CommitSHA, TreeSHA: session.TreeSHA,
+		})
+	}
+	if !phaseOwned {
+		result.Acceptance = append(
+			[]issuedelivery.AcceptanceProof(nil),
+			e.acceptance...,
+		)
+	}
+	for _, boundary := range session.CoveredBoundaries {
+		result.BoundaryEvidence = append(
+			result.BoundaryEvidence,
+			issuedelivery.ValidationSessionBoundaryEvidence{
+				Boundary:                  boundary,
+				OperatorStateBeforeSHA256: before,
+				OperatorStateAfterSHA256:  after,
+				SandboxBeforeSHA256:       sandboxBefore,
+				SandboxAfterSHA256:        sandboxAfter,
+				WriteManifestSHA256: issuedelivery.ValidationBoundaryWriteManifest(
+					session, boundary, sandboxBefore, sandboxAfter,
+				),
+			},
+		)
+	}
+	return result, nil
 }
 
 func productionSandboxRoot(

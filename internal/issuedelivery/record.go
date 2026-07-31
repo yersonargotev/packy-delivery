@@ -37,6 +37,8 @@ type runWire struct {
 	EffectiveProfile               deliveryevidence.DeliveryRiskProfile `json:"effective_profile,omitempty"`
 	RequiredBoundaries             []SensitiveBoundary                  `json:"required_boundaries,omitempty"`
 	ProfileHistory                 []ProfileTransition                  `json:"profile_history,omitempty"`
+	ValidationSessions             []ValidationSession                  `json:"validation_sessions,omitempty"`
+	ValidationInvalidations        []ValidationInvalidation             `json:"validation_invalidations,omitempty"`
 	NonLocal                       *NonLocalDelivery                    `json:"non_local,omitempty"`
 	Timing                         []Timing                             `json:"timing"`
 	CreatedAt                      string                               `json:"created_at"`
@@ -59,9 +61,11 @@ func encodeRun(record runRecord) ([]byte, error) {
 		QualificationCorrections:       record.QualificationCorrections,
 		LocalReadiness:                 record.LocalReadiness,
 		EffectiveProfile:               record.EffectiveProfile, RequiredBoundaries: record.RequiredBoundaries,
-		ProfileHistory: record.ProfileHistory,
-		NonLocal:       record.NonLocal,
-		CreatedAt:      record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		ProfileHistory:          record.ProfileHistory,
+		ValidationSessions:      record.ValidationSessions,
+		ValidationInvalidations: record.ValidationInvalidations,
+		NonLocal:                record.NonLocal,
+		CreatedAt:               record.CreatedAt, UpdatedAt: record.UpdatedAt,
 	}
 	if record.Evidence != nil {
 		evidence, err := deliveryevidence.CanonicalJSON(*record.Evidence)
@@ -108,9 +112,11 @@ func decodeRun(data []byte) (runRecord, error) {
 		QualificationCorrections:       wire.QualificationCorrections,
 		LocalReadiness:                 wire.LocalReadiness,
 		EffectiveProfile:               wire.EffectiveProfile, RequiredBoundaries: wire.RequiredBoundaries,
-		ProfileHistory: wire.ProfileHistory,
-		NonLocal:       wire.NonLocal,
-		CreatedAt:      wire.CreatedAt, UpdatedAt: wire.UpdatedAt,
+		ProfileHistory:          wire.ProfileHistory,
+		ValidationSessions:      wire.ValidationSessions,
+		ValidationInvalidations: wire.ValidationInvalidations,
+		NonLocal:                wire.NonLocal,
+		CreatedAt:               wire.CreatedAt, UpdatedAt: wire.UpdatedAt,
 	}
 	if len(wire.Evidence) > 0 {
 		evidence, err := deliveryevidence.Decode(append(append([]byte(nil), wire.Evidence...), '\n'))
@@ -195,6 +201,9 @@ func validateRun(record runRecord) error {
 		}
 	}
 	if err := validateCandidates(record); err != nil {
+		return err
+	}
+	if err := validateValidationSessions(record); err != nil {
 		return err
 	}
 	if err := validatePersistedAutomaticAssurance(record); err != nil {

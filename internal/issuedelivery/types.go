@@ -191,6 +191,8 @@ type Outcome struct {
 	QualificationApproved    bool
 	QualificationReviews     []QualificationReview
 	QualificationCorrections []QualificationCorrection
+	ValidationSessions       []ValidationSession
+	ValidationInvalidations  []ValidationInvalidation
 	LocalReadiness           *LocalReadiness
 	NonLocal                 *NonLocalDelivery
 	Timing                   []Timing
@@ -481,8 +483,9 @@ type BoundaryValidationResult struct {
 }
 
 type BoundaryProof struct {
-	Result      BoundaryValidationResult `json:"result"`
-	CompletedAt string                   `json:"completed_at"`
+	Result                     BoundaryValidationResult `json:"result"`
+	ValidationCompletionSHA256 string                   `json:"validation_completion_sha256,omitempty"`
+	CompletedAt                string                   `json:"completed_at"`
 }
 
 type RepairClass string
@@ -526,10 +529,11 @@ type RepairBatchReceipt struct {
 }
 
 type ValidationProof struct {
-	Kind           string           `json:"kind"`
-	Result         ValidationResult `json:"result"`
-	TimingSequence int              `json:"timing_sequence,omitempty"`
-	CompletedAt    string           `json:"completed_at"`
+	Kind                       string           `json:"kind"`
+	Result                     ValidationResult `json:"result"`
+	ValidationCompletionSHA256 string           `json:"validation_completion_sha256,omitempty"`
+	TimingSequence             int              `json:"timing_sequence,omitempty"`
+	CompletedAt                string           `json:"completed_at"`
 }
 
 type Candidate struct {
@@ -838,36 +842,38 @@ type NonLocalDelivery struct {
 }
 
 type Config struct {
-	Git             GitObserver
-	GitHub          GitHubObserver
-	Clock           Clock
-	Review          ReviewExecutor
-	Validation      ValidationExecutor
-	Risk            CandidateRiskObserver
-	Specialist      SpecialistReviewExecutor
-	Boundary        BoundaryValidationExecutor
-	NonLocal        NonLocalGateway
-	LocalCompletion LocalCompletionGateway
-	SandboxRoot     string
-	DeclaredProfile deliveryevidence.DeliveryRiskProfile
-	AllowLegacyV1   bool
+	Git               GitObserver
+	GitHub            GitHubObserver
+	Clock             Clock
+	Review            ReviewExecutor
+	Validation        ValidationExecutor
+	Risk              CandidateRiskObserver
+	Specialist        SpecialistReviewExecutor
+	Boundary          BoundaryValidationExecutor
+	ValidationSession ValidationSessionExecutor
+	NonLocal          NonLocalGateway
+	LocalCompletion   LocalCompletionGateway
+	SandboxRoot       string
+	DeclaredProfile   deliveryevidence.DeliveryRiskProfile
+	AllowLegacyV1     bool
 }
 
 type Module struct {
-	git             GitObserver
-	github          GitHubObserver
-	clock           Clock
-	review          ReviewExecutor
-	validation      ValidationExecutor
-	risk            CandidateRiskObserver
-	specialist      SpecialistReviewExecutor
-	boundary        BoundaryValidationExecutor
-	nonlocal        NonLocalGateway
-	localCompletion LocalCompletionGateway
-	sandboxRoot     string
-	declaredProfile deliveryevidence.DeliveryRiskProfile
-	allowLegacyV1   bool
-	store           fileRunStore
+	git               GitObserver
+	github            GitHubObserver
+	clock             Clock
+	review            ReviewExecutor
+	validation        ValidationExecutor
+	risk              CandidateRiskObserver
+	specialist        SpecialistReviewExecutor
+	boundary          BoundaryValidationExecutor
+	validationSession ValidationSessionExecutor
+	nonlocal          NonLocalGateway
+	localCompletion   LocalCompletionGateway
+	sandboxRoot       string
+	declaredProfile   deliveryevidence.DeliveryRiskProfile
+	allowLegacyV1     bool
+	store             fileRunStore
 }
 
 func New(config Config) (*Module, error) {
@@ -914,7 +920,8 @@ func New(config Config) (*Module, error) {
 		git: config.Git, github: config.GitHub, clock: config.Clock,
 		review: config.Review, validation: config.Validation, sandboxRoot: config.SandboxRoot,
 		risk: config.Risk, specialist: config.Specialist, boundary: config.Boundary,
-		nonlocal: config.NonLocal, localCompletion: config.LocalCompletion,
+		validationSession: config.ValidationSession,
+		nonlocal:          config.NonLocal, localCompletion: config.LocalCompletion,
 		declaredProfile: config.DeclaredProfile, allowLegacyV1: config.AllowLegacyV1,
 	}, nil
 }
@@ -960,6 +967,8 @@ type runRecord struct {
 	EffectiveProfile               deliveryevidence.DeliveryRiskProfile
 	RequiredBoundaries             []SensitiveBoundary
 	ProfileHistory                 []ProfileTransition
+	ValidationSessions             []ValidationSession
+	ValidationInvalidations        []ValidationInvalidation
 	NonLocal                       *NonLocalDelivery
 	Timing                         []Timing
 	CreatedAt                      string
