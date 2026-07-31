@@ -89,9 +89,10 @@ specification; omitting it selects the self-contained authority form. This is a
 semantic scope decision, not phase sequencing. Repeat the same command to
 resume. Add `--decision`, `--repair`, or
 `--review-content` only when the returned state requests that typed semantic
-content. Each option takes a path to a file containing exactly one JSON value
-of its typed contract; inline JSON and free-form prose are not accepted. For
-example, after `Advance` returns a pending decision request:
+content. Use `--ci-attribution` only for an exact failed CI run reported by
+`Advance`. Each of these four options takes a path to a file containing exactly
+one JSON value of its typed contract; inline JSON and free-form prose are not
+accepted. For example, after `Advance` returns a pending decision request:
 
 ```sh
 cat > /tmp/packy-decision.json <<'JSON'

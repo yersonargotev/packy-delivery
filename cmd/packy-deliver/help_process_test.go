@@ -40,6 +40,8 @@ func TestAdvanceHelpCommandsAsProcess(t *testing.T) {
 	for _, args := range [][]string{
 		{"advance", "--help"},
 		{"advance", "-h"},
+		{"advance", "--help", "ignored"},
+		{"advance", "-h", "ignored"},
 		{"help", "advance"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
@@ -79,6 +81,30 @@ func TestUnknownAndLegacyCommandsAsProcess(t *testing.T) {
 		t.Errorf("unknown command received historical sequencing guidance: %q", stderr)
 	}
 
+	stdout, stderr, exitCode = runPackyDeliverForHelpTest(t, binary, "advance", "help")
+	if exitCode == 0 {
+		t.Fatal("undocumented advance help form exited successfully")
+	}
+	if stdout != "" {
+		t.Errorf("undocumented advance help stdout = %q", stdout)
+	}
+	if strings.Contains(stderr, "flag: help requested") {
+		t.Errorf("undocumented advance help leaked flag parser help: %q", stderr)
+	}
+
+	stdout, stderr, exitCode = runPackyDeliverForHelpTest(t, binary, "initialize")
+	if exitCode == 0 {
+		t.Fatal("unprefixed legacy command exited successfully")
+	}
+	if stdout != "" {
+		t.Errorf("unprefixed legacy stdout = %q", stdout)
+	}
+	for _, want := range []string{"legacy-v1", "packy-deliver help"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("unprefixed legacy stderr does not contain %q: %q", want, stderr)
+		}
+	}
+
 	stdout, stderr, exitCode = runPackyDeliverForHelpTest(t, binary, "legacy-v1", "unknown")
 	if exitCode == 0 {
 		t.Fatal("unknown legacy-v1 command exited successfully")
@@ -97,12 +123,18 @@ func TestUnknownAndLegacyCommandsAsProcess(t *testing.T) {
 func buildPackyDeliverForHelpTest(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "packy-deliver")
+	environment := helpTestEnvironment(t)
+	goEnvironment := exec.Command("go", "env", "GOMODCACHE")
+	goEnvironment.Env = environment
+	moduleCache, err := goEnvironment.Output()
+	if err != nil {
+		t.Fatalf("resolve Go module cache: %v", err)
+	}
+	environment = append(environment, "GOMODCACHE="+strings.TrimSpace(string(moduleCache)))
+
 	command := exec.Command("go", "build", "-o", binary, ".")
 	command.Dir = "."
-	command.Env = helpTestEnvironment(t)
-	if moduleCache, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
-		command.Env = append(command.Env, "GOMODCACHE="+strings.TrimSpace(string(moduleCache)))
-	}
+	command.Env = environment
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build packy-deliver: %v\n%s", err, output)
 	}

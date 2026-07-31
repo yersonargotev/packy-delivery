@@ -144,7 +144,7 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		}
 		return fmt.Errorf("help accepts only the optional command %q", "advance")
 	case "advance":
-		if len(args) == 2 && (args[1] == "help" || args[1] == "-h" || args[1] == "--help") {
+		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
 			_, err := io.WriteString(stdout, advanceUsage)
 			return err
 		}
@@ -164,7 +164,10 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		return err
 	default:
 		if c.LegacyPrefixRequired && isLegacyCommand(args[0]) {
-			return fmt.Errorf("unknown command %q; historical evidence sequencing is available only through legacy-v1", args[0])
+			return fmt.Errorf(
+				"unknown command %q; historical evidence sequencing is available only through legacy-v1; run \"packy-deliver help\" for usage",
+				args[0],
+			)
 		}
 		if c.LegacyPrefixRequired {
 			return fmt.Errorf("unknown command %q; run \"packy-deliver help\" for usage", args[0])
