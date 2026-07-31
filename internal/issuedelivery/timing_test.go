@@ -71,7 +71,7 @@ func TestTimingCategoryForPhaseCoversCurrentVocabulary(t *testing.T) {
 	phases := map[string]TimingCategory{
 		"qualification": TimingQualification,
 
-		"implementation":      TimingImplementation,
+		"implementation": TimingImplementation, "candidate-development": TimingImplementation,
 		"non-local-freshness": TimingImplementation, "non-local-authorization": TimingImplementation,
 		"non-local-observation": TimingImplementation, "branch-push": TimingImplementation,
 		"pull-request": TimingImplementation,

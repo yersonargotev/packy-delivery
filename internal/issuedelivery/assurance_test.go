@@ -294,6 +294,67 @@ func approveQualificationFixture(t *testing.T, module *Module, issue int) {
 	}
 }
 
+func TestAdvanceWaitsForFirstCandidateAfterQualificationApproval(t *testing.T) {
+	fixture := assuranceFixtureWithoutQualification(t)
+	fixture.git.value.HeadSHA = fixture.git.value.StartingBaseSHA
+	approveQualificationFixture(t, fixture.module, 357)
+
+	waiting := mustAdvance(t, fixture.module, Request{
+		RepositoryPath: "/repo",
+		IssueNumber:    357,
+	})
+	if waiting.State != StateWaiting || waiting.Candidate != nil ||
+		waiting.PauseCause != PauseExternalResult ||
+		waiting.NextAction != ActionObserveExternalResult {
+		t.Fatalf("unchanged baseline outcome = %#v", waiting)
+	}
+	if got := fixture.module.risk.(*fakeCandidateRiskObserver).calls; got != 0 {
+		t.Fatalf("unchanged baseline risk observations = %d, want 0", got)
+	}
+	if fixture.validator.focusedCalls != 0 {
+		t.Fatalf("unchanged baseline focused validations = %d, want 0", fixture.validator.focusedCalls)
+	}
+	record, err := decodeRun(persistedAssuranceRun(t, fixture.module, fixture.git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != StateWaiting || len(record.Candidates) != 0 ||
+		len(record.ProfileHistory) != 0 ||
+		record.Timing[len(record.Timing)-1].Phase != "candidate-development" {
+		t.Fatalf("unchanged baseline persisted assurance = %#v", record)
+	}
+	waitingRevision := persistedAssuranceRun(t, fixture.module, fixture.git)
+	mustAdvance(t, fixture.module, Request{
+		RepositoryPath: "/repo",
+		IssueNumber:    357,
+	})
+	if resumed := persistedAssuranceRun(t, fixture.module, fixture.git); !reflect.DeepEqual(resumed, waitingRevision) {
+		t.Fatal("repeated unchanged baseline duplicated persisted transition")
+	}
+
+	fixture.git.value.HeadSHA = strings.Repeat("b", 40)
+	fixture.git.value.TreeSHA = strings.Repeat("c", 40)
+	advanced := mustAdvance(t, fixture.module, Request{
+		RepositoryPath: "/repo",
+		IssueNumber:    357,
+	})
+	if advanced.State != StateNeedsReview || advanced.Candidate == nil ||
+		advanced.Candidate.CommitSHA != fixture.git.value.HeadSHA ||
+		advanced.Candidate.TreeSHA != fixture.git.value.TreeSHA {
+		t.Fatalf("changed candidate outcome = %#v", advanced)
+	}
+	if got := fixture.module.risk.(*fakeCandidateRiskObserver).calls; got != 1 {
+		t.Fatalf("changed candidate risk observations = %d, want 1", got)
+	}
+	record, err = decodeRun(persistedAssuranceRun(t, fixture.module, fixture.git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Candidates) != 1 || len(record.ProfileHistory) != 1 {
+		t.Fatalf("changed candidate assurance = %#v", record)
+	}
+}
+
 func compilerQualificationCorrectionForTest(
 	pending *QualificationCorrectionRequest,
 	rows []deliveryevidence.AcceptanceRow,
