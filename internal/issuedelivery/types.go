@@ -154,6 +154,38 @@ type StatusRequest struct {
 	IssueNumber    int
 }
 
+type InputTemplateKind string
+
+const (
+	InputTemplateDecision                InputTemplateKind = "decision"
+	InputTemplateQualificationReview     InputTemplateKind = "qualification-review"
+	InputTemplateQualificationCorrection InputTemplateKind = "qualification-correction"
+	InputTemplateRepair                  InputTemplateKind = "repair"
+	InputTemplateCIAttribution           InputTemplateKind = "ci-attribution"
+)
+
+type InputTemplateRequest struct {
+	RepositoryPath string
+	IssueNumber    int
+	Kind           InputTemplateKind
+}
+
+type CIFailureAttributionInput struct {
+	CheckIdentity string               `json:"check_identity"`
+	RunID         int64                `json:"run_id"`
+	HeadSHA       string               `json:"head_sha"`
+	DetailsURL    string               `json:"details_url"`
+	Attribution   CIFailureAttribution `json:"attribution"`
+}
+
+type InputTemplate struct {
+	Decision                *Decision
+	QualificationReview     *QualificationReview
+	QualificationCorrection *QualificationCorrection
+	Repair                  *RepairDecision
+	CIAttributions          []CIFailureAttributionInput
+}
+
 type Timing struct {
 	Sequence    int    `json:"sequence"`
 	Phase       string `json:"phase"`
@@ -268,6 +300,10 @@ type NonLocalGateway interface {
 	RetryInfrastructureCheck(context.Context, RetryInfrastructureCheckRequest) error
 	EnsureMerge(context.Context, EnsureMergeRequest) error
 	EnsureRemoteIssueBranchAbsent(context.Context, DeleteRemoteIssueBranchRequest) error
+}
+
+type NonLocalObserver interface {
+	ObserveNonLocal(context.Context, NonLocalObserveRequest) (NonLocalObservation, error)
 }
 
 type LocalCompletionGateway interface {
@@ -851,6 +887,7 @@ type Config struct {
 	Specialist        SpecialistReviewExecutor
 	Boundary          BoundaryValidationExecutor
 	ValidationSession ValidationSessionExecutor
+	NonLocalObserver  NonLocalObserver
 	NonLocal          NonLocalGateway
 	LocalCompletion   LocalCompletionGateway
 	SandboxRoot       string
@@ -868,6 +905,7 @@ type Module struct {
 	specialist        SpecialistReviewExecutor
 	boundary          BoundaryValidationExecutor
 	validationSession ValidationSessionExecutor
+	nonlocalObserver  NonLocalObserver
 	nonlocal          NonLocalGateway
 	localCompletion   LocalCompletionGateway
 	sandboxRoot       string
@@ -903,6 +941,9 @@ func New(config Config) (*Module, error) {
 	if config.NonLocal != nil && config.Review == nil {
 		return nil, fmt.Errorf("non-local delivery requires configured candidate assurance")
 	}
+	if config.NonLocalObserver == nil {
+		config.NonLocalObserver = config.NonLocal
+	}
 	if config.LocalCompletion != nil && config.NonLocal == nil {
 		return nil, fmt.Errorf("local completion requires configured non-local delivery")
 	}
@@ -921,6 +962,7 @@ func New(config Config) (*Module, error) {
 		review: config.Review, validation: config.Validation, sandboxRoot: config.SandboxRoot,
 		risk: config.Risk, specialist: config.Specialist, boundary: config.Boundary,
 		validationSession: config.ValidationSession,
+		nonlocalObserver:  config.NonLocalObserver,
 		nonlocal:          config.NonLocal, localCompletion: config.LocalCompletion,
 		declaredProfile: config.DeclaredProfile, allowLegacyV1: config.AllowLegacyV1,
 	}, nil

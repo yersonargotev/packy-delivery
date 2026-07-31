@@ -45,13 +45,7 @@ type advanceReviewContent struct {
 	QualificationCorrection *issuedelivery.QualificationCorrection `json:"qualification_correction,omitempty"`
 }
 
-type advanceCIFailureAttribution struct {
-	CheckIdentity string                             `json:"check_identity"`
-	RunID         int64                              `json:"run_id"`
-	HeadSHA       string                             `json:"head_sha"`
-	DetailsURL    string                             `json:"details_url"`
-	Attribution   issuedelivery.CIFailureAttribution `json:"attribution"`
-}
+type advanceCIFailureAttribution = issuedelivery.CIFailureAttributionInput
 
 type advanceReport struct {
 	RunID                    string                                        `json:"run_id"`
