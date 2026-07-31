@@ -1710,6 +1710,50 @@ func TestAdvanceReusesExactReceiptAndInvalidatesChangedCandidate(t *testing.T) {
 	}
 }
 
+func TestAdvanceBlocksInvalidBranchBeforeLegacyExhaustiveValidation(t *testing.T) {
+	module, git, _, _, validator := assuranceFixture(t)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+
+	git.value.Branch = "main"
+	blocked := mustAdvance(t, module, request)
+	if blocked.State != StateBlocked || blocked.BlockerKind != BlockerLocalReadiness ||
+		blocked.NextAction != ActionRestoreLocalReadiness {
+		t.Fatalf("invalid branch outcome=%#v", blocked)
+	}
+	if validator.exhaustiveCalls != 0 {
+		t.Fatalf("invalid branch invoked exhaustive validator %d times", validator.exhaustiveCalls)
+	}
+	for _, form := range []string{
+		"chore/issue-357-*", "feat/issue-357-*", "fix/issue-357-*",
+	} {
+		if !strings.Contains(blocked.Reason, form) {
+			t.Fatalf("local-readiness reason %q does not list %q", blocked.Reason, form)
+		}
+	}
+}
+
+func TestAdvanceAcceptsEveryDeliveryBranchFormBeforeExhaustiveValidation(t *testing.T) {
+	for _, branch := range []string{
+		"chore/issue-357-readiness", "feat/issue-357-readiness", "fix/issue-357-readiness",
+	} {
+		t.Run(branch, func(t *testing.T) {
+			module, git, _, _, validator := assuranceFixture(t)
+			request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+			mustAdvance(t, module, request)
+			mustAdvance(t, module, request)
+			git.value.Branch = branch
+
+			ready := mustAdvance(t, module, request)
+			if ready.State != StateWaiting || ready.LocalReadiness == nil ||
+				validator.exhaustiveCalls != 1 {
+				t.Fatalf("accepted branch outcome=%#v exhaustive=%d", ready, validator.exhaustiveCalls)
+			}
+		})
+	}
+}
+
 func TestAdvanceBlocksUnsafeValidationSandbox(t *testing.T) {
 	module, _, _, _, validator := assuranceFixture(t)
 	validator.invalidSandbox = true

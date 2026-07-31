@@ -191,7 +191,9 @@ func (m *Module) advanceAssurance(
 			)
 		}
 		return m.persistAssuranceTransition(
-			store, record, StateBlocked, "local readiness no longer matches the current branch or workspace",
+			store, record, StateBlocked,
+			"local readiness no longer matches the current branch or workspace; "+
+				localReadinessBlockReason(tracker.Issue.Number),
 			"local-readiness",
 		)
 	}
@@ -278,6 +280,13 @@ func (m *Module) advanceAssurance(
 	}
 	if hasAcceptedFindings(candidate.RepairDecision) {
 		return outcomeWithReason(record, StateNeedsReview, "accepted findings must be repaired as one candidate batch"), nil
+	}
+	if candidate.Exhaustive == nil && !exactLocalReadiness(git, *candidate, tracker.Issue.Number) {
+		return m.persistAssuranceTransition(
+			store, record, StateBlocked,
+			localReadinessBlockReason(tracker.Issue.Number),
+			"local-readiness",
+		)
 	}
 	var validationSession *ValidationSession
 	if record.Schema != legacyRunSchema && m.validationSession != nil {
@@ -1198,12 +1207,39 @@ func containsAxis(axes []deliveryevidence.ReviewAxis, target deliveryevidence.Re
 }
 
 func deliveryBranch(branch string, issue int) bool {
-	for _, prefix := range []string{"chore/", "feat/", "fix/"} {
-		if strings.HasPrefix(branch, prefix+"issue-"+fmt.Sprint(issue)+"-") {
+	for _, prefix := range deliveryBranchPrefixes(issue) {
+		if strings.HasPrefix(branch, prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+func deliveryBranchPrefixes(issue int) []string {
+	return []string{
+		"chore/issue-" + fmt.Sprint(issue) + "-",
+		"feat/issue-" + fmt.Sprint(issue) + "-",
+		"fix/issue-" + fmt.Sprint(issue) + "-",
+	}
+}
+
+func deliveryBranchForms(issue int) []string {
+	prefixes := deliveryBranchPrefixes(issue)
+	forms := make([]string, len(prefixes))
+	for index, prefix := range prefixes {
+		forms[index] = prefix + "*"
+	}
+	return forms
+}
+
+func exactLocalReadiness(git GitObservation, candidate Candidate, issue int) bool {
+	return git.WorkspaceClean && git.HeadSHA == candidate.CommitSHA &&
+		git.TreeSHA == candidate.TreeSHA && deliveryBranch(git.Branch, issue)
+}
+
+func localReadinessBlockReason(issue int) string {
+	return "local readiness requires a clean workspace, exact candidate HEAD/tree, and one of: " +
+		strings.Join(deliveryBranchForms(issue), ", ")
 }
 
 func outcomeWithReason(record runRecord, state State, reason string) Outcome {
