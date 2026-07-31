@@ -133,7 +133,21 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		return errors.New("command is required: advance, status, version, or a legacy v1 command")
 	}
 	switch args[0] {
+	case "help", "-h", "--help":
+		if len(args) == 1 {
+			_, err := io.WriteString(stdout, rootUsage)
+			return err
+		}
+		if args[0] == "help" && len(args) == 2 && args[1] == "advance" {
+			_, err := io.WriteString(stdout, advanceUsage)
+			return err
+		}
+		return fmt.Errorf("help accepts only the optional command %q", "advance")
 	case "advance":
+		if containsAdvanceHelpFlag(args[1:]) {
+			_, err := io.WriteString(stdout, advanceUsage)
+			return err
+		}
 		return c.advance(ctx, args[1:], stdout)
 	case "legacy-v1":
 		if len(args) == 1 {
@@ -149,10 +163,78 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		_, err := fmt.Fprintln(stdout, version)
 		return err
 	default:
+		if c.LegacyPrefixRequired && isLegacyCommand(args[0]) {
+			return fmt.Errorf(
+				"unknown command %q; historical evidence sequencing is available only through legacy-v1; run \"packy-deliver help\" for usage",
+				args[0],
+			)
+		}
 		if c.LegacyPrefixRequired {
-			return fmt.Errorf("unknown command %q; historical evidence sequencing is available only through legacy-v1", args[0])
+			return fmt.Errorf("unknown command %q; run \"packy-deliver help\" for usage", args[0])
 		}
 		return c.runLegacy(ctx, args, stdout)
+	}
+}
+
+func containsAdvanceHelpFlag(args []string) bool {
+	skipValue := false
+	for _, arg := range args {
+		if skipValue {
+			skipValue = false
+			continue
+		}
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		switch arg {
+		case "-repository", "--repository", "-issue", "--issue", "-spec", "--spec",
+			"-risk-profile", "--risk-profile", "-decision", "--decision",
+			"-repair", "--repair", "-review-content", "--review-content",
+			"-ci-attribution", "--ci-attribution", "-output", "--output":
+			skipValue = true
+		}
+	}
+	return false
+}
+
+const rootUsage = `Usage: packy-deliver <command> [options]
+
+Commands:
+  advance    Advance resumable issue delivery
+  status     Show delivery status
+  version    Print the build version
+  legacy-v1 Run a historical v1 command
+
+Run "packy-deliver help advance" for advance options.
+`
+
+const advanceUsage = `Usage: packy-deliver advance [options]
+
+Options:
+  --repository PATH          Repository to observe (default ".")
+  --issue NUMBER             Approved Packy issue number (required)
+  --spec NUMBER              Governing specification issue number
+  --risk-profile PROFILE     low-risk, standard, or high-risk (default "standard")
+  --decision PATH            PATH to a file containing exactly one Decision JSON value
+  --repair PATH              PATH to a file containing exactly one RepairDecision JSON value
+  --review-content PATH      PATH to a file containing exactly one review-content JSON object
+  --ci-attribution PATH      PATH to a file containing exactly one JSON array of CI failure attributions
+  --authorize-non-local      Authorize delivery effects after local readiness
+  --full-report              Emit the complete canonical JSON report
+  --output FORMAT            Compact report format: json or text (default "json")
+`
+
+func isLegacyCommand(name string) bool {
+	switch name {
+	case "initialize", "record-iteration", "record-review", "record-adjudication",
+		"review-status", "record-exhaustive-validation", "validation-status",
+		"record-focused-validation", "local-gate", "non-local-readiness", "final-outcome":
+		return true
+	default:
+		return false
 	}
 }
 

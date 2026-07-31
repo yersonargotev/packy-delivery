@@ -125,10 +125,10 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	f.IntVar(&options.IssueNumber, "issue", 0, "approved Packy issue number")
 	f.IntVar(&options.SpecificationNumber, "spec", 0, "approved governing specification issue number")
 	f.StringVar(&profile, "risk-profile", string(deliveryevidence.RiskStandard), "declared low-risk, standard, or high-risk profile")
-	f.StringVar(&decisionPath, "decision", "", "typed semantic qualification decision")
-	f.StringVar(&repairPath, "repair", "", "typed finding adjudication and repair classification")
-	f.StringVar(&reviewPath, "review-content", "", "candidate and specialist review content")
-	f.StringVar(&ciAttributionPath, "ci-attribution", "", "typed attribution of exact failed CI runs")
+	f.StringVar(&decisionPath, "decision", "", "PATH to a file containing exactly one Decision JSON value")
+	f.StringVar(&repairPath, "repair", "", "PATH to a file containing exactly one RepairDecision JSON value")
+	f.StringVar(&reviewPath, "review-content", "", "PATH to a file containing exactly one review-content JSON object")
+	f.StringVar(&ciAttributionPath, "ci-attribution", "", "PATH to a file containing exactly one JSON array of CI failure attributions")
 	f.BoolVar(&options.AuthorizeRemote, "authorize-non-local", false, "authorize deterministic delivery effects after exact local readiness")
 	f.BoolVar(&options.FullReport, "full-report", false, "emit the complete canonical JSON report")
 	f.StringVar(&options.Output, "output", "json", "compact report format: json or text")
@@ -156,16 +156,16 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 		options.DeclaredProfile != deliveryevidence.RiskHigh {
 		return fmt.Errorf("risk profile %q is invalid", profile)
 	}
-	if err := decodeOptionalExactJSON(decisionPath, &options.Decision); err != nil {
-		return fmt.Errorf("decode decision: %w", err)
+	if err := decodeOptionalExactJSON("--decision", decisionPath, &options.Decision); err != nil {
+		return err
 	}
-	if err := decodeOptionalExactJSON(repairPath, &options.Repair); err != nil {
-		return fmt.Errorf("decode repair: %w", err)
+	if err := decodeOptionalExactJSON("--repair", repairPath, &options.Repair); err != nil {
+		return err
 	}
 	if reviewPath != "" {
 		var content advanceReviewContent
-		if err := decodeExactJSONFile(reviewPath, &content); err != nil {
-			return fmt.Errorf("decode review content: %w", err)
+		if err := decodeSemanticJSONFile("--review-content", reviewPath, &content); err != nil {
+			return err
 		}
 		options.Reviews = content.Reviews
 		options.Specialists = content.Specialists
@@ -174,8 +174,8 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 		options.QualificationCorrection = content.QualificationCorrection
 	}
 	if ciAttributionPath != "" {
-		if err := decodeExactJSONFile(ciAttributionPath, &options.CIFailureAttributions); err != nil {
-			return fmt.Errorf("decode CI attribution: %w", err)
+		if err := decodeSemanticJSONFile("--ci-attribution", ciAttributionPath, &options.CIFailureAttributions); err != nil {
+			return err
 		}
 		if options.CIFailureAttributions == nil {
 			return errors.New("CI attribution requires an explicit array")
@@ -436,22 +436,22 @@ func reportFromOutcome(outcome issuedelivery.Outcome, now time.Time) (advanceRep
 	}, nil
 }
 
-func decodeOptionalExactJSON[T any](path string, target **T) error {
+func decodeOptionalExactJSON[T any](option, path string, target **T) error {
 	if path == "" {
 		return nil
 	}
 	var value T
-	if err := decodeExactJSONFile(path, &value); err != nil {
+	if err := decodeSemanticJSONFile(option, path, &value); err != nil {
 		return err
 	}
 	*target = &value
 	return nil
 }
 
-func decodeExactJSONFile(path string, target any) error {
+func decodeSemanticJSONFile(option, path string, target any) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s expected a JSON file path: %w", option, err)
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()

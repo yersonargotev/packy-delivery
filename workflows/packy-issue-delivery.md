@@ -1,7 +1,7 @@
 # Packy Issue Delivery
 
 Status: Active
-Release: v0.2.1
+Release: v0.3.0
 
 ## Goal
 
@@ -89,7 +89,31 @@ specification; omitting it selects the self-contained authority form. This is a
 semantic scope decision, not phase sequencing. Repeat the same command to
 resume. Add `--decision`, `--repair`, or
 `--review-content` only when the returned state requests that typed semantic
-content. Before candidate development, review content may carry an independent
+content. Use `--ci-attribution` only for an exact failed CI run reported by
+`Advance`. Each of these four options takes a path to a file containing exactly
+one JSON value of its typed contract; inline JSON and free-form prose are not
+accepted. For example, after `Advance` returns a pending decision request:
+
+```sh
+cat > /tmp/packy-decision.json <<'JSON'
+{
+  "request_id": "decision-request-id-from-Advance",
+  "disposition": "owned-now",
+  "requirement": "Implement the clarified behavior in the accepted scope.",
+  "evidence_link": "https://github.com/yersonargotev/packy/issues/361#issuecomment-123456789"
+}
+JSON
+
+packy-deliver advance \
+  --repository /absolute/path/to/packy \
+  --issue 361 \
+  --risk-profile standard \
+  --decision /tmp/packy-decision.json
+```
+
+The `request_id` must be copied from the exact pending request returned by
+`Advance`; never invent or reuse one. Before candidate development, review
+content may carry an independent
 qualification review bound to the exact authority and acceptance-matrix digest.
 When that review rejects the matrix, `Advance` persists its traceable findings
 and requests one exact qualification correction in the same typed content
