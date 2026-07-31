@@ -212,6 +212,53 @@ func TestValidationSessionRunsCandidateValidatorOnceAndDerivesAllAssuranceArtifa
 	}
 }
 
+func TestValidationSessionBlocksInvalidBranchBeforeStartingValidator(t *testing.T) {
+	module, git, _, _, validator := assuranceFixture(t)
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+
+	git.value.Branch = "main"
+	blocked := mustAdvance(t, module, request)
+	if blocked.State != StateBlocked || blocked.BlockerKind != BlockerLocalReadiness ||
+		blocked.NextAction != ActionRestoreLocalReadiness {
+		t.Fatalf("invalid branch validation-session outcome=%#v", blocked)
+	}
+	if session.observeCalls != 0 || session.executeCalls != 0 || validator.exhaustiveCalls != 0 {
+		t.Fatalf(
+			"invalid branch calls observation=%d session=%d legacy=%d",
+			session.observeCalls, session.executeCalls, validator.exhaustiveCalls,
+		)
+	}
+}
+
+func TestValidationSessionReusesExactReceiptAfterBranchCorrection(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+
+	completed := mustAdvance(t, module, request)
+	if completed.Candidate == nil || completed.Candidate.Exhaustive != nil || session.executeCalls != 1 {
+		t.Fatalf("validation session did not complete once: %#v", completed)
+	}
+	git.value.Branch = "main"
+	blocked := mustAdvance(t, module, request)
+	if blocked.State != StateBlocked || blocked.Candidate == nil ||
+		blocked.Candidate.Exhaustive != nil || session.executeCalls != 1 {
+		t.Fatalf("branch block changed the completed receipt: %#v", blocked)
+	}
+	git.value.Branch = "fix/issue-357-readiness"
+	ready := mustAdvance(t, module, request)
+	if ready.State != StateWaiting || ready.LocalReadiness == nil || session.executeCalls != 1 {
+		t.Fatalf("branch correction invalidated exact receipt: %#v", ready)
+	}
+}
+
 func TestFailedValidationSessionPersistsFailureWithoutAssuranceArtifacts(t *testing.T) {
 	module, git, _, _, validator := assuranceFixture(t)
 	session := &fakeValidationSessionExecutor{executeErr: errors.New("validator failed")}

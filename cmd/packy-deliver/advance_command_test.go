@@ -334,10 +334,13 @@ func TestAdvanceCommandReportsEveryPauseCategory(t *testing.T) {
 		},
 		{
 			name: "invariant block", outcome: issuedelivery.Outcome{
-				State:      issuedelivery.StateBlocked,
-				PauseCause: issuedelivery.PauseInvariantBlock, NextAction: issuedelivery.ActionResolveAuthorityBlock,
+				State: issuedelivery.StateBlocked,
+				Reason: "local readiness requires a clean workspace, exact candidate HEAD/tree, and one of: " +
+					"chore/issue-4-*, feat/issue-4-*, fix/issue-4-*",
+				BlockerKind: issuedelivery.BlockerLocalReadiness,
+				PauseCause:  issuedelivery.PauseInvariantBlock, NextAction: issuedelivery.ActionRestoreLocalReadiness,
 			},
-			cause: issuedelivery.PauseInvariantBlock, action: issuedelivery.ActionResolveAuthorityBlock,
+			cause: issuedelivery.PauseInvariantBlock, action: issuedelivery.ActionRestoreLocalReadiness,
 		},
 		{
 			name: "completed", outcome: issuedelivery.Outcome{
@@ -360,12 +363,24 @@ func TestAdvanceCommandReportsEveryPauseCategory(t *testing.T) {
 			}, &stdout); err != nil {
 				t.Fatal(err)
 			}
-			var report advanceReport
+			var report compactAdvanceReport
 			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 				t.Fatal(err)
 			}
 			if report.PauseCause != test.cause || report.NextAction != test.action {
 				t.Fatalf("pause metadata = %q, %q; want %q, %q", report.PauseCause, report.NextAction, test.cause, test.action)
+			}
+			if test.name == "invariant block" {
+				if report.BlockerKind != issuedelivery.BlockerLocalReadiness {
+					t.Fatalf("blocker kind=%q", report.BlockerKind)
+				}
+				for _, form := range []string{
+					"chore/issue-4-*", "feat/issue-4-*", "fix/issue-4-*",
+				} {
+					if !strings.Contains(report.Reason, form) {
+						t.Fatalf("command blocker reason %q does not list %q", report.Reason, form)
+					}
+				}
 			}
 		})
 	}
