@@ -191,10 +191,10 @@ Options:
   --issue NUMBER             Approved Packy issue number (required)
   --spec NUMBER              Governing specification issue number
   --risk-profile PROFILE     low-risk, standard, or high-risk (default "standard")
-  --decision PATH            Typed semantic qualification decision
-  --repair PATH              Typed finding adjudication and repair classification
-  --review-content PATH      Candidate and specialist review content
-  --ci-attribution PATH      Attribution of exact failed CI runs
+  --decision PATH            PATH to a file containing exactly one Decision JSON value
+  --repair PATH              PATH to a file containing exactly one RepairDecision JSON value
+  --review-content PATH      PATH to a file containing exactly one review-content JSON object
+  --ci-attribution PATH      PATH to a file containing exactly one JSON array of CI failure attributions
   --authorize-non-local      Authorize delivery effects after local readiness
   --full-report              Emit the complete canonical JSON report
   --output FORMAT            Compact report format: json or text (default "json")

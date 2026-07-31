@@ -961,6 +961,17 @@ func TestAdvanceCommandAdmitsOnlyTypedSemanticContent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unknown semantic field accepted: %v", err)
 	}
+
+	multiple := filepath.Join(root, "multiple.json")
+	if err := os.WriteFile(multiple, []byte(`{"request_id":"x"} {"request_id":"y"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361", "--decision", multiple,
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "exactly one JSON value") {
+		t.Fatalf("multiple semantic JSON values accepted: %v", err)
+	}
 }
 
 func TestAdvanceCommandRejectsCallerPhaseSequencingInputs(t *testing.T) {
