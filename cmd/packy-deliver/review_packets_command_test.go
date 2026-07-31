@@ -195,6 +195,34 @@ func TestReviewPacketDirectoryRefusesExistingAndNonRegularTargets(t *testing.T) 
 	}
 }
 
+func TestAtomicReviewPacketDirectoryPublicationDoesNotReplaceRaceWinner(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "manifest.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(target, "race-winner")
+	if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicPublishReviewPacketDirectory(staging, target); err == nil {
+		t.Fatal("atomic directory publication replaced an existing race winner")
+	}
+	if raw, err := os.ReadFile(sentinel); err != nil || string(raw) != "preserve" {
+		t.Fatalf("race winner was changed: %q, %v", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(staging, "manifest.json")); err != nil {
+		t.Fatalf("failed publication consumed staging directory: %v", err)
+	}
+}
+
 func TestAdvanceReviewContentDirectoryRejectsMismatchedAndSymlinkedResponses(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "packets")
 	if err := writeReviewPacketDirectory(output, testReviewPacketSet()); err != nil {
@@ -438,6 +466,21 @@ func TestReviewPacketDirectoryPartiallyAdmitsReplaysAndRejectsConflict(t *testin
 	)
 	if replayed.Candidate == nil || len(replayed.Candidate.Reviews) != 1 {
 		t.Fatalf("replayed packet directory duplicated response = %#v", replayed)
+	}
+
+	alternateBytes, err := json.MarshalIndent(response, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(responsePath, alternateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = advanceCommand.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361",
+		"--risk-profile", "low-risk", "--full-report", "--review-content", output,
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "conflicts with the already persisted response") {
+		t.Fatalf("byte-different semantic replay accepted: %v", err)
 	}
 
 	response.Candidate.Findings = []deliveryevidence.ReviewFinding{{

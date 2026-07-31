@@ -75,7 +75,22 @@ type ReviewPacket struct {
 	PriorSpecialistFindings     []SpecialistFinding                             `json:"prior_specialist_findings"`
 	PriorAdjudications          []deliveryevidence.Adjudication                 `json:"prior_adjudications"`
 	PriorAssuranceAdjudications []deliveryevidence.AssuranceAdjudicationReceipt `json:"prior_assurance_adjudications"`
+	RequiredBoundaryProof       *ReviewPacketBoundaryProofObligation            `json:"required_boundary_proof,omitempty"`
 	Response                    ReviewPacketResponseTemplate                    `json:"response"`
+}
+
+type ReviewPacketBoundaryProofObligation struct {
+	RunID              string                              `json:"run_id"`
+	CandidateID        string                              `json:"candidate_id"`
+	Repository         deliveryevidence.RepositoryIdentity `json:"repository"`
+	Issue              deliveryevidence.IssueIdentity      `json:"issue"`
+	Boundary           SensitiveBoundary                   `json:"boundary"`
+	CommitSHA          string                              `json:"commit_sha"`
+	TreeSHA            string                              `json:"tree_sha"`
+	Sandboxed          bool                                `json:"sandboxed"`
+	IsolatedHome       bool                                `json:"isolated_home"`
+	IsolatedConfig     bool                                `json:"isolated_config"`
+	NoOperatorMutation bool                                `json:"no_operator_mutation"`
 }
 
 type ReviewPacketResponseTemplate struct {
@@ -228,6 +243,7 @@ func reviewPacketsFromRecord(record runRecord, git GitObservation, request Revie
 			packet := base
 			packet.Boundary, packet.Specialist, packet.Generation = boundary, specialistForBoundary(boundary), generation
 			bindPacketCandidate(&packet, *candidate)
+			packet.RequiredBoundaryProof = boundaryProofObligation(record, *candidate, boundary)
 			for _, review := range candidate.SpecialistReviews {
 				if review.Boundary == boundary {
 					packet.PriorSpecialistFindings = append(packet.PriorSpecialistFindings, review.Findings...)
@@ -334,7 +350,8 @@ func finalizeReviewPacket(packet *ReviewPacket) error {
 		Boundary                                 SensitiveBoundary           `json:"boundary,omitempty"`
 		Generation, Iteration                    int
 		AcceptanceRowsSHA256, CommitSHA, TreeSHA string
-	}{reviewPacketSchema, packet.Kind, packet.RunID, packet.AuthoritySHA256, packet.CandidateID, packet.Axis, packet.Boundary, packet.Generation, packet.Iteration, packet.AcceptanceRowsSHA256, packet.CommitSHA, packet.TreeSHA}
+		RequiredBoundaryProof                    *ReviewPacketBoundaryProofObligation `json:"required_boundary_proof,omitempty"`
+	}{reviewPacketSchema, packet.Kind, packet.RunID, packet.AuthoritySHA256, packet.CandidateID, packet.Axis, packet.Boundary, packet.Generation, packet.Iteration, packet.AcceptanceRowsSHA256, packet.CommitSHA, packet.TreeSHA, packet.RequiredBoundaryProof}
 	id, err := canonicalReviewPacketDigest(idProjection)
 	if err != nil {
 		return err
@@ -376,10 +393,15 @@ func specialistPacketID(record runRecord, candidate Candidate, boundary Sensitiv
 	packet := packetIdentityBase(record, ReviewPacketSpecialist)
 	packet.Boundary, packet.Specialist, packet.Generation = boundary, specialistForBoundary(boundary), len(record.Candidates)
 	bindPacketCandidate(&packet, candidate)
+	packet.RequiredBoundaryProof = boundaryProofObligation(record, candidate, boundary)
 	if err := finalizeReviewPacket(&packet); err != nil {
 		return ""
 	}
 	return packet.PacketID
+}
+
+func boundaryProofObligation(record runRecord, candidate Candidate, boundary SensitiveBoundary) *ReviewPacketBoundaryProofObligation {
+	return &ReviewPacketBoundaryProofObligation{RunID: record.ID, CandidateID: candidate.ID, Repository: record.Repository, Issue: record.Issue, Boundary: boundary, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA, Sandboxed: true, IsolatedHome: true, IsolatedConfig: true, NoOperatorMutation: true}
 }
 
 func packetIdentityBase(record runRecord, kind ReviewPacketKind) ReviewPacket {
@@ -397,4 +419,50 @@ func canonicalReviewPacketDigest(value any) (string, error) {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func validatePacketResponseDigest(packetID, digest string, completed bool) error {
+	if packetID == "" {
+		if digest != "" {
+			return errors.New("legacy response without packet ID cannot bind a response digest")
+		}
+		return nil
+	}
+	if digest == "" && !completed {
+		return nil
+	}
+	if !runIDPattern.MatchString(digest) {
+		return errors.New("completed packet response requires an exact source SHA-256")
+	}
+	return nil
+}
+
+func packetFindingKey(packetID, findingID string) string {
+	if packetID == "" {
+		return findingID
+	}
+	return packetID + "\x00" + findingID
+}
+
+func qualifyPacketFindingID(packetID, findingID string) string {
+	if packetID == "" || strings.HasPrefix(findingID, packetID+":") {
+		return findingID
+	}
+	return packetID + ":" + findingID
+}
+
+func qualifyCandidateReviewFindings(review CandidateReview) CandidateReview {
+	review.Findings = append([]deliveryevidence.ReviewFinding{}, review.Findings...)
+	for i := range review.Findings {
+		review.Findings[i].ID = qualifyPacketFindingID(review.PacketID, review.Findings[i].ID)
+	}
+	return review
+}
+
+func qualifySpecialistReviewFindings(review SpecialistReview) SpecialistReview {
+	review.Findings = append([]SpecialistFinding{}, review.Findings...)
+	for i := range review.Findings {
+		review.Findings[i].ID = qualifyPacketFindingID(review.PacketID, review.Findings[i].ID)
+	}
+	return review
 }

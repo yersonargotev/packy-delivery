@@ -477,6 +477,7 @@ func reconcileCandidatePacketResponses(record *runRecord, candidate *Candidate, 
 		if !review.Completed {
 			continue
 		}
+		review = qualifyCandidateReviewFindings(review)
 		matched := false
 		for _, persisted := range candidate.Reviews {
 			if persisted.Axis != review.Axis || persisted.Iteration != review.Iteration {
@@ -698,6 +699,7 @@ func (m *Module) executeReviews(
 		); err != nil {
 			return nil, err
 		}
+		result.review = qualifyCandidateReviewFindings(result.review)
 		if result.review.Axis == deliveryevidence.ReviewSpec && result.review.Completed &&
 			phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
 			evidence := *record.Evidence
@@ -860,6 +862,9 @@ func validateCandidateReview(
 	if review.PacketID != "" && (len(expectedPacketID) != 1 || review.PacketID != expectedPacketID[0]) {
 		return errors.New("candidate review does not match its exact current packet")
 	}
+	if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+		return fmt.Errorf("candidate review source: %w", err)
+	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete candidate review cannot contain findings")
 	}
@@ -895,15 +900,16 @@ func validateReviewBatch(candidate Candidate, reviews []CandidateReview) error {
 	seen := make(map[string]bool)
 	for _, review := range candidate.Reviews {
 		for _, finding := range review.Findings {
-			seen[finding.ID] = true
+			seen[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range reviews {
 		for _, finding := range review.Findings {
-			if seen[finding.ID] {
+			key := packetFindingKey(review.PacketID, finding.ID)
+			if seen[key] {
 				return fmt.Errorf("duplicate candidate review finding ID %q", finding.ID)
 			}
-			seen[finding.ID] = true
+			seen[key] = true
 		}
 	}
 	return nil

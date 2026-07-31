@@ -377,15 +377,16 @@ type ReviewRequest struct {
 }
 
 type CandidateReview struct {
-	PacketID    string                           `json:"packet_id,omitempty"`
-	CandidateID string                           `json:"candidate_id"`
-	Axis        deliveryevidence.ReviewAxis      `json:"axis"`
-	Iteration   int                              `json:"iteration,omitempty"`
-	CommitSHA   string                           `json:"commit_sha,omitempty"`
-	TreeSHA     string                           `json:"tree_sha,omitempty"`
-	Findings    []deliveryevidence.ReviewFinding `json:"findings"`
-	Acceptance  []AcceptanceProof                `json:"acceptance,omitempty"`
-	Completed   bool                             `json:"completed"`
+	PacketID       string                           `json:"packet_id,omitempty"`
+	ResponseSHA256 string                           `json:"response_sha256,omitempty"`
+	CandidateID    string                           `json:"candidate_id"`
+	Axis           deliveryevidence.ReviewAxis      `json:"axis"`
+	Iteration      int                              `json:"iteration,omitempty"`
+	CommitSHA      string                           `json:"commit_sha,omitempty"`
+	TreeSHA        string                           `json:"tree_sha,omitempty"`
+	Findings       []deliveryevidence.ReviewFinding `json:"findings"`
+	Acceptance     []AcceptanceProof                `json:"acceptance,omitempty"`
+	Completed      bool                             `json:"completed"`
 }
 
 type CandidateReviewBatch struct {
@@ -416,12 +417,13 @@ type SpecialistFinding struct {
 }
 
 type SpecialistReview struct {
-	PacketID    string              `json:"packet_id,omitempty"`
-	CandidateID string              `json:"candidate_id"`
-	Boundary    SensitiveBoundary   `json:"boundary"`
-	Specialist  string              `json:"specialist"`
-	Findings    []SpecialistFinding `json:"findings"`
-	Completed   bool                `json:"completed"`
+	PacketID       string              `json:"packet_id,omitempty"`
+	ResponseSHA256 string              `json:"response_sha256,omitempty"`
+	CandidateID    string              `json:"candidate_id"`
+	Boundary       SensitiveBoundary   `json:"boundary"`
+	Specialist     string              `json:"specialist"`
+	Findings       []SpecialistFinding `json:"findings"`
+	Completed      bool                `json:"completed"`
 }
 
 type ValidationRequest struct {

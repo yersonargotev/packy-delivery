@@ -369,6 +369,9 @@ func validateCandidates(record runRecord) error {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
 			}
+			if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+				return fmt.Errorf("issue delivery candidate contains an invalid review source: %w", err)
+			}
 			if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) &&
 				(review.Iteration < 1 || review.CommitSHA != candidate.CommitSHA ||
 					review.TreeSHA != candidate.TreeSHA) {
@@ -559,6 +562,9 @@ func validateCandidates(record runRecord) error {
 				!containsBoundary(candidate.RequiredSpecialists, review.Boundary) ||
 				review.Specialist != specialistForBoundary(review.Boundary) || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid specialist review")
+			}
+			if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+				return fmt.Errorf("issue delivery candidate contains an invalid specialist review source: %w", err)
 			}
 			if !review.Completed && len(review.Findings) != 0 {
 				return fmt.Errorf("incomplete issue delivery specialist review contains findings")

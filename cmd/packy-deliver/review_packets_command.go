@@ -136,7 +136,6 @@ func writeReviewPacketDirectory(path string, set issuedelivery.ReviewPacketSet) 
 		Schema: reviewPacketDirectorySchema, RunID: set.RunID,
 		ManifestSHA256: set.Manifest.SHA256,
 	}
-	var names []string
 	for index, packet := range set.Packets {
 		entry := set.Manifest.Entries[index]
 		if packet.PacketID != entry.PacketID || packet.SHA256 != entry.SHA256 ||
@@ -151,7 +150,6 @@ func writeReviewPacketDirectory(path string, set issuedelivery.ReviewPacketSet) 
 		if err := writeStagedReviewPacketFile(staging, responseName, packet.Response); err != nil {
 			return err
 		}
-		names = append(names, packetName, responseName)
 		manifest.Entries = append(manifest.Entries, reviewPacketDirectoryEntry{
 			PacketID: packet.PacketID, SHA256: packet.SHA256, Kind: packet.Kind,
 			PacketFile: packetName, ResponseFile: responseName,
@@ -163,37 +161,15 @@ func writeReviewPacketDirectory(path string, set issuedelivery.ReviewPacketSet) 
 	if err := syncDirectory(staging); err != nil {
 		return fmt.Errorf("sync packet staging directory: %w", err)
 	}
-	if err := os.Mkdir(path, 0o700); err != nil {
+	if err := atomicPublishReviewPacketDirectory(staging, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("output %q already exists", path)
 		}
-		return fmt.Errorf("create packet output directory: %w", err)
-	}
-	createdOutput := true
-	defer func() {
-		if !createdOutput {
-			return
-		}
-		for _, name := range append(names, "manifest.json") {
-			_ = os.Remove(filepath.Join(path, name))
-		}
-		_ = os.Remove(path)
-	}()
-	for _, name := range names {
-		if err := os.Rename(filepath.Join(staging, name), filepath.Join(path, name)); err != nil {
-			return fmt.Errorf("publish review packet file %q: %w", name, err)
-		}
-	}
-	if err := os.Rename(filepath.Join(staging, "manifest.json"), filepath.Join(path, "manifest.json")); err != nil {
-		return fmt.Errorf("publish review packet manifest: %w", err)
-	}
-	if err := syncDirectory(path); err != nil {
-		return fmt.Errorf("sync review packet output: %w", err)
+		return fmt.Errorf("publish review packet directory: %w", err)
 	}
 	if err := syncDirectory(parent); err != nil {
 		return fmt.Errorf("sync review packet parent directory: %w", err)
 	}
-	createdOutput = false
 	return nil
 }
 
@@ -366,6 +342,9 @@ func decodeReviewResponse(raw []byte) (advanceReviewContent, error) {
 	if err := decodeSemanticJSON(raw, &content); err != nil {
 		return advanceReviewContent{}, err
 	}
+	if err := bindReviewResponseSHA256(raw, &content); err != nil {
+		return advanceReviewContent{}, err
+	}
 	return content, nil
 }
 
@@ -403,7 +382,42 @@ func decodePacketResponse(raw []byte, expectedPacketID string) (advanceReviewCon
 	if populated != 1 {
 		return advanceReviewContent{}, errors.New("review response must populate exactly one typed response")
 	}
+	if err := bindReviewResponseSHA256(raw, &content); err != nil {
+		return advanceReviewContent{}, err
+	}
 	return content, nil
+}
+
+func bindReviewResponseSHA256(raw []byte, content *advanceReviewContent) error {
+	sum := sha256.Sum256(raw)
+	digest := hex.EncodeToString(sum[:])
+	for index := range content.Reviews {
+		review := &content.Reviews[index]
+		if review.ResponseSHA256 != "" {
+			return errors.New("candidate response source digest is reserved for admission")
+		}
+		if review.PacketID != "" {
+			review.ResponseSHA256 = digest
+		}
+	}
+	for index := range content.Specialists {
+		review := &content.Specialists[index]
+		if review.ResponseSHA256 != "" {
+			return errors.New("specialist response source digest is reserved for admission")
+		}
+		if review.PacketID != "" {
+			review.ResponseSHA256 = digest
+		}
+	}
+	if review := content.QualificationReview; review != nil {
+		if review.ResponseSHA256 != "" {
+			return errors.New("qualification response source digest is reserved for admission")
+		}
+		if review.PacketID != "" {
+			review.ResponseSHA256 = digest
+		}
+	}
+	return nil
 }
 
 func decodeSemanticJSON(raw []byte, target any) error {

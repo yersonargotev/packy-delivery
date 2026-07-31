@@ -95,7 +95,10 @@ func TestReviewPacketsFromRecordAreDeterministicAndScoped(t *testing.T) {
 	}
 	for _, packet := range specialists {
 		if packet.Specialist == "" || packet.Response.Specialist == nil ||
-			packet.Response.Specialist.PacketID != packet.PacketID {
+			packet.Response.Specialist.PacketID != packet.PacketID || packet.RequiredBoundaryProof == nil ||
+			packet.RequiredBoundaryProof.Boundary != packet.Boundary || !packet.RequiredBoundaryProof.Sandboxed ||
+			!packet.RequiredBoundaryProof.IsolatedHome || !packet.RequiredBoundaryProof.IsolatedConfig ||
+			!packet.RequiredBoundaryProof.NoOperatorMutation {
 			t.Fatalf("specialist packet is not response-bound: %#v", packet)
 		}
 	}
@@ -116,6 +119,7 @@ func TestCandidatePacketResponseRestartReplayAndConflict(t *testing.T) {
 		}
 	}
 	response.Completed = true
+	response.ResponseSHA256 = strings.Repeat("2", 64)
 	changed, err := reconcileCandidatePacketResponses(&record, &record.Candidates[0], []CandidateReview{response, pending})
 	if err != nil || !changed || len(record.Candidates[0].Reviews) != 1 {
 		t.Fatalf("partial persistence = %v, %v, %#v", changed, err, record.Candidates[0].Reviews)
@@ -126,10 +130,61 @@ func TestCandidatePacketResponseRestartReplayAndConflict(t *testing.T) {
 	if err != nil || changed {
 		t.Fatalf("exact restart replay = %v, %v", changed, err)
 	}
+	differentBytes := response
+	differentBytes.ResponseSHA256 = strings.Repeat("3", 64)
+	if _, err := reconcileCandidatePacketResponses(&restarted, &restarted.Candidates[0], []CandidateReview{differentBytes}); err == nil {
+		t.Fatal("semantically equal candidate response with different source digest was accepted")
+	}
 	conflict := response
 	conflict.Findings = []deliveryevidence.ReviewFinding{{ID: "conflict", Axis: conflict.Axis}}
 	if _, err := reconcileCandidatePacketResponses(&restarted, &restarted.Candidates[0], []CandidateReview{conflict}); err == nil {
 		t.Fatal("conflicting persisted candidate packet response was accepted")
+	}
+}
+
+func TestPacketFindingIDsAreScopedAcrossAxesAndBoundaries(t *testing.T) {
+	record, git := reviewPacketTestRecord()
+	record.Evidence.AcceptanceMatrix[0].Obligations = nil
+	packets, err := reviewPacketsFromRecord(record, git, ReviewPacketRequest{Kind: ReviewPacketCandidate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses := make([]CandidateReview, 0, 2)
+	for i, packet := range packets {
+		response := *packet.Response.Candidate
+		response.Completed, response.ResponseSHA256 = true, strings.Repeat(string(rune('4'+i)), 64)
+		response.Findings = []deliveryevidence.ReviewFinding{{ID: "same-local-id", Axis: response.Axis}}
+		responses = append(responses, response)
+	}
+	if changed, err := reconcileCandidatePacketResponses(&record, &record.Candidates[0], responses); err != nil || !changed {
+		t.Fatalf("cross-axis local finding IDs = %v, %v", changed, err)
+	}
+	if record.Candidates[0].Reviews[0].Findings[0].ID == record.Candidates[0].Reviews[1].Findings[0].ID {
+		t.Fatal("cross-axis findings were not packet-qualified")
+	}
+
+	specialistRecord, specialistGit := reviewPacketTestRecord()
+	candidate := &specialistRecord.Candidates[0]
+	candidate.Reviews = []CandidateReview{
+		{CandidateID: candidate.ID, Axis: deliveryevidence.ReviewStandards, Iteration: 1, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA, Findings: []deliveryevidence.ReviewFinding{}, Completed: true},
+		{CandidateID: candidate.ID, Axis: deliveryevidence.ReviewSpec, Iteration: 1, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA, Findings: []deliveryevidence.ReviewFinding{}, Completed: true},
+	}
+	specialists, err := reviewPacketsFromRecord(specialistRecord, specialistGit, ReviewPacketRequest{Kind: ReviewPacketSpecialist})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsesSpecialist := make([]SpecialistReview, 0, 2)
+	for i, packet := range specialists {
+		response := *packet.Response.Specialist
+		response.Completed, response.ResponseSHA256 = true, strings.Repeat(string(rune('6'+i)), 64)
+		response.Findings = []SpecialistFinding{{ID: "same-local-id", Citation: "c", Location: "l", Evidence: "e"}}
+		responsesSpecialist = append(responsesSpecialist, response)
+	}
+	if changed, err := reconcileSpecialistPacketResponses(&specialistRecord, candidate, responsesSpecialist); err != nil || !changed {
+		t.Fatalf("cross-boundary local finding IDs = %v, %v", changed, err)
+	}
+	if candidate.SpecialistReviews[0].Findings[0].ID == candidate.SpecialistReviews[1].Findings[0].ID {
+		t.Fatal("cross-boundary findings were not packet-qualified")
 	}
 }
 
@@ -139,7 +194,7 @@ func TestSpecialistPacketResponseRestartReplayAndConflict(t *testing.T) {
 	candidate.Reviews = []CandidateReview{
 		{Axis: deliveryevidence.ReviewStandards, Completed: true}, {Axis: deliveryevidence.ReviewSpec, Completed: true},
 	}
-	response := SpecialistReview{PacketID: specialistPacketID(record, *candidate, BoundaryGovernance), CandidateID: candidate.ID, Boundary: BoundaryGovernance, Specialist: specialistForBoundary(BoundaryGovernance), Findings: []SpecialistFinding{}, Completed: true}
+	response := SpecialistReview{PacketID: specialistPacketID(record, *candidate, BoundaryGovernance), ResponseSHA256: strings.Repeat("2", 64), CandidateID: candidate.ID, Boundary: BoundaryGovernance, Specialist: specialistForBoundary(BoundaryGovernance), Findings: []SpecialistFinding{}, Completed: true}
 	changed, err := reconcileSpecialistPacketResponses(&record, candidate, []SpecialistReview{response})
 	if err != nil || !changed {
 		t.Fatalf("partial specialist persistence = %v, %v", changed, err)

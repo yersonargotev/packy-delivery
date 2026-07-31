@@ -155,25 +155,27 @@ func (m *Module) executeSpecialistReviews(
 		); err != nil {
 			return nil, err
 		}
+		review = qualifySpecialistReviewFindings(review)
 		reviews = append(reviews, review)
 	}
 	seen := map[string]bool{}
 	for _, review := range candidate.Reviews {
 		for _, finding := range review.Findings {
-			seen[finding.ID] = true
+			seen[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range candidate.SpecialistReviews {
 		for _, finding := range review.Findings {
-			seen[finding.ID] = true
+			seen[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range reviews {
 		for _, finding := range review.Findings {
-			if seen[finding.ID] {
+			key := packetFindingKey(review.PacketID, finding.ID)
+			if seen[key] {
 				return nil, fmt.Errorf("duplicate candidate finding ID %q", finding.ID)
 			}
-			seen[finding.ID] = true
+			seen[key] = true
 		}
 	}
 	return reviews, nil
@@ -191,6 +193,9 @@ func validateSpecialistReview(
 	}
 	if review.PacketID != "" && (len(expectedPacketID) != 1 || review.PacketID != expectedPacketID[0]) {
 		return errors.New("specialist review does not match its exact current packet")
+	}
+	if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+		return fmt.Errorf("specialist review source: %w", err)
 	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete specialist review cannot contain findings")
@@ -213,12 +218,12 @@ func reconcileSpecialistPacketResponses(record *runRecord, candidate *Candidate,
 	seenFindings := map[string]bool{}
 	for _, review := range candidate.Reviews {
 		for _, finding := range review.Findings {
-			seenFindings[finding.ID] = true
+			seenFindings[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	for _, review := range candidate.SpecialistReviews {
 		for _, finding := range review.Findings {
-			seenFindings[finding.ID] = true
+			seenFindings[packetFindingKey(review.PacketID, finding.ID)] = true
 		}
 	}
 	var additions []SpecialistReview
@@ -237,6 +242,7 @@ func reconcileSpecialistPacketResponses(record *runRecord, candidate *Candidate,
 		if !review.Completed {
 			continue
 		}
+		review = qualifySpecialistReviewFindings(review)
 		matched := false
 		for _, persisted := range candidate.SpecialistReviews {
 			if persisted.Boundary != review.Boundary {
@@ -251,10 +257,11 @@ func reconcileSpecialistPacketResponses(record *runRecord, candidate *Candidate,
 			continue
 		}
 		for _, finding := range review.Findings {
-			if seenFindings[finding.ID] {
+			key := packetFindingKey(review.PacketID, finding.ID)
+			if seenFindings[key] {
 				return false, fmt.Errorf("duplicate candidate finding ID %q", finding.ID)
 			}
-			seenFindings[finding.ID] = true
+			seenFindings[key] = true
 		}
 		additions = append(additions, review)
 	}
