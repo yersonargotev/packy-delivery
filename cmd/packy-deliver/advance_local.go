@@ -21,43 +21,83 @@ type productionGitObserver struct {
 
 func (o productionGitObserver) ObserveGit(ctx context.Context, repository string) (issuedelivery.GitObservation, error) {
 	if o.runner == nil {
-		return issuedelivery.GitObservation{}, errors.New("Git runner is required")
+		return issuedelivery.GitObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorRunState,
+			false,
+			errors.New("Git runner is required"),
+		)
 	}
 	common, err := gitOutput(ctx, o.runner, repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe Git common directory: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe Git common directory: %w", err),
+		)
 	}
 	worktree, err := gitOutput(ctx, o.runner, repository, "rev-parse", "--path-format=absolute", "--show-toplevel")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe Git worktree: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe Git worktree: %w", err),
+		)
 	}
 	origin, err := gitOutput(ctx, o.runner, repository, "remote", "get-url", "origin")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe Git origin: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe Git origin: %w", err),
+		)
 	}
 	slug, err := githubSlug(origin)
 	if err != nil || slug != packyRepositorySlug {
-		return issuedelivery.GitObservation{}, errors.New("origin is not the Packy repository")
+		return issuedelivery.GitObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorIdentity,
+			false,
+			errors.New("origin is not the Packy repository"),
+		)
 	}
 	base, err := gitOutput(ctx, o.runner, repository, "rev-parse", "origin/main^{commit}")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe origin/main: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe origin/main: %w", err),
+		)
 	}
 	head, err := gitOutput(ctx, o.runner, repository, "rev-parse", "HEAD^{commit}")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe HEAD: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe HEAD: %w", err),
+		)
 	}
 	tree, err := gitOutput(ctx, o.runner, repository, "rev-parse", "HEAD^{tree}")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe HEAD tree: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe HEAD tree: %w", err),
+		)
 	}
 	status, err := gitRaw(ctx, o.runner, repository, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
-		return issuedelivery.GitObservation{}, fmt.Errorf("observe workspace status: %w", err)
+		return issuedelivery.GitObservation{}, classifyStatusCommandError(
+			issuedelivery.StatusErrorGitRead,
+			issuedelivery.StatusErrorIdentity,
+			fmt.Errorf("observe workspace status: %w", err),
+		)
 	}
 	branch, err := gitOutput(ctx, o.runner, repository, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
-		return issuedelivery.GitObservation{}, errors.New("detached HEAD is not a delivery workspace")
+		return issuedelivery.GitObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorIdentity,
+			false,
+			errors.New("detached HEAD is not a delivery workspace"),
+		)
 	}
 	return issuedelivery.GitObservation{
 		CommonDir: filepath.Clean(common), Worktree: filepath.Clean(worktree), OriginURL: origin,

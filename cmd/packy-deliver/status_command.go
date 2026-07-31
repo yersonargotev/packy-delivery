@@ -23,7 +23,63 @@ type issueDeliveryStatuser interface {
 	Status(context.Context, issuedelivery.StatusRequest) (issuedelivery.Outcome, error)
 }
 
-type statusFactory func() (issueDeliveryStatuser, error)
+type statusFactory func(statusOptions) (issueDeliveryStatuser, error)
+
+type productionStatusNonLocalObserver struct {
+	gateway productionNonLocalGateway
+}
+
+func (observer productionStatusNonLocalObserver) ObserveNonLocal(
+	ctx context.Context,
+	request issuedelivery.NonLocalObserveRequest,
+) (issuedelivery.NonLocalObservation, error) {
+	observation, err := observer.gateway.observeNonLocal(ctx, request, false)
+	if err != nil {
+		var commandError *remoteCommandError
+		if errors.As(err, &commandError) {
+			return issuedelivery.NonLocalObservation{}, classifyStatusCommandError(
+				issuedelivery.StatusErrorExternalRead,
+				issuedelivery.StatusErrorIdentity,
+				err,
+			)
+		}
+		var decodeError *remoteDecodeError
+		if errors.As(err, &decodeError) {
+			return issuedelivery.NonLocalObservation{}, issuedelivery.NewStatusError(
+				issuedelivery.StatusErrorCorruption,
+				false,
+				err,
+			)
+		}
+		return issuedelivery.NonLocalObservation{}, issuedelivery.NewStatusError(
+			issuedelivery.StatusErrorIdentity,
+			false,
+			err,
+		)
+	}
+	return observation, nil
+}
+
+func classifyStatusCommandError(
+	transientClass issuedelivery.StatusErrorClass,
+	rejectedClass issuedelivery.StatusErrorClass,
+	err error,
+) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if _, _, typed := issuedelivery.StatusErrorDetails(err); typed {
+		return err
+	}
+	var rejected *commandRejectedError
+	if errors.As(err, &rejected) {
+		if rejected.transient {
+			return issuedelivery.NewStatusError(transientClass, true, err)
+		}
+		return issuedelivery.NewStatusError(rejectedClass, false, err)
+	}
+	return issuedelivery.NewStatusError(transientClass, true, err)
+}
 
 func (c command) status(ctx context.Context, args []string, stdout io.Writer) error {
 	f := flag.NewFlagSet("packy-deliver status", flag.ContinueOnError)
@@ -53,7 +109,7 @@ func (c command) status(ctx context.Context, args []string, stdout io.Writer) er
 	if c.StatusFactory == nil {
 		return errors.New("Status adapter is unavailable")
 	}
-	observer, err := c.StatusFactory()
+	observer, err := c.StatusFactory(options)
 	if err != nil {
 		return fmt.Errorf("configure Status: %w", err)
 	}
@@ -92,10 +148,23 @@ func containsStatusHelpFlag(args []string) bool {
 	})
 }
 
-func newProductionStatuser() (issueDeliveryStatuser, error) {
+func newProductionStatuser(options statusOptions) (issueDeliveryStatuser, error) {
+	return newProductionObservationModule(options)
+}
+
+func newProductionWatcher(options statusOptions) (issueDeliveryWatcher, error) {
+	return newProductionObservationModule(options)
+}
+
+func newProductionObservationModule(options statusOptions) (*issuedelivery.Module, error) {
 	runner := execRunner{}
 	return issuedelivery.New(issuedelivery.Config{
 		Git:    productionGitObserver{runner: runner},
 		GitHub: productionTrackerObserver{runner: runner},
+		NonLocalObserver: productionStatusNonLocalObserver{
+			gateway: productionNonLocalGateway{
+				runner: runner, repository: options.RepositoryPath,
+			},
+		},
 	})
 }

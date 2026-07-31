@@ -51,6 +51,67 @@ func TestProductionGitObserverObservesExactPackyIdentity(t *testing.T) {
 	}
 }
 
+func TestProductionGitObserverClassifiesStatusReadFailures(t *testing.T) {
+	t.Run("transport", func(t *testing.T) {
+		runner := &fakeLocalRunner{
+			outputs: [][]byte{nil},
+			errors:  []error{errors.New("temporary read failure")},
+		}
+		_, err := (productionGitObserver{runner: runner}).ObserveGit(
+			context.Background(),
+			"/repo",
+		)
+		class, transient, ok := issuedelivery.StatusErrorDetails(err)
+		if !ok || class != issuedelivery.StatusErrorGitRead || !transient {
+			t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+		}
+	})
+
+	t.Run("identity", func(t *testing.T) {
+		runner := &fakeLocalRunner{
+			outputs: [][]byte{
+				[]byte("/repo/.git\n"),
+				[]byte("/repo\n"),
+				[]byte("git@github.com:someone/else.git\n"),
+			},
+			errors: make([]error, 3),
+		}
+		_, err := (productionGitObserver{runner: runner}).ObserveGit(
+			context.Background(),
+			"/repo",
+		)
+		class, transient, ok := issuedelivery.StatusErrorDetails(err)
+		if !ok || class != issuedelivery.StatusErrorIdentity || transient {
+			t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+		}
+	})
+
+	t.Run("rejected identity query", func(t *testing.T) {
+		runner := &fakeLocalRunner{
+			outputs: [][]byte{
+				[]byte("/repo/.git\n"),
+				[]byte("/repo\n"),
+				[]byte("git@github.com:yersonargotev/packy.git\n"),
+				nil,
+			},
+			errors: []error{
+				nil,
+				nil,
+				nil,
+				&commandRejectedError{err: errors.New("unknown revision origin/main")},
+			},
+		}
+		_, err := (productionGitObserver{runner: runner}).ObserveGit(
+			context.Background(),
+			"/repo",
+		)
+		class, transient, ok := issuedelivery.StatusErrorDetails(err)
+		if !ok || class != issuedelivery.StatusErrorIdentity || transient {
+			t.Fatalf("error=%T %v class=%q transient=%t", err, err, class, transient)
+		}
+	})
+}
+
 func TestProductionCandidateRiskObserverClassifiesConservatively(t *testing.T) {
 	head, tree := strings.Repeat("b", 40), strings.Repeat("c", 40)
 	runner := &fakeLocalRunner{

@@ -32,6 +32,43 @@ type activeRun struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+func (fileRunStore) issueLockAvailable(ctx context.Context, commonDir string, issue int) (bool, error) {
+	if ctx == nil {
+		return false, errors.New("issue delivery lock probe requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	issueFD, err := openIssueDirectory(commonDir, issue, false)
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(issueFD)
+	lockFD, err := unix.Openat(
+		issueFD, "advance.lock",
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(lockFD)
+	if err := requireRegularFD(lockFD, "advance.lock"); err != nil {
+		return false, err
+	}
+	if err := unix.Flock(lockFD, unix.LOCK_SH|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer unix.Flock(lockFD, unix.LOCK_UN)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (fileRunStore) observeIssue(
 	ctx context.Context,
 	commonDir string,

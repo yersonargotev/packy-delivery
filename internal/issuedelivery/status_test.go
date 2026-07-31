@@ -36,6 +36,9 @@ func TestStatusObservesPersistedRunOnceWithoutWritingStore(t *testing.T) {
 		status.PauseCause != created.PauseCause || status.NextAction != created.NextAction {
 		t.Fatalf("status = %#v, created = %#v", status, created)
 	}
+	if status.StatusObservation == nil || status.StatusObservation.Changed {
+		t.Fatalf("current status observation = %#v", status.StatusObservation)
+	}
 	git.mu.Lock()
 	gitCalls := git.calls
 	git.mu.Unlock()
@@ -48,6 +51,39 @@ func TestStatusObservesPersistedRunOnceWithoutWritingStore(t *testing.T) {
 	after := snapshotRegularFiles(t, git.value.CommonDir)
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("Status changed run store:\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+func TestStatusProjectsFreshWorktreeIdentityWithoutAdoptingIt(t *testing.T) {
+	module, git, _ := moduleFixture(t, 356)
+	created, err := module.Advance(context.Background(), Request{
+		RepositoryPath: "/repo", IssueNumber: 356,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotRegularFiles(t, git.value.CommonDir)
+	git.mu.Lock()
+	git.value.HeadSHA = strings.Repeat("8", 40)
+	git.value.TreeSHA = strings.Repeat("9", 40)
+	git.value.WorkspaceClean = true
+	git.mu.Unlock()
+
+	status, err := module.Status(context.Background(), StatusRequest{
+		RepositoryPath: "/repo", IssueNumber: 356,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RunID != created.RunID || status.StatusObservation == nil ||
+		!status.StatusObservation.Changed ||
+		!strings.Contains(status.StatusObservation.Current.Value, strings.Repeat("8", 40)) ||
+		status.Observations.CommitSHA == strings.Repeat("8", 40) {
+		t.Fatalf("status=%#v", status)
+	}
+	after := snapshotRegularFiles(t, git.value.CommonDir)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("fresh worktree projection changed persisted run bytes")
 	}
 }
 
@@ -76,7 +112,9 @@ func TestStatusReportsLockContentionWithoutObservingAuthorityOrWriting(t *testin
 				return statusErr
 			}
 			if status.State != StateWaiting || status.PauseCause != PauseLockContention ||
-				status.NextAction != ActionRetryAdvance {
+				status.NextAction != ActionRetryAdvance ||
+				status.StatusObservation == nil ||
+				status.StatusObservation.Current.Kind != StatusIdentityLock {
 				t.Fatalf("lock-contended status = %#v", status)
 			}
 			return nil
@@ -104,6 +142,9 @@ func TestStatusFailsForMissingCorruptAndMismatchedRuns(t *testing.T) {
 			RepositoryPath: "/repo", IssueNumber: 356,
 		}); err == nil || !strings.Contains(err.Error(), "does not exist") {
 			t.Fatalf("missing run error = %v", err)
+		} else if class, transient, ok := StatusErrorDetails(err); !ok ||
+			transient || class != StatusErrorRunState {
+			t.Fatalf("missing run classification = %q transient=%t ok=%t", class, transient, ok)
 		}
 	})
 
@@ -121,6 +162,9 @@ func TestStatusFailsForMissingCorruptAndMismatchedRuns(t *testing.T) {
 			RepositoryPath: "/repo", IssueNumber: 356,
 		}); err == nil || !strings.Contains(err.Error(), "identity does not match") {
 			t.Fatalf("mismatched run error = %v", err)
+		} else if class, transient, ok := StatusErrorDetails(err); !ok ||
+			transient || class != StatusErrorAuthority {
+			t.Fatalf("mismatch classification = %q transient=%t ok=%t", class, transient, ok)
 		}
 	})
 
@@ -142,6 +186,9 @@ func TestStatusFailsForMissingCorruptAndMismatchedRuns(t *testing.T) {
 			RepositoryPath: "/repo", IssueNumber: 356,
 		}); err == nil {
 			t.Fatal("corrupt run was observed successfully")
+		} else if class, transient, ok := StatusErrorDetails(err); !ok ||
+			transient || class != StatusErrorCorruption {
+			t.Fatalf("corrupt run classification = %q transient=%t ok=%t", class, transient, ok)
 		}
 	})
 }

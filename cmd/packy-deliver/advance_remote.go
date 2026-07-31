@@ -22,6 +22,20 @@ type productionNonLocalGateway struct {
 	attributions []advanceCIFailureAttribution
 }
 
+type remoteCommandError struct {
+	err error
+}
+
+func (e *remoteCommandError) Error() string { return e.err.Error() }
+func (e *remoteCommandError) Unwrap() error { return e.err }
+
+type remoteDecodeError struct {
+	err error
+}
+
+func (e *remoteDecodeError) Error() string { return e.err.Error() }
+func (e *remoteDecodeError) Unwrap() error { return e.err }
+
 type remoteRepository struct {
 	ID            string `json:"id"`
 	NameWithOwner string `json:"nameWithOwner"`
@@ -89,50 +103,71 @@ type workflowRun struct {
 	} `json:"actor"`
 }
 
+type remoteRefResponse struct {
+	Ref    string `json:"ref"`
+	Object struct {
+		Type string `json:"type"`
+		SHA  string `json:"sha"`
+	} `json:"object"`
+}
+
 const (
 	checkRunsProjection    = `{check_runs:[.check_runs[]|{name,head_sha,status,conclusion,details_url,app:{id:.app.id,slug:.app.slug}}]}`
 	statusesProjection     = `[.[]|{id,context,state,target_url,creator:{login:.creator.login,id:.creator.id,type:.creator.type,html_url:.creator.html_url}}]`
 	workflowRunProjection  = `{id,name,path,head_sha,html_url,actor:{login:.actor.login,id:.actor.id,type:.actor.type,html_url:.actor.html_url}}`
 	pullRequestsProjection = `[.[]|{number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository:{id:.headRepository.id},closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt,mergeCommit:(if .mergeCommit==null then null else {oid:.mergeCommit.oid} end)}]`
 	pullRequestProjection  = `{number,state,baseRefOid,headRefOid,closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt}`
+	remoteRefsProjection   = `[.[]|{ref,object:{type:.object.type,sha:.object.sha}}]`
 )
 
 func (gateway productionNonLocalGateway) ObserveNonLocal(ctx context.Context, request issuedelivery.NonLocalObserveRequest) (issuedelivery.NonLocalObservation, error) {
+	return gateway.observeNonLocal(ctx, request, true)
+}
+
+func (gateway productionNonLocalGateway) observeNonLocal(
+	ctx context.Context,
+	request issuedelivery.NonLocalObserveRequest,
+	refreshTracking bool,
+) (issuedelivery.NonLocalObservation, error) {
 	if err := gateway.validateObserveRequest(ctx, request); err != nil {
 		return issuedelivery.NonLocalObservation{}, err
 	}
 	repo := repositoryName(request.Repository)
-	if _, err := gateway.output(
-		ctx, "git", "fetch", "--prune", "--no-tags", "origin",
-		"refs/heads/"+request.BaseRef+":refs/remotes/origin/"+request.BaseRef,
-	); err != nil {
-		return issuedelivery.NonLocalObservation{}, fmt.Errorf("refresh exact origin/%s: %w", request.BaseRef, err)
+	if refreshTracking {
+		if _, err := gateway.output(
+			ctx, "git", "fetch", "--prune", "--no-tags", "origin",
+			"refs/heads/"+request.BaseRef+":refs/remotes/origin/"+request.BaseRef,
+		); err != nil {
+			return issuedelivery.NonLocalObservation{}, fmt.Errorf("refresh exact origin/%s: %w", request.BaseRef, err)
+		}
 	}
-	refsRaw, err := gateway.output(ctx, "git", "ls-remote", "--refs", "origin",
-		"refs/heads/"+request.Branch, "refs/heads/"+request.BaseRef)
+	branchHead, err := gateway.observeRemoteRef(ctx, repo, request.Branch)
 	if err != nil {
-		return issuedelivery.NonLocalObservation{}, fmt.Errorf("observe remote refs: %w", err)
+		return issuedelivery.NonLocalObservation{}, fmt.Errorf("observe remote issue branch: %w", err)
 	}
-	refs, err := parseRemoteRefs(refsRaw)
+	baseHead, err := gateway.observeRemoteRef(ctx, repo, request.BaseRef)
 	if err != nil {
-		return issuedelivery.NonLocalObservation{}, err
+		return issuedelivery.NonLocalObservation{}, fmt.Errorf("observe remote base branch: %w", err)
 	}
-	baseHead := refs["refs/heads/"+request.BaseRef]
 	if baseHead == "" {
 		return issuedelivery.NonLocalObservation{}, errors.New("remote base branch is absent")
 	}
-	trackingRaw, err := gateway.output(
-		ctx, "git", "rev-parse", "refs/remotes/origin/"+request.BaseRef+"^{commit}",
-	)
-	if err != nil || strings.TrimSpace(string(trackingRaw)) != baseHead {
-		return issuedelivery.NonLocalObservation{}, errors.New("refreshed origin base does not match remote observation")
+	if refreshTracking {
+		trackingRaw, err := gateway.output(
+			ctx, "git", "rev-parse", "refs/remotes/origin/"+request.BaseRef+"^{commit}",
+		)
+		if err != nil || strings.TrimSpace(string(trackingRaw)) != baseHead {
+			return issuedelivery.NonLocalObservation{}, errors.New("refreshed origin base does not match remote observation")
+		}
 	}
 	observation := issuedelivery.NonLocalObservation{
 		PullRequests: []issuedelivery.RemotePullRequestObservation{},
 		Checks:       []issuedelivery.CICheckObservation{},
 	}
-	if head := refs["refs/heads/"+request.Branch]; head != "" {
-		observation.Branch = &issuedelivery.RemoteBranchObservation{Name: request.Branch, HeadSHA: head}
+	if branchHead != "" {
+		observation.Branch = &issuedelivery.RemoteBranchObservation{
+			Name: request.Branch, HeadSHA: branchHead,
+		}
 	}
 
 	prRaw, err := gateway.output(ctx, "gh", "pr", "list", "--repo", repo, "--state", "all",
@@ -170,14 +205,14 @@ func (gateway productionNonLocalGateway) ObserveNonLocal(ctx context.Context, re
 		return observation.PullRequests[i].Number < observation.PullRequests[j].Number
 	})
 	if len(observation.PullRequests) > 0 {
-		checks, err := gateway.observeChecks(ctx, request, refs["refs/heads/"+request.BaseRef])
+		checks, err := gateway.observeChecks(ctx, request, baseHead)
 		if err != nil {
 			return issuedelivery.NonLocalObservation{}, err
 		}
 		observation.Checks = checks
 	}
-	if observation.Merge != nil {
-		mainHead := refs["refs/heads/"+request.BaseRef]
+	if observation.Merge != nil && refreshTracking {
+		mainHead := baseHead
 		mergeContained, err := gateway.containsOriginMain(ctx, observation.Merge.MergeCommitSHA)
 		if err != nil {
 			return issuedelivery.NonLocalObservation{}, err
@@ -566,21 +601,59 @@ func (gateway productionNonLocalGateway) output(ctx context.Context, name string
 	if name == "git" && gateway.repository != "" {
 		args = append([]string{"-C", gateway.repository}, args...)
 	}
-	return gateway.runner.Output(ctx, name, args...)
+	output, err := gateway.runner.Output(ctx, name, args...)
+	if err != nil {
+		return output, &remoteCommandError{err: err}
+	}
+	return output, nil
+}
+
+func (gateway productionNonLocalGateway) observeRemoteRef(
+	ctx context.Context,
+	repository string,
+	branch string,
+) (string, error) {
+	raw, err := gateway.output(
+		ctx,
+		"gh",
+		"api",
+		"repos/"+repository+"/git/matching-refs/heads/"+branch,
+		"--jq",
+		remoteRefsProjection,
+	)
+	if err != nil {
+		return "", err
+	}
+	var observed []remoteRefResponse
+	if err := exactJSON(raw, &observed); err != nil {
+		return "", fmt.Errorf("decode remote refs: %w", err)
+	}
+	exact := "refs/heads/" + branch
+	head := ""
+	for _, ref := range observed {
+		if ref.Ref != exact {
+			continue
+		}
+		if head != "" || ref.Object.Type != "commit" || !validSHA(ref.Object.SHA) {
+			return "", errors.New("remote branch identity is ambiguous or invalid")
+		}
+		head = ref.Object.SHA
+	}
+	return head, nil
 }
 
 func exactJSON(raw []byte, target any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		return err
+		return &remoteDecodeError{err: err}
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return errors.New("command output contains more than one JSON value")
+			err = errors.New("command output contains more than one JSON value")
 		}
-		return err
+		return &remoteDecodeError{err: err}
 	}
 	return nil
 }
