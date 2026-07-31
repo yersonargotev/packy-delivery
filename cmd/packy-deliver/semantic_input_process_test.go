@@ -63,4 +63,20 @@ func TestAdvanceSemanticInputReadErrorsNameOptionAndPreserveCauseAsProcess(t *te
 			t.Errorf("long-prose stderr does not preserve %q: %q", want, stderr)
 		}
 	}
+
+	stdout, stderr, exitCode := runPackyDeliverForHelpTest(
+		t, binary,
+		"advance", "--repository", repository, "--issue", "361", "--decision", "--help",
+	)
+	if exitCode == 0 {
+		t.Fatal("help-shaped semantic input path exited successfully")
+	}
+	if stdout != "" {
+		t.Errorf("help-shaped semantic input stdout = %q", stdout)
+	}
+	for _, want := range []string{"--decision", "expected a JSON file path"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("help-shaped semantic input stderr does not preserve %q: %q", want, stderr)
+		}
+	}
 }

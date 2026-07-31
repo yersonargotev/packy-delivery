@@ -144,7 +144,7 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		}
 		return fmt.Errorf("help accepts only the optional command %q", "advance")
 	case "advance":
-		if containsHelpFlag(args[1:]) {
+		if containsAdvanceHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
 			return err
 		}
@@ -176,10 +176,25 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 	}
 }
 
-func containsHelpFlag(args []string) bool {
+func containsAdvanceHelpFlag(args []string) bool {
+	skipValue := false
 	for _, arg := range args {
+		if skipValue {
+			skipValue = false
+			continue
+		}
 		if arg == "-h" || arg == "--help" {
 			return true
+		}
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		switch arg {
+		case "-repository", "--repository", "-issue", "--issue", "-spec", "--spec",
+			"-risk-profile", "--risk-profile", "-decision", "--decision",
+			"-repair", "--repair", "-review-content", "--review-content",
+			"-ci-attribution", "--ci-attribution", "-output", "--output":
+			skipValue = true
 		}
 	}
 	return false
