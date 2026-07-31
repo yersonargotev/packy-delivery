@@ -506,6 +506,88 @@ func TestLegacyReviewBatchMigrationUsesContiguousReviewTimingClosures(t *testing
 		batches[1].TimingSequence != 7 || batches[1].CompletedAt != record.Timing[6].CompletedAt {
 		t.Fatalf("second candidate migrated review closures=%#v", batches)
 	}
+	rebound := record
+	rebound.Candidates = append([]Candidate(nil), record.Candidates...)
+	rebound.Candidates[1].ReviewBatches = append(
+		[]CandidateReviewBatch(nil), record.Candidates[1].ReviewBatches...,
+	)
+	rebound.Candidates[1].ReviewBatches[0].TimingSequence =
+		record.Candidates[0].ReviewBatches[0].TimingSequence
+	rebound.Candidates[1].ReviewBatches[0].CompletedAt =
+		record.Candidates[0].ReviewBatches[0].CompletedAt
+	if err := projectAutomaticAssurance(&rebound); err == nil {
+		t.Fatal("candidate review batch rebound to another candidate timing was admitted")
+	}
+}
+
+func TestProfileEscalationDoesNotReceiptAbandonedPartialReviewIteration(t *testing.T) {
+	sha := func(value string) string { return strings.Repeat(value, 40) }
+	record := runRecord{
+		Schema: runSchema,
+		Repository: deliveryevidence.RepositoryIdentity{
+			Owner: "yersonargotev", Name: "packy", NodeID: "R1",
+		},
+		Evidence: &deliveryevidence.Bundle{
+			Schema: deliveryevidence.SchemaV2,
+			Repository: deliveryevidence.RepositoryIdentity{
+				Owner: "yersonargotev", Name: "packy", NodeID: "R1",
+			},
+			AssurancePhases: []deliveryevidence.AssurancePhaseReceipt{{
+				Sequence: 1, Phase: "qualification",
+			}},
+		},
+		Candidates: []Candidate{{
+			ID: "candidate", CommitSHA: sha("b"), TreeSHA: sha("c"),
+			ReviewIteration: 2,
+			RequiredReviews: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			Reviews: []CandidateReview{
+				{
+					CandidateID: "candidate", Iteration: 1, Axis: deliveryevidence.ReviewStandards,
+					CommitSHA: sha("b"), TreeSHA: sha("c"), Completed: true,
+					Findings: []deliveryevidence.ReviewFinding{},
+				},
+				{
+					CandidateID: "candidate", Iteration: 2, Axis: deliveryevidence.ReviewStandards,
+					CommitSHA: sha("b"), TreeSHA: sha("c"), Completed: true,
+					Findings: []deliveryevidence.ReviewFinding{},
+				},
+				{
+					CandidateID: "candidate", Iteration: 2, Axis: deliveryevidence.ReviewSpec,
+					CommitSHA: sha("b"), TreeSHA: sha("c"), Completed: true,
+					Findings: []deliveryevidence.ReviewFinding{},
+				},
+			},
+			ReviewBatches: []CandidateReviewBatch{{
+				Iteration: 2,
+				RequiredAxes: []deliveryevidence.ReviewAxis{
+					deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+				},
+				TimingSequence: 2, CompletedAt: "2026-07-30T01:00:03.000000000Z",
+			}},
+		}},
+		Timing: []Timing{
+			{
+				Sequence: 1, Phase: "review", To: StateNeedsReview,
+				StartedAt:   "2026-07-30T01:00:00.000000000Z",
+				CompletedAt: "2026-07-30T01:00:01.000000000Z",
+			},
+			{
+				Sequence: 2, Phase: "review", To: StateNeedsReview,
+				StartedAt:   "2026-07-30T01:00:02.000000000Z",
+				CompletedAt: "2026-07-30T01:00:03.000000000Z",
+			},
+		},
+	}
+	if err := projectAutomaticAssurance(&record); err == nil ||
+		!strings.Contains(err.Error(), "historical review iteration lacks authoritative review batch") {
+		t.Fatalf("profile escalation promoted an abandoned partial review iteration: %v", err)
+	}
+	if len(record.Evidence.CandidateReviewReceipts) != 0 {
+		t.Fatalf("abandoned partial review iteration received a canonical receipt: %#v",
+			record.Evidence.CandidateReviewReceipts)
+	}
 }
 
 func TestAdvanceBoundedRepairUsesFocusedOriginatingAxisConfirmation(t *testing.T) {
@@ -769,6 +851,62 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	preAssurance, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preAssurance.Evidence.CandidateReviewReceipts = nil
+	preAssurance.Evidence.AssuranceAdjudications = nil
+	preAssurance.Evidence.AssurancePhases = nil
+	preAssurance.Evidence.ExhaustiveAssurance = nil
+	for candidateIndex := range preAssurance.Candidates {
+		candidate := &preAssurance.Candidates[candidateIndex]
+		candidate.ReviewBatches = nil
+		candidate.ExhaustiveHistory = nil
+		if candidate.Exhaustive != nil {
+			candidate.Exhaustive.TimingSequence = 0
+		}
+		for reviewIndex := range candidate.Reviews {
+			for proofIndex := range candidate.Reviews[reviewIndex].Acceptance {
+				if reference := candidate.Reviews[reviewIndex].Acceptance[proofIndex].ReviewReceipt; reference != nil {
+					reference.ReceiptID = ""
+				}
+			}
+		}
+		for proofIndex := range candidate.Acceptance {
+			if reference := candidate.Acceptance[proofIndex].ReviewReceipt; reference != nil {
+				reference.ReceiptID = ""
+			}
+			if reference := candidate.Acceptance[proofIndex].ValidationReceipt; reference != nil {
+				reference.ReceiptID = ""
+			}
+		}
+	}
+	filteredTiming := preAssurance.Timing[:0]
+	for _, timing := range preAssurance.Timing {
+		if timing.Phase != exhaustiveValidationSucceededPhase {
+			filteredTiming = append(filteredTiming, timing)
+		}
+	}
+	preAssurance.Timing = filteredTiming
+	for index := range preAssurance.Timing {
+		preAssurance.Timing[index].Sequence = index + 1
+	}
+	if err := projectAutomaticAssurance(&preAssurance); err != nil {
+		t.Fatalf("receipt-less ready v2 exhaustive timing migration failed: %v", err)
+	}
+	current := &preAssurance.Candidates[len(preAssurance.Candidates)-1]
+	if current.Exhaustive == nil || current.Exhaustive.TimingSequence < 1 ||
+		preAssurance.Timing[current.Exhaustive.TimingSequence-1].Phase != exhaustiveValidationSucceededPhase ||
+		len(preAssurance.Evidence.ExhaustiveAssurance) != 1 {
+		t.Fatalf("receipt-less ready v2 did not bootstrap canonical exhaustive lifecycle: %#v", preAssurance)
+	}
+	preAssuranceTimingCount := len(preAssurance.Timing)
+	if err := projectAutomaticAssurance(&preAssurance); err != nil ||
+		len(preAssurance.Timing) != preAssuranceTimingCount ||
+		len(preAssurance.Evidence.ExhaustiveAssurance) != 1 {
+		t.Fatalf("receipt-less ready v2 bootstrap was not resumably idempotent: %v %#v", err, preAssurance)
+	}
 	historicalRequirements, err := decodeRun(persistedAssuranceRun(t, module, git))
 	if err != nil {
 		t.Fatal(err)
@@ -790,6 +928,32 @@ func TestAdvanceAdjudicationOnlyPreservesCandidateAssuranceAndAdoptsResume(t *te
 	exhaustiveReceipt.Identity = deliveryevidence.ExhaustiveAssuranceReceiptIdentity(*exhaustiveReceipt)
 	if err := validateRun(tamperedExhaustive); err == nil {
 		t.Fatal("self-consistent tampered exhaustive assurance receipt was admitted")
+	}
+	failedTimingAnchor, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhaustiveSequence := failedTimingAnchor.Candidates[0].Exhaustive.TimingSequence
+	failedTimingAnchor.Timing[exhaustiveSequence-1].Phase = "exhaustive-validation"
+	if err := validateRun(failedTimingAnchor); err == nil {
+		t.Fatal("failed exhaustive-validation timing anchored successful assurance history")
+	}
+	noncanonicalLegacyTiming, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noncanonicalLegacyTiming.Timing[0].StartedAt = "2026-07-29T20:00:00-05:00"
+	if err := validateRun(noncanonicalLegacyTiming); err == nil {
+		t.Fatal("offset spelling was admitted for a legacy lifecycle timestamp")
+	}
+	noncanonicalSuccessTiming, err := decodeRun(persistedAssuranceRun(t, module, git))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noncanonicalSuccessTiming.Timing[exhaustiveSequence-1].CompletedAt =
+		"2026-07-30T01:00:11.000000000Z"
+	if err := validateRun(noncanonicalSuccessTiming); err == nil {
+		t.Fatal("noncanonical fractional spelling was admitted for successful exhaustive timing")
 	}
 	orphanReferences, err := decodeRun(persistedAssuranceRun(t, module, git))
 	if err != nil {

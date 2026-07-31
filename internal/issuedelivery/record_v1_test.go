@@ -124,9 +124,16 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 				return loadErr
 			}
 			record.Schema = legacyRunSchema
+			record.Evidence.CandidateReviewReceipts = nil
+			record.Evidence.AssuranceAdjudications = nil
+			record.Evidence.AssurancePhases = nil
+			record.Evidence.ExhaustiveAssurance = nil
 			record.EffectiveProfile = ""
 			record.RequiredBoundaries = nil
 			record.ProfileHistory = nil
+			for index := range record.Evidence.AcceptanceMatrix {
+				record.Evidence.AcceptanceMatrix[index].Obligations = nil
+			}
 			for index := range record.Candidates {
 				record.Candidates[index].ObservedFloor = ""
 				record.Candidates[index].Profile = ""
@@ -188,6 +195,25 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 		!strings.Contains(blocked.Reason, "acceptance traceability") ||
 		risk.calls != initialRiskCalls {
 		t.Fatalf("weakened legacy acceptance outcome=%#v risk calls=%d", blocked, risk.calls)
+	}
+	timingBeforeSuccessfulExhaustive := len(blocked.Timing)
+	validator.missingNegative = false
+	validator.afterExhaustive = func() {
+		git.value.Branch = "main"
+	}
+	completed := mustAdvance(t, module, request)
+	if completed.State != StateBlocked || completed.Candidate == nil || completed.Candidate.Exhaustive == nil {
+		t.Fatalf("legacy exhaustive continuation outcome=%#v", completed)
+	}
+	if len(completed.Timing) != timingBeforeSuccessfulExhaustive+1 ||
+		completed.Timing[len(completed.Timing)-1].Phase != "local-readiness" {
+		t.Fatalf("legacy exhaustive changed the v1 transition timing shape: before=%d after=%#v",
+			timingBeforeSuccessfulExhaustive, completed.Timing)
+	}
+	for _, timing := range completed.Timing {
+		if timing.Phase == exhaustiveValidationSucceededPhase {
+			t.Fatalf("legacy v1 run emitted v2 successful exhaustive timing: %#v", timing)
+		}
 	}
 }
 

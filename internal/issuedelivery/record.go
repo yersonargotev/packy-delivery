@@ -173,8 +173,8 @@ func validateRun(record runRecord) error {
 		return fmt.Errorf("issue delivery run observations do not match its authority")
 	}
 	for i, timing := range record.Timing {
-		started, startErr := time.Parse(time.RFC3339Nano, timing.StartedAt)
-		completed, completeErr := time.Parse(time.RFC3339Nano, timing.CompletedAt)
+		started, startErr := parseCanonicalTimingTimestamp(timing.Phase, timing.StartedAt)
+		completed, completeErr := parseCanonicalTimingTimestamp(timing.Phase, timing.CompletedAt)
 		if timing.Sequence != i+1 || strings.TrimSpace(timing.Phase) == "" ||
 			startErr != nil || completeErr != nil || completed.Before(started) {
 			return fmt.Errorf("issue delivery run timing is invalid")
@@ -673,9 +673,24 @@ func exhaustiveProofTimingMatches(record runRecord, candidateID string, proof Va
 	}
 	timing := record.Timing[proof.TimingSequence-1]
 	return timing.Sequence == proof.TimingSequence &&
-		timing.Phase == "exhaustive-validation" &&
+		timing.Phase == exhaustiveValidationSucceededPhase &&
 		timing.CompletedAt == proof.CompletedAt &&
 		candidateIDForTiming(record, proof.TimingSequence) == candidateID
+}
+
+func parseCanonicalTimingTimestamp(phase, value string) (time.Time, error) {
+	if phase == exhaustiveValidationSucceededPhase {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil || parsed.Location() != time.UTC || parsed.UTC().Format(time.RFC3339Nano) != value {
+			return time.Time{}, fmt.Errorf("noncanonical successful exhaustive validation timestamp")
+		}
+		return parsed, nil
+	}
+	parsed, err := time.Parse(timeFormat, value)
+	if err != nil || parsed.Format(timeFormat) != value {
+		return time.Time{}, fmt.Errorf("noncanonical lifecycle timestamp")
+	}
+	return parsed, nil
 }
 
 func candidateIDForTiming(record runRecord, sequence int) string {

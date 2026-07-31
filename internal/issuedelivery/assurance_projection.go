@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	"github.com/yersonargotev/packy-delivery/internal/deliveryevidence"
 )
@@ -14,6 +15,12 @@ import (
 func projectAutomaticAssurance(record *runRecord) error {
 	if record.Schema == legacyRunSchema || record.Evidence == nil {
 		return nil
+	}
+	preAssuranceMigration := receiptlessPreAssuranceRecord(*record)
+	if preAssuranceMigration {
+		if err := migrateReceiptlessExhaustiveTimings(record); err != nil {
+			return err
+		}
 	}
 	var expectedReviews []deliveryevidence.CandidateReviewReceipt
 	var expectedAdjudications []deliveryevidence.AssuranceAdjudicationReceipt
@@ -47,7 +54,9 @@ func projectAutomaticAssurance(record *runRecord) error {
 			requiredAxes := candidate.RequiredReviews
 			if batch != nil {
 				requiredAxes = batch.RequiredAxes
-			} else if iteration < currentReviewIteration(candidate) {
+			} else if iteration < currentReviewIteration(candidate) && !preAssuranceMigration {
+				return fmt.Errorf("historical review iteration lacks authoritative review batch")
+			} else if preAssuranceMigration && iteration < currentReviewIteration(candidate) {
 				requiredAxes = make([]deliveryevidence.ReviewAxis, 0, len(reviews))
 				for _, review := range reviews {
 					requiredAxes = append(requiredAxes, review.Axis)
@@ -72,6 +81,11 @@ func projectAutomaticAssurance(record *runRecord) error {
 				closingTiming = reviewTimingGroups[reviewTimingGroupIndex]
 			}
 			reviewTimingGroupIndex++
+			if batch != nil && (closingTiming.Sequence == 0 ||
+				batch.TimingSequence != closingTiming.Sequence ||
+				batch.CompletedAt != closingTiming.CompletedAt) {
+				return fmt.Errorf("candidate review batch does not match its authoritative timing closure")
+			}
 			if batch == nil {
 				if closingTiming.Sequence == 0 {
 					return fmt.Errorf("completed review batch lacks authoritative review timing")
@@ -153,7 +167,7 @@ func projectAutomaticAssurance(record *runRecord) error {
 		exhaustiveProofs := append([]ValidationProof(nil), candidate.ExhaustiveHistory...)
 		if candidate.Exhaustive != nil {
 			if candidate.Exhaustive.TimingSequence == 0 {
-				timing, ok := latestPhaseTiming(record.Timing, "exhaustive-validation")
+				timing, ok := latestPhaseTiming(record.Timing, exhaustiveValidationSucceededPhase)
 				if !ok || timing.CompletedAt != candidate.Exhaustive.CompletedAt {
 					return fmt.Errorf("current exhaustive proof lacks authoritative lifecycle timing")
 				}
@@ -248,6 +262,120 @@ func projectAutomaticAssurance(record *runRecord) error {
 	record.Evidence.AssurancePhases = expectedPhases
 	record.Evidence.ExhaustiveAssurance = mergedExhaustive
 	return nil
+}
+
+func migrateReceiptlessExhaustiveTimings(record *runRecord) error {
+	type pendingProof struct {
+		candidateIndex int
+		completedAt    string
+	}
+	var pending []pendingProof
+	for candidateIndex := range record.Candidates {
+		candidate := &record.Candidates[candidateIndex]
+		if candidate.Exhaustive == nil || candidate.Exhaustive.TimingSequence != 0 {
+			continue
+		}
+		originalCompletedAt := candidate.Exhaustive.CompletedAt
+		completed, err := time.Parse(time.RFC3339Nano, originalCompletedAt)
+		if err != nil {
+			return fmt.Errorf("receipt-less exhaustive proof completion is invalid")
+		}
+		if !hasExactValidationReceipt(*record.Evidence, *candidate, *candidate.Exhaustive) {
+			return fmt.Errorf("receipt-less exhaustive proof lacks exact canonical validation receipt")
+		}
+		canonicalCompletedAt := completed.UTC().Format(time.RFC3339Nano)
+		candidate.Exhaustive.CompletedAt = canonicalCompletedAt
+		for receiptIndex := range record.Evidence.ValidationReceipts {
+			receipt := &record.Evidence.ValidationReceipts[receiptIndex]
+			if receipt.CompletedAt == originalCompletedAt &&
+				receipt.CommitSHA == candidate.CommitSHA && receipt.TreeSHA == candidate.TreeSHA {
+				receipt.CompletedAt = canonicalCompletedAt
+			}
+		}
+		for proofIndex := range candidate.Acceptance {
+			if reference := candidate.Acceptance[proofIndex].ValidationReceipt; reference != nil {
+				reference.CompletedAt = canonicalCompletedAt
+			}
+		}
+		pending = append(pending, pendingProof{
+			candidateIndex: candidateIndex, completedAt: canonicalCompletedAt,
+		})
+	}
+	sort.Slice(pending, func(i, j int) bool {
+		if pending[i].completedAt == pending[j].completedAt {
+			return pending[i].candidateIndex < pending[j].candidateIndex
+		}
+		return pending[i].completedAt < pending[j].completedAt
+	})
+	for _, item := range pending {
+		insertAt := len(record.Timing)
+		for index, timing := range record.Timing {
+			completed, err := time.Parse(time.RFC3339Nano, timing.CompletedAt)
+			proofCompleted, _ := time.Parse(time.RFC3339Nano, item.completedAt)
+			if err != nil {
+				return fmt.Errorf("receipt-less lifecycle timing is invalid")
+			}
+			if completed.After(proofCompleted) {
+				insertAt = index
+				break
+			}
+		}
+		state := State("")
+		if insertAt > 0 {
+			state = record.Timing[insertAt-1].To
+		}
+		record.Timing = append(record.Timing, Timing{})
+		copy(record.Timing[insertAt+1:], record.Timing[insertAt:])
+		insertedSequence := insertAt + 1
+		for candidateIndex := range record.Candidates {
+			candidate := &record.Candidates[candidateIndex]
+			for batchIndex := range candidate.ReviewBatches {
+				if candidate.ReviewBatches[batchIndex].TimingSequence >= insertedSequence {
+					candidate.ReviewBatches[batchIndex].TimingSequence++
+				}
+			}
+			if candidate.Exhaustive != nil && candidate.Exhaustive.TimingSequence >= insertedSequence {
+				candidate.Exhaustive.TimingSequence++
+			}
+			for historyIndex := range candidate.ExhaustiveHistory {
+				if candidate.ExhaustiveHistory[historyIndex].TimingSequence >= insertedSequence {
+					candidate.ExhaustiveHistory[historyIndex].TimingSequence++
+				}
+			}
+		}
+		record.Timing[insertAt] = Timing{
+			Phase: exhaustiveValidationSucceededPhase, From: state, To: state,
+			StartedAt: item.completedAt, CompletedAt: item.completedAt,
+		}
+		for index := range record.Timing {
+			record.Timing[index].Sequence = index + 1
+		}
+		record.Candidates[item.candidateIndex].Exhaustive.TimingSequence = insertedSequence
+	}
+	return nil
+}
+
+func hasExactValidationReceipt(evidence deliveryevidence.Bundle, candidate Candidate, proof ValidationProof) bool {
+	for _, receipt := range evidence.ValidationReceipts {
+		result := proof.Result
+		if receipt.Schema == deliveryevidence.ValidationReceiptV1 &&
+			receipt.Succeeded && receipt.Completed &&
+			receipt.CompletedAt == proof.CompletedAt &&
+			receipt.Repository == evidence.Repository &&
+			receipt.CommitSHA == candidate.CommitSHA && receipt.CommitSHA == result.CommitSHA &&
+			receipt.TreeSHA == candidate.TreeSHA && receipt.TreeSHA == result.TreeSHA &&
+			receipt.CheckoutSHA256 == result.CheckoutSHA256 &&
+			receipt.ValidatorIdentity == result.ValidatorIdentity &&
+			receipt.ValidatorSHA256 == result.ValidatorSHA256 &&
+			receipt.ValidatorIdentityExpiresAt == result.ValidatorIdentityExpiresAt &&
+			receipt.RequiredCommand == result.Command &&
+			receipt.Sandbox.HomeRoot == result.HomeRoot &&
+			receipt.Sandbox.ConfigHomeRoot == result.ConfigRoot &&
+			receipt.Sandbox.Sandboxed == result.Sandboxed {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePersistedAutomaticAssurance(record runRecord) error {

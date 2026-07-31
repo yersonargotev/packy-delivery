@@ -7,6 +7,8 @@ import (
 
 type TimingCategory string
 
+const exhaustiveValidationSucceededPhase = "exhaustive-validation-succeeded"
+
 const (
 	TimingQualification  TimingCategory = "qualification"
 	TimingImplementation TimingCategory = "implementation"
@@ -139,7 +141,7 @@ func timingCategoryForPhase(phase string) (TimingCategory, bool) {
 	case "repair", "adjudication", "ci-candidate-failure", "qualification-correction":
 		return TimingRepair, true
 	case "risk-observation", "focused-validation", "boundary-validation",
-		"exhaustive-validation", "local-readiness", "merge-readiness",
+		"exhaustive-validation", exhaustiveValidationSucceededPhase, "local-readiness", "merge-readiness",
 		"integration-verification", "post-merge-observation":
 		return TimingValidation, true
 	case "ci-wait", "ci-success":

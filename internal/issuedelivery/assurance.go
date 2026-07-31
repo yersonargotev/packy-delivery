@@ -311,16 +311,18 @@ func (m *Module) advanceAssurance(
 				"exhaustive-validation",
 			)
 		}
-		started, parseErr := time.Parse(timeFormat, record.UpdatedAt)
-		if parseErr != nil || completed.Before(started) {
-			return Outcome{}, errors.New("exhaustive validation lifecycle timing is invalid")
+		if record.Schema != legacyRunSchema {
+			started, parseErr := time.Parse(timeFormat, record.UpdatedAt)
+			if parseErr != nil || completed.Before(started) {
+				return Outcome{}, errors.New("exhaustive validation lifecycle timing is invalid")
+			}
+			record.Timing = append(record.Timing, Timing{
+				Sequence: len(record.Timing) + 1, Phase: exhaustiveValidationSucceededPhase,
+				From: record.State, To: record.State,
+				StartedAt: started.UTC().Format(time.RFC3339Nano), CompletedAt: completedAt,
+			})
+			record.UpdatedAt = completedAt
 		}
-		record.Timing = append(record.Timing, Timing{
-			Sequence: len(record.Timing) + 1, Phase: "exhaustive-validation",
-			From: record.State, To: record.State,
-			StartedAt: started.Format(timeFormat), CompletedAt: completedAt,
-		})
-		record.UpdatedAt = completedAt
 		validationReference := &ValidationReceiptReference{
 			Schema: deliveryevidence.ValidationReceiptV1, CandidateID: candidate.ID,
 			CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA, CompletedAt: completedAt,
@@ -330,6 +332,9 @@ func (m *Module) advanceAssurance(
 		}
 		candidate.Exhaustive = &ValidationProof{
 			Kind: "exhaustive", Result: result, CompletedAt: completedAt,
+		}
+		if record.Schema != legacyRunSchema {
+			candidate.Exhaustive.TimingSequence = len(record.Timing)
 		}
 		if record.Schema == legacyRunSchema || !phaseOwnedAcceptance(nextEvidence.AcceptanceMatrix) {
 			candidate.Acceptance = append([]AcceptanceProof(nil), result.Acceptance...)
