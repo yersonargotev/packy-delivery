@@ -199,7 +199,7 @@ func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 			}
 		}},
 		{"CI", issuedelivery.NonLocalDelivery{Branch: branch, PullRequest: pullRequest, Checks: []issuedelivery.CICheckObservation{check}}, func(t *testing.T, report compactAdvanceReport) {
-			if report.Branch != nil || report.PullRequest == nil || len(report.CI) != 1 || report.Merge != nil {
+			if report.Branch != nil || report.PullRequest != nil || len(report.CI) != 1 || report.Merge != nil {
 				t.Fatalf("CI projection=%#v", report)
 			}
 		}},

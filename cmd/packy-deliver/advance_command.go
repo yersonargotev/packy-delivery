@@ -254,12 +254,6 @@ func compactReportFromOutcome(outcome issuedelivery.Outcome) compactAdvanceRepor
 		case remote.Merge != nil:
 			report.Merge = remote.Merge
 		case len(remote.Checks) > 0:
-			if remote.PullRequest != nil {
-				report.PullRequest = &compactPullRequestIdentity{
-					Number: remote.PullRequest.Number, URL: remote.PullRequest.URL,
-					HeadSHA: remote.PullRequest.HeadSHA,
-				}
-			}
 			for _, check := range remote.Checks {
 				report.CI = append(report.CI, compactCIIdentity{
 					Identity: check.Identity, RunID: check.RunID, Status: check.StatusKind,
