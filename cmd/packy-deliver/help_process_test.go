@@ -42,6 +42,8 @@ func TestAdvanceHelpCommandsAsProcess(t *testing.T) {
 		{"advance", "-h"},
 		{"advance", "--help", "ignored"},
 		{"advance", "-h", "ignored"},
+		{"advance", "--issue", "361", "--help"},
+		{"advance", "--repository", ".", "-h"},
 		{"help", "advance"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
@@ -130,7 +132,14 @@ func buildPackyDeliverForHelpTest(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("resolve Go module cache: %v", err)
 	}
-	environment = append(environment, "GOMODCACHE="+strings.TrimSpace(string(moduleCache)))
+	goFlags := strings.TrimSpace(os.Getenv("GOFLAGS"))
+	if !strings.Contains(" "+goFlags+" ", " -modcacherw ") {
+		goFlags = strings.TrimSpace(goFlags + " -modcacherw")
+	}
+	environment = replacedEnvironment(environment, map[string]string{
+		"GOMODCACHE": strings.TrimSpace(string(moduleCache)),
+		"GOFLAGS":    goFlags,
+	})
 
 	command := exec.Command("go", "build", "-o", binary, ".")
 	command.Dir = "."

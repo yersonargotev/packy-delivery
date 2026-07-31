@@ -144,7 +144,7 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		}
 		return fmt.Errorf("help accepts only the optional command %q", "advance")
 	case "advance":
-		if len(args) >= 2 && (args[1] == "-h" || args[1] == "--help") {
+		if containsHelpFlag(args[1:]) {
 			_, err := io.WriteString(stdout, advanceUsage)
 			return err
 		}
@@ -174,6 +174,15 @@ func (c command) run(ctx context.Context, args []string, stdout io.Writer) error
 		}
 		return c.runLegacy(ctx, args, stdout)
 	}
+}
+
+func containsHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 const rootUsage = `Usage: packy-deliver <command> [options]
