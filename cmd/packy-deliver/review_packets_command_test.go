@@ -57,8 +57,7 @@ func testReviewPacketSet() issuedelivery.ReviewPacketSet {
 		},
 	}
 	packetDigest := func(packet issuedelivery.ReviewPacket) string {
-		packet.SHA256 = ""
-		raw, err := json.Marshal(packet)
+		raw, err := json.Marshal(reviewPacketDigestProjection(packet))
 		if err != nil {
 			panic(err)
 		}
@@ -66,6 +65,10 @@ func testReviewPacketSet() issuedelivery.ReviewPacketSet {
 	}
 	standards.SHA256 = packetDigest(standards)
 	spec.SHA256 = packetDigest(spec)
+	standards.Response.PacketSHA256 = standards.SHA256
+	standards.Response.Candidate.PacketSHA256 = standards.SHA256
+	spec.Response.PacketSHA256 = spec.SHA256
+	spec.Response.Candidate.PacketSHA256 = spec.SHA256
 	manifestEntries := []issuedelivery.ReviewPacketManifestEntry{
 		{PacketID: standardsID, SHA256: standards.SHA256, Kind: standards.Kind},
 		{PacketID: specID, SHA256: spec.SHA256, Kind: spec.Kind},
@@ -426,7 +429,8 @@ func TestReviewPacketDirectoryPartiallyAdmitsReplaysAndRejectsConflict(t *testin
 	var responsePath string
 	var responseRaw []byte
 	var response issuedelivery.ReviewPacketResponseTemplate
-	for _, entry := range manifest.Entries {
+	selectedEntry := -1
+	for index, entry := range manifest.Entries {
 		candidatePath := filepath.Join(output, entry.ResponseFile)
 		candidateRaw, readErr := os.ReadFile(candidatePath)
 		if readErr != nil {
@@ -439,11 +443,87 @@ func TestReviewPacketDirectoryPartiallyAdmitsReplaysAndRejectsConflict(t *testin
 		if candidateResponse.Candidate != nil &&
 			candidateResponse.Candidate.Axis == deliveryevidence.ReviewStandards {
 			responsePath, responseRaw, response = candidatePath, candidateRaw, candidateResponse
+			selectedEntry = index
 			break
 		}
 	}
-	if responsePath == "" || response.Candidate == nil {
+	if responsePath == "" || response.Candidate == nil || selectedEntry < 0 {
 		t.Fatalf("candidate response template = %#v", response)
+	}
+	packetPath := filepath.Join(output, manifest.Entries[selectedEntry].PacketFile)
+	packetRaw, err := os.ReadFile(packetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packet issuedelivery.ReviewPacket
+	if err = json.Unmarshal(packetRaw, &packet); err != nil {
+		t.Fatal(err)
+	}
+	packet.PriorFindings = append(packet.PriorFindings, deliveryevidence.ReviewFinding{
+		ID: "fabricated-packet-context", Axis: packet.Axis,
+	})
+	packetDigestRaw, err := json.Marshal(reviewPacketDigestProjection(packet))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.SHA256 = fmt.Sprintf("%x", sha256.Sum256(packetDigestRaw))
+	packet.Response.PacketSHA256 = packet.SHA256
+	packet.Response.Candidate.PacketSHA256 = packet.SHA256
+	tamperedPacketRaw, err := json.MarshalIndent(packet, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(packetPath, append(tamperedPacketRaw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response.PacketSHA256 = packet.SHA256
+	response.Candidate.PacketSHA256 = packet.SHA256
+	response.Candidate.Completed = true
+	tamperedResponseRaw, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(responsePath, tamperedResponseRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Entries[selectedEntry].SHA256 = packet.SHA256
+	domainEntries := make([]issuedelivery.ReviewPacketManifestEntry, 0, len(manifest.Entries))
+	for _, entry := range manifest.Entries {
+		domainEntries = append(domainEntries, issuedelivery.ReviewPacketManifestEntry{
+			PacketID: entry.PacketID, SHA256: entry.SHA256, Kind: entry.Kind,
+		})
+	}
+	domainEntriesRaw, err := json.Marshal(domainEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ManifestSHA256 = fmt.Sprintf("%x", sha256.Sum256(domainEntriesRaw))
+	tamperedManifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(output, "manifest.json"), tamperedManifestRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = advanceCommand.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "361",
+		"--risk-profile", "low-risk", "--full-report", "--review-content", output,
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "exact current packet SHA-256") {
+		t.Fatalf("self-rehashed modified packet context was accepted: %v", err)
+	}
+	if err = os.WriteFile(packetPath, packetRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(responsePath, responseRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(output, "manifest.json"), manifestRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response = issuedelivery.ReviewPacketResponseTemplate{}
+	if err = json.Unmarshal(responseRaw, &response); err != nil {
+		t.Fatal(err)
 	}
 	response.Candidate.Completed = true
 	responseRaw, err = json.Marshal(response)

@@ -188,13 +188,46 @@ func TestPacketFindingIDsAreScopedAcrossAxesAndBoundaries(t *testing.T) {
 	}
 }
 
+func TestPacketOnlyHistoryChangesSHAWithoutChangingIDAndRejectsStaleBinding(t *testing.T) {
+	record, git := reviewPacketTestRecord()
+	candidate := &record.Candidates[0]
+	candidate.ReviewIteration = 2
+	candidate.Reviews = []CandidateReview{
+		{CandidateID: candidate.ID, Axis: deliveryevidence.ReviewStandards, Iteration: 1, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA, Findings: []deliveryevidence.ReviewFinding{{ID: "prior", Axis: deliveryevidence.ReviewStandards, Evidence: "original context"}}, Completed: true},
+		{CandidateID: candidate.ID, Axis: deliveryevidence.ReviewSpec, Iteration: 1, CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA, Findings: []deliveryevidence.ReviewFinding{}, Completed: true},
+	}
+	first, err := reviewPacketsFromRecord(record, git, ReviewPacketRequest{Kind: ReviewPacketCandidate, Axis: deliveryevidence.ReviewStandards})
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first packet = %#v, %v", first, err)
+	}
+
+	modified := record
+	modified.Candidates = append([]Candidate(nil), record.Candidates...)
+	modified.Candidates[0].Reviews = append([]CandidateReview(nil), record.Candidates[0].Reviews...)
+	modified.Candidates[0].Reviews[0].Findings = append([]deliveryevidence.ReviewFinding(nil), record.Candidates[0].Reviews[0].Findings...)
+	modified.Candidates[0].Reviews[0].Findings[0].Evidence = "altered packet-only context"
+	second, err := reviewPacketsFromRecord(modified, git, ReviewPacketRequest{Kind: ReviewPacketCandidate, Axis: deliveryevidence.ReviewStandards})
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second packet = %#v, %v", second, err)
+	}
+	if first[0].PacketID != second[0].PacketID || first[0].SHA256 == second[0].SHA256 {
+		t.Fatalf("packet identity/digest did not separate stable identity from context: first=%s/%s second=%s/%s", first[0].PacketID, first[0].SHA256, second[0].PacketID, second[0].SHA256)
+	}
+	stale := *first[0].Response.Candidate
+	stale.Completed = true
+	stale.ResponseSHA256 = strings.Repeat("8", 64)
+	if _, err := reconcileCandidatePacketResponses(&modified, &modified.Candidates[0], []CandidateReview{stale}); err == nil {
+		t.Fatal("stale full packet SHA binding was accepted after packet-only history changed")
+	}
+}
+
 func TestSpecialistPacketResponseRestartReplayAndConflict(t *testing.T) {
 	record, _ := reviewPacketTestRecord()
 	candidate := &record.Candidates[0]
 	candidate.Reviews = []CandidateReview{
 		{Axis: deliveryevidence.ReviewStandards, Completed: true}, {Axis: deliveryevidence.ReviewSpec, Completed: true},
 	}
-	response := SpecialistReview{PacketID: specialistPacketID(record, *candidate, BoundaryGovernance), ResponseSHA256: strings.Repeat("2", 64), CandidateID: candidate.ID, Boundary: BoundaryGovernance, Specialist: specialistForBoundary(BoundaryGovernance), Findings: []SpecialistFinding{}, Completed: true}
+	response := SpecialistReview{PacketID: specialistPacketID(record, *candidate, BoundaryGovernance), PacketSHA256: specialistPacketSHA256(record, *candidate, BoundaryGovernance), ResponseSHA256: strings.Repeat("2", 64), CandidateID: candidate.ID, Boundary: BoundaryGovernance, Specialist: specialistForBoundary(BoundaryGovernance), Findings: []SpecialistFinding{}, Completed: true}
 	changed, err := reconcileSpecialistPacketResponses(&record, candidate, []SpecialistReview{response})
 	if err != nil || !changed {
 		t.Fatalf("partial specialist persistence = %v, %v", changed, err)
@@ -234,6 +267,7 @@ func TestPacketBoundCandidateReviewRejectsMismatchAndDuplicateFinding(t *testing
 		t.Fatal("mismatched packet ID was accepted")
 	}
 	review.PacketID = ""
+	review.PacketSHA256 = ""
 	if err := validateCandidateReview(review, candidate, candidate.RequiredReviews, 1, packet[0].PacketID); err != nil {
 		t.Fatalf("legacy empty packet ID was rejected: %v", err)
 	}

@@ -95,6 +95,7 @@ type ReviewPacketBoundaryProofObligation struct {
 
 type ReviewPacketResponseTemplate struct {
 	PacketID      string               `json:"packet_id"`
+	PacketSHA256  string               `json:"packet_sha256,omitempty"`
 	Qualification *QualificationReview `json:"qualification,omitempty"`
 	Candidate     *CandidateReview     `json:"candidate,omitempty"`
 	Specialist    *SpecialistReview    `json:"specialist,omitempty"`
@@ -367,7 +368,29 @@ func finalizeReviewPacket(packet *ReviewPacket) error {
 	}
 	digestProjection := *packet
 	digestProjection.SHA256 = ""
+	digestProjection.Response.PacketSHA256 = ""
+	if digestProjection.Response.Qualification != nil {
+		digestProjection.Response.Qualification.PacketSHA256 = ""
+	}
+	if digestProjection.Response.Candidate != nil {
+		digestProjection.Response.Candidate.PacketSHA256 = ""
+	}
+	if digestProjection.Response.Specialist != nil {
+		digestProjection.Response.Specialist.PacketSHA256 = ""
+	}
 	packet.SHA256, err = canonicalReviewPacketDigest(digestProjection)
+	if err == nil {
+		packet.Response.PacketSHA256 = packet.SHA256
+		if packet.Response.Qualification != nil {
+			packet.Response.Qualification.PacketSHA256 = packet.SHA256
+		}
+		if packet.Response.Candidate != nil {
+			packet.Response.Candidate.PacketSHA256 = packet.SHA256
+		}
+		if packet.Response.Specialist != nil {
+			packet.Response.Specialist.PacketSHA256 = packet.SHA256
+		}
+	}
 	return err
 }
 
@@ -380,24 +403,64 @@ func expectedSpecialistPacketID(record runRecord, candidate Candidate, boundary 
 }
 
 func candidatePacketID(record runRecord, candidate Candidate, axis deliveryevidence.ReviewAxis, iteration int) string {
-	packet := packetIdentityBase(record, ReviewPacketCandidate)
-	packet.Axis, packet.Generation, packet.Iteration = axis, len(record.Candidates), iteration
-	bindPacketCandidate(&packet, candidate)
-	if err := finalizeReviewPacket(&packet); err != nil {
-		return ""
-	}
-	return packet.PacketID
+	return candidatePacketBinding(record, candidate, axis, iteration).PacketID
+}
+
+func candidatePacketSHA256(record runRecord, candidate Candidate, axis deliveryevidence.ReviewAxis, iteration int) string {
+	return candidatePacketBinding(record, candidate, axis, iteration).SHA256
 }
 
 func specialistPacketID(record runRecord, candidate Candidate, boundary SensitiveBoundary) string {
-	packet := packetIdentityBase(record, ReviewPacketSpecialist)
+	return specialistPacketBinding(record, candidate, boundary).PacketID
+}
+
+func specialistPacketSHA256(record runRecord, candidate Candidate, boundary SensitiveBoundary) string {
+	return specialistPacketBinding(record, candidate, boundary).SHA256
+}
+
+func candidatePacketBinding(record runRecord, candidate Candidate, axis deliveryevidence.ReviewAxis, iteration int) ReviewPacket {
+	packet := fullPacketBase(record, ReviewPacketCandidate)
+	packet.Axis, packet.Generation, packet.Iteration = axis, len(record.Candidates), iteration
+	bindPacketCandidate(&packet, candidate)
+	for _, review := range candidate.Reviews {
+		if review.Axis == axis && review.Iteration != iteration {
+			packet.PriorFindings = append(packet.PriorFindings, review.Findings...)
+		}
+	}
+	addRelevantAdjudications(&packet, record.Evidence.Adjudications)
+	addRelevantAssuranceAdjudications(&packet, record.Evidence.AssuranceAdjudications)
+	_ = finalizeReviewPacket(&packet)
+	return packet
+}
+
+func specialistPacketBinding(record runRecord, candidate Candidate, boundary SensitiveBoundary) ReviewPacket {
+	packet := fullPacketBase(record, ReviewPacketSpecialist)
 	packet.Boundary, packet.Specialist, packet.Generation = boundary, specialistForBoundary(boundary), len(record.Candidates)
 	bindPacketCandidate(&packet, candidate)
 	packet.RequiredBoundaryProof = boundaryProofObligation(record, candidate, boundary)
-	if err := finalizeReviewPacket(&packet); err != nil {
-		return ""
+	for _, review := range candidate.SpecialistReviews {
+		if review.Boundary != boundary {
+			continue
+		}
+		// The persisted response for this boundary is the response being replayed,
+		// not prior packet context.
 	}
-	return packet.PacketID
+	addRelevantAdjudications(&packet, record.Evidence.Adjudications)
+	addRelevantAssuranceAdjudications(&packet, record.Evidence.AssuranceAdjudications)
+	_ = finalizeReviewPacket(&packet)
+	return packet
+}
+
+func fullPacketBase(record runRecord, kind ReviewPacketKind) ReviewPacket {
+	packet := packetIdentityBase(record, kind)
+	packet.Authority = record.Evidence.Authority
+	packet.AcceptanceRows = append([]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...)
+	packet.RequiredObligations = packetObligations(packet.AcceptanceRows)
+	packet.PriorFindings = []deliveryevidence.ReviewFinding{}
+	packet.PriorSpecialistFindings = []SpecialistFinding{}
+	packet.PriorAdjudications = []deliveryevidence.Adjudication{}
+	packet.PriorAssuranceAdjudications = []deliveryevidence.AssuranceAdjudicationReceipt{}
+	return packet
 }
 
 func boundaryProofObligation(record runRecord, candidate Candidate, boundary SensitiveBoundary) *ReviewPacketBoundaryProofObligation {
@@ -421,15 +484,24 @@ func canonicalReviewPacketDigest(value any) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func validatePacketResponseDigest(packetID, digest string, completed bool) error {
+func validatePacketResponseDigest(packetID, packetSHA256, digest string, completed bool) error {
 	if packetID == "" {
-		if digest != "" {
+		if packetSHA256 != "" || digest != "" {
 			return errors.New("legacy response without packet ID cannot bind a response digest")
 		}
 		return nil
 	}
-	if digest == "" && !completed {
+	if packetSHA256 != "" && !runIDPattern.MatchString(packetSHA256) {
+		return errors.New("packet response requires the exact packet SHA-256")
+	}
+	if !completed {
+		if digest != "" && !runIDPattern.MatchString(digest) {
+			return errors.New("packet response source SHA-256 is invalid")
+		}
 		return nil
+	}
+	if packetSHA256 == "" {
+		return errors.New("packet response requires the exact packet SHA-256")
 	}
 	if !runIDPattern.MatchString(digest) {
 		return errors.New("completed packet response requires an exact source SHA-256")

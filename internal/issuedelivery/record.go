@@ -369,7 +369,7 @@ func validateCandidates(record runRecord) error {
 			if review.CandidateID != candidate.ID || !required[review.Axis] || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review")
 			}
-			if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+			if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid review source: %w", err)
 			}
 			if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) &&
@@ -563,7 +563,7 @@ func validateCandidates(record runRecord) error {
 				review.Specialist != specialistForBoundary(review.Boundary) || review.Findings == nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid specialist review")
 			}
-			if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+			if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
 				return fmt.Errorf("issue delivery candidate contains an invalid specialist review source: %w", err)
 			}
 			if !review.Completed && len(review.Findings) != 0 {

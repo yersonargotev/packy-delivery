@@ -378,6 +378,7 @@ type ReviewRequest struct {
 
 type CandidateReview struct {
 	PacketID       string                           `json:"packet_id,omitempty"`
+	PacketSHA256   string                           `json:"packet_sha256,omitempty"`
 	ResponseSHA256 string                           `json:"response_sha256,omitempty"`
 	CandidateID    string                           `json:"candidate_id"`
 	Axis           deliveryevidence.ReviewAxis      `json:"axis"`
@@ -418,6 +419,7 @@ type SpecialistFinding struct {
 
 type SpecialistReview struct {
 	PacketID       string              `json:"packet_id,omitempty"`
+	PacketSHA256   string              `json:"packet_sha256,omitempty"`
 	ResponseSHA256 string              `json:"response_sha256,omitempty"`
 	CandidateID    string              `json:"candidate_id"`
 	Boundary       SensitiveBoundary   `json:"boundary"`

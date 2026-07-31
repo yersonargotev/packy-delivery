@@ -471,7 +471,8 @@ func reconcileCandidatePacketResponses(record *runRecord, candidate *Candidate, 
 		seenAxes[review.Axis] = true
 		expectedIteration := currentReviewIteration(candidate)
 		expected := candidatePacketID(*record, *candidate, review.Axis, expectedIteration)
-		if err := validateCandidateReview(review, *candidate, candidate.RequiredReviews, expectedIteration, expected); err != nil {
+		expectedSHA := candidatePacketSHA256(*record, *candidate, review.Axis, expectedIteration)
+		if err := validateCandidateReview(review, *candidate, candidate.RequiredReviews, expectedIteration, expected, expectedSHA); err != nil {
 			return false, err
 		}
 		if !review.Completed {
@@ -696,6 +697,7 @@ func (m *Module) executeReviews(
 		if err := validateCandidateReview(
 			result.review, candidate, axes, iteration,
 			expectedCandidatePacketID(record, candidate, result.review.Axis),
+			candidatePacketSHA256(record, candidate, result.review.Axis, iteration),
 		); err != nil {
 			return nil, err
 		}
@@ -859,11 +861,14 @@ func validateCandidateReview(
 		review.TreeSHA != candidate.TreeSHA {
 		return errors.New("candidate review does not match its exact request")
 	}
-	if review.PacketID != "" && (len(expectedPacketID) != 1 || review.PacketID != expectedPacketID[0]) {
+	if review.PacketID != "" && (len(expectedPacketID) < 1 || review.PacketID != expectedPacketID[0]) {
 		return errors.New("candidate review does not match its exact current packet")
 	}
-	if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+	if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
 		return fmt.Errorf("candidate review source: %w", err)
+	}
+	if review.PacketID != "" && (len(expectedPacketID) != 2 || review.PacketSHA256 != expectedPacketID[1]) {
+		return errors.New("candidate review does not match its exact current packet SHA-256")
 	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete candidate review cannot contain findings")

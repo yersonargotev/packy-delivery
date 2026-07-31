@@ -286,8 +286,7 @@ func loadReviewPacketDirectory(path string) ([]advanceReviewContent, error) {
 			packet.Kind != entry.Kind {
 			return nil, fmt.Errorf("review packet %q does not match its manifest entry", entry.PacketFile)
 		}
-		digestProjection := packet
-		digestProjection.SHA256 = ""
+		digestProjection := reviewPacketDigestProjection(packet)
 		digestRaw, err := json.Marshal(digestProjection)
 		if err != nil {
 			return nil, fmt.Errorf("encode review packet digest projection: %w", err)
@@ -311,7 +310,7 @@ func loadReviewPacketDirectory(path string) ([]advanceReviewContent, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read review response %q: %w", entry.ResponseFile, err)
 		}
-		content, err := decodePacketResponse(responseRaw, entry.PacketID)
+		content, err := decodePacketResponse(responseRaw, entry.PacketID, entry.SHA256)
 		if err != nil {
 			return nil, fmt.Errorf("decode review response %q: %w", entry.ResponseFile, err)
 		}
@@ -330,13 +329,14 @@ func loadReviewPacketDirectory(path string) ([]advanceReviewContent, error) {
 
 func decodeReviewResponse(raw []byte) (advanceReviewContent, error) {
 	var shape struct {
-		PacketID string `json:"packet_id"`
+		PacketID     string `json:"packet_id"`
+		PacketSHA256 string `json:"packet_sha256"`
 	}
 	if err := json.Unmarshal(raw, &shape); err != nil {
 		return advanceReviewContent{}, err
 	}
 	if shape.PacketID != "" {
-		return decodePacketResponse(raw, shape.PacketID)
+		return decodePacketResponse(raw, shape.PacketID, shape.PacketSHA256)
 	}
 	var content advanceReviewContent
 	if err := decodeSemanticJSON(raw, &content); err != nil {
@@ -348,7 +348,7 @@ func decodeReviewResponse(raw []byte) (advanceReviewContent, error) {
 	return content, nil
 }
 
-func decodePacketResponse(raw []byte, expectedPacketID string) (advanceReviewContent, error) {
+func decodePacketResponse(raw []byte, expectedPacketID, expectedPacketSHA256 string) (advanceReviewContent, error) {
 	var response issuedelivery.ReviewPacketResponseTemplate
 	if err := decodeSemanticJSON(raw, &response); err != nil {
 		return advanceReviewContent{}, err
@@ -356,25 +356,31 @@ func decodePacketResponse(raw []byte, expectedPacketID string) (advanceReviewCon
 	if response.PacketID != expectedPacketID || !validReviewPacketID(response.PacketID) {
 		return advanceReviewContent{}, errors.New("review response packet identity is absent or mismatched")
 	}
+	if response.PacketSHA256 != expectedPacketSHA256 || !validReviewPacketID(response.PacketSHA256) {
+		return advanceReviewContent{}, errors.New("review response packet digest is absent or mismatched")
+	}
 	populated := 0
 	content := advanceReviewContent{}
 	if response.Qualification != nil {
 		populated++
-		if response.Qualification.PacketID != response.PacketID {
+		if response.Qualification.PacketID != response.PacketID ||
+			response.Qualification.PacketSHA256 != response.PacketSHA256 {
 			return advanceReviewContent{}, errors.New("qualification response packet identity is mismatched")
 		}
 		content.QualificationReview = response.Qualification
 	}
 	if response.Candidate != nil {
 		populated++
-		if response.Candidate.PacketID != response.PacketID {
+		if response.Candidate.PacketID != response.PacketID ||
+			response.Candidate.PacketSHA256 != response.PacketSHA256 {
 			return advanceReviewContent{}, errors.New("candidate response packet identity is mismatched")
 		}
 		content.Reviews = []issuedelivery.CandidateReview{*response.Candidate}
 	}
 	if response.Specialist != nil {
 		populated++
-		if response.Specialist.PacketID != response.PacketID {
+		if response.Specialist.PacketID != response.PacketID ||
+			response.Specialist.PacketSHA256 != response.PacketSHA256 {
 			return advanceReviewContent{}, errors.New("specialist response packet identity is mismatched")
 		}
 		content.Specialists = []issuedelivery.SpecialistReview{*response.Specialist}
@@ -386,6 +392,28 @@ func decodePacketResponse(raw []byte, expectedPacketID string) (advanceReviewCon
 		return advanceReviewContent{}, err
 	}
 	return content, nil
+}
+
+func reviewPacketDigestProjection(packet issuedelivery.ReviewPacket) issuedelivery.ReviewPacket {
+	projection := packet
+	projection.SHA256 = ""
+	projection.Response.PacketSHA256 = ""
+	if packet.Response.Qualification != nil {
+		review := *packet.Response.Qualification
+		review.PacketSHA256 = ""
+		projection.Response.Qualification = &review
+	}
+	if packet.Response.Candidate != nil {
+		review := *packet.Response.Candidate
+		review.PacketSHA256 = ""
+		projection.Response.Candidate = &review
+	}
+	if packet.Response.Specialist != nil {
+		review := *packet.Response.Specialist
+		review.PacketSHA256 = ""
+		projection.Response.Specialist = &review
+	}
+	return projection
 }
 
 func bindReviewResponseSHA256(raw []byte, content *advanceReviewContent) error {

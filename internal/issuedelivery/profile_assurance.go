@@ -152,6 +152,7 @@ func (m *Module) executeSpecialistReviews(
 		if err := validateSpecialistReview(
 			review, candidate, boundary,
 			expectedSpecialistPacketID(record, candidate, boundary),
+			specialistPacketSHA256(record, candidate, boundary),
 		); err != nil {
 			return nil, err
 		}
@@ -191,11 +192,14 @@ func validateSpecialistReview(
 		review.Specialist != specialistForBoundary(boundary) || review.Findings == nil {
 		return errors.New("specialist review does not match its exact boundary request")
 	}
-	if review.PacketID != "" && (len(expectedPacketID) != 1 || review.PacketID != expectedPacketID[0]) {
+	if review.PacketID != "" && (len(expectedPacketID) < 1 || review.PacketID != expectedPacketID[0]) {
 		return errors.New("specialist review does not match its exact current packet")
 	}
-	if err := validatePacketResponseDigest(review.PacketID, review.ResponseSHA256, review.Completed); err != nil {
+	if err := validatePacketResponseDigest(review.PacketID, review.PacketSHA256, review.ResponseSHA256, review.Completed); err != nil {
 		return fmt.Errorf("specialist review source: %w", err)
+	}
+	if review.PacketID != "" && (len(expectedPacketID) != 2 || review.PacketSHA256 != expectedPacketID[1]) {
+		return errors.New("specialist review does not match its exact current packet SHA-256")
 	}
 	if !review.Completed && len(review.Findings) != 0 {
 		return errors.New("incomplete specialist review cannot contain findings")
@@ -233,7 +237,8 @@ func reconcileSpecialistPacketResponses(record *runRecord, candidate *Candidate,
 		}
 		seenBoundaries[review.Boundary] = true
 		expected := specialistPacketID(*record, *candidate, review.Boundary)
-		if err := validateSpecialistReview(review, *candidate, review.Boundary, expected); err != nil {
+		expectedSHA := specialistPacketSHA256(*record, *candidate, review.Boundary)
+		if err := validateSpecialistReview(review, *candidate, review.Boundary, expected, expectedSHA); err != nil {
 			return false, err
 		}
 		if !containsBoundary(candidate.RequiredSpecialists, review.Boundary) {
