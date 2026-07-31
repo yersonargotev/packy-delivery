@@ -33,6 +33,34 @@ type recordingRunner struct {
 	calls    []string
 }
 
+func TestCommandRejectionClassificationUsesExitAndHTTPStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   string
+		script    string
+		transient bool
+	}{
+		{"git rejection", "git", "exit 1", false},
+		{"gh no response", "gh", "exit 1", true},
+		{"gh not found", "gh", "echo 'gh: Not Found (HTTP 404)' >&2; exit 1", false},
+		{"gh service unavailable", "gh", "echo 'gh: unavailable (HTTP 503)' >&2; exit 1", true},
+		{"gh authentication required", "gh", "exit 4", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command("sh", "-c", test.script)
+			_, err := command.Output()
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) {
+				t.Fatalf("error=%T %v", err, err)
+			}
+			if got := commandRejectionIsTransient(test.command, exitError); got != test.transient {
+				t.Fatalf("transient=%t want %t stderr=%q", got, test.transient, exitError.Stderr)
+			}
+		})
+	}
+}
+
 func (r *recordingRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
 	return r.delegate.Output(ctx, name, args...)

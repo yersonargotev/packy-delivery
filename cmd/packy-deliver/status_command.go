@@ -73,6 +73,9 @@ func classifyStatusCommandError(
 	}
 	var rejected *commandRejectedError
 	if errors.As(err, &rejected) {
+		if rejected.transient {
+			return issuedelivery.NewStatusError(transientClass, true, err)
+		}
 		return issuedelivery.NewStatusError(rejectedClass, false, err)
 	}
 	return issuedelivery.NewStatusError(transientClass, true, err)

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +31,8 @@ type Runner interface {
 type execRunner struct{}
 
 type commandRejectedError struct {
-	err error
+	err       error
+	transient bool
 }
 
 func (e *commandRejectedError) Error() string { return e.err.Error() }
@@ -41,9 +43,32 @@ func (execRunner) Output(ctx context.Context, name string, args ...string) ([]by
 	output, err := c.Output()
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) {
-		return output, &commandRejectedError{err: err}
+		return output, &commandRejectedError{
+			err:       err,
+			transient: commandRejectionIsTransient(name, exitError),
+		}
 	}
 	return output, err
+}
+
+func commandRejectionIsTransient(name string, err *exec.ExitError) bool {
+	if name != "gh" || err.ExitCode() == 4 {
+		return false
+	}
+	fields := strings.Fields(string(err.Stderr))
+	for index, field := range fields {
+		if strings.Trim(field, "()") != "HTTP" || index+1 >= len(fields) {
+			continue
+		}
+		status, parseErr := strconv.Atoi(strings.Trim(fields[index+1], "()"))
+		if parseErr != nil {
+			continue
+		}
+		return status == 408 || status == 429 || status >= 500
+	}
+	// gh uses a generic non-zero exit for network and service failures that
+	// never produced an HTTP response. Those reads are retryable.
+	return true
 }
 
 type ValidationRunner interface {

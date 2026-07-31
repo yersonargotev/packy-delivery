@@ -501,6 +501,12 @@ func TestProductionTrackerObserverClassifiesReadFailures(t *testing.T) {
 			class: issuedelivery.StatusErrorGitHubRead, transient: true,
 		},
 		{
+			name: "transient command rejection", err: &commandRejectedError{
+				err: errors.New("GitHub service unavailable"), transient: true,
+			},
+			class: issuedelivery.StatusErrorGitHubRead, transient: true,
+		},
+		{
 			name: "authority", err: &commandRejectedError{
 				err: errors.New("GitHub rejected the command"),
 			},
