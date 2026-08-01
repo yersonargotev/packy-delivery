@@ -386,6 +386,44 @@ func TestAdvanceCommandReportsEveryPauseCategory(t *testing.T) {
 	}
 }
 
+func TestAdvanceCommandReportsEarlyIncompatibleBranchRemediation(t *testing.T) {
+	repository := t.TempDir()
+	fake := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{{
+		RunID: "run-57", State: issuedelivery.StateBlocked,
+		Reason: "local readiness requires a clean workspace, exact candidate HEAD/tree, and one of: " +
+			"chore/issue-57-*, feat/issue-57-*, fix/issue-57-*",
+		BlockerKind: issuedelivery.BlockerLocalReadiness,
+		PauseCause:  issuedelivery.PauseInvariantBlock,
+		NextAction:  issuedelivery.ActionRestoreLocalReadiness,
+	}}}
+	cmd := command{AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
+		return fake, nil
+	}}
+
+	var stdout bytes.Buffer
+	if err := cmd.run(context.Background(), []string{
+		"advance", "--repository", repository, "--issue", "57",
+	}, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	var report compactAdvanceReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.PauseCause != issuedelivery.PauseInvariantBlock ||
+		report.NextAction != issuedelivery.ActionRestoreLocalReadiness ||
+		report.BlockerKind != issuedelivery.BlockerLocalReadiness {
+		t.Fatalf("early branch remediation metadata = %#v", report)
+	}
+	for _, form := range []string{
+		"chore/issue-57-*", "feat/issue-57-*", "fix/issue-57-*",
+	} {
+		if !strings.Contains(report.Reason, form) {
+			t.Fatalf("early branch remediation %q omitted %q", report.Reason, form)
+		}
+	}
+}
+
 func TestAdvanceCommandHighestSeamCreatesV2RunThroughRealModule(t *testing.T) {
 	repository := t.TempDir()
 	resolvedRepository, err := filepath.EvalSymlinks(repository)

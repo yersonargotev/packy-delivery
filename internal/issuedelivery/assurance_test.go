@@ -1710,6 +1710,65 @@ func TestAdvanceReusesExactReceiptAndInvalidatesChangedCandidate(t *testing.T) {
 	}
 }
 
+func TestAdvanceRejectsCandidateBranchBeforeAssuranceWork(t *testing.T) {
+	module, git, _, reviewer, validator := assuranceFixture(t)
+	specialist := &fakeSpecialistReviewExecutor{}
+	boundary := &fakeBoundaryValidationExecutor{}
+	module.specialist, module.boundary = specialist, boundary
+	git.value.Branch = "main"
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+
+	blocked := mustAdvance(t, module, request)
+	if blocked.State != StateBlocked || blocked.BlockerKind != BlockerLocalReadiness ||
+		blocked.NextAction != ActionRestoreLocalReadiness || blocked.Candidate != nil {
+		t.Fatalf("incompatible candidate branch outcome=%#v", blocked)
+	}
+	if validator.focusedCalls != 0 || validator.exhaustiveCalls != 0 ||
+		module.risk.(*fakeCandidateRiskObserver).calls != 0 ||
+		reviewer.calls[deliveryevidence.ReviewStandards] != 0 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != 0 ||
+		len(specialist.calls) != 0 || len(boundary.calls) != 0 {
+		t.Fatalf("incompatible candidate branch ran assurance work: risk=%d reviewer=%v specialist=%v boundary=%v validation=(%d,%d)",
+			module.risk.(*fakeCandidateRiskObserver).calls, reviewer.calls, specialist.calls, boundary.calls,
+			validator.focusedCalls, validator.exhaustiveCalls)
+	}
+	for _, form := range []string{
+		"chore/issue-357-*", "feat/issue-357-*", "fix/issue-357-*",
+	} {
+		if !strings.Contains(blocked.Reason, form) {
+			t.Fatalf("local-readiness reason %q does not list %q", blocked.Reason, form)
+		}
+	}
+
+	git.value.Branch = "feat/issue-357-resume"
+	resumed := mustAdvance(t, module, request)
+	if resumed.RunID != blocked.RunID || resumed.State != StateNeedsReview ||
+		resumed.Candidate == nil || resumed.Candidate.Focused == nil || validator.focusedCalls != 1 {
+		t.Fatalf("compatible branch did not resume the same run into candidate development: %#v", resumed)
+	}
+}
+
+func TestAdvanceKeepsNoCandidateHandoffIndependentOfBranch(t *testing.T) {
+	module, git, _, reviewer, validator := assuranceFixture(t)
+	git.value.HeadSHA = git.value.StartingBaseSHA
+	git.value.Branch = "main"
+
+	handoff := mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357})
+	if handoff.State != StateWaiting || handoff.Reason != "qualification is approved; awaiting candidate development" ||
+		handoff.Candidate != nil || handoff.PauseCause != PauseExternalResult ||
+		handoff.NextAction != ActionObserveExternalResult || handoff.BlockerKind != "" {
+		t.Fatalf("branch-independent candidate handoff=%#v", handoff)
+	}
+	if reviewer.calls[deliveryevidence.ReviewStandards] != 0 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != 0 ||
+		module.risk.(*fakeCandidateRiskObserver).calls != 0 ||
+		validator.focusedCalls != 0 || validator.exhaustiveCalls != 0 {
+		t.Fatalf("candidate handoff ran assurance work: reviewer=%v risk=%d validation=(%d,%d)",
+			reviewer.calls, module.risk.(*fakeCandidateRiskObserver).calls,
+			validator.focusedCalls, validator.exhaustiveCalls)
+	}
+}
+
 func TestAdvanceBlocksInvalidBranchBeforeLegacyExhaustiveValidation(t *testing.T) {
 	module, git, _, _, validator := assuranceFixture(t)
 	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
