@@ -5,7 +5,7 @@ description: Deliver a named Packy GitHub issue end to end through a local imple
 
 # Deliver Packy Issue
 
-Compatible release: v0.5.0
+Compatible release: v0.6.0
 
 Read the complete [workflow contract](../../../workflows/packy-issue-delivery.md)
 and [repository instructions](../../../AGENTS.md) before mutating project or
