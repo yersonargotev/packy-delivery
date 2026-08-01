@@ -538,9 +538,10 @@ type BoundaryValidationResult struct {
 }
 
 type BoundaryProof struct {
-	Result                     BoundaryValidationResult `json:"result"`
-	ValidationCompletionSHA256 string                   `json:"validation_completion_sha256,omitempty"`
-	CompletedAt                string                   `json:"completed_at"`
+	Result                        BoundaryValidationResult `json:"result"`
+	ValidationCompletionSHA256    string                   `json:"validation_completion_sha256,omitempty"`
+	ValidationDerivationReceiptID string                   `json:"validation_derivation_receipt_id,omitempty"`
+	CompletedAt                   string                   `json:"completed_at"`
 }
 
 type RepairClass string
@@ -584,11 +585,12 @@ type RepairBatchReceipt struct {
 }
 
 type ValidationProof struct {
-	Kind                       string           `json:"kind"`
-	Result                     ValidationResult `json:"result"`
-	ValidationCompletionSHA256 string           `json:"validation_completion_sha256,omitempty"`
-	TimingSequence             int              `json:"timing_sequence,omitempty"`
-	CompletedAt                string           `json:"completed_at"`
+	Kind                          string           `json:"kind"`
+	Result                        ValidationResult `json:"result"`
+	ValidationCompletionSHA256    string           `json:"validation_completion_sha256,omitempty"`
+	ValidationDerivationReceiptID string           `json:"validation_derivation_receipt_id,omitempty"`
+	TimingSequence                int              `json:"timing_sequence,omitempty"`
+	CompletedAt                   string           `json:"completed_at"`
 }
 
 type Candidate struct {
@@ -629,13 +631,15 @@ type ImpactConfirmationPacket struct {
 }
 
 type CandidateDerivation struct {
-	ParentCandidateID      string                                      `json:"parent_candidate_id"`
-	Assessment             deliveryevidence.EvidenceImpactAssessment   `json:"assessment"`
-	Decision               deliveryevidence.EvidenceDerivationDecision `json:"decision"`
-	PendingConfirmation    *ImpactConfirmationPacket                   `json:"pending_confirmation,omitempty"`
-	Confirmation           *deliveryevidence.ImpactConfirmation        `json:"confirmation,omitempty"`
-	RetainedReviewReceipts []deliveryevidence.ReviewDerivationReceipt  `json:"retained_review_receipts"`
-	FallbackReason         string                                      `json:"fallback_reason,omitempty"`
+	ParentCandidateID                  string                                               `json:"parent_candidate_id"`
+	Assessment                         deliveryevidence.EvidenceImpactAssessment            `json:"assessment"`
+	Decision                           deliveryevidence.EvidenceDerivationDecision          `json:"decision"`
+	PendingConfirmation                *ImpactConfirmationPacket                            `json:"pending_confirmation,omitempty"`
+	Confirmation                       *deliveryevidence.ImpactConfirmation                 `json:"confirmation,omitempty"`
+	RetainedReviewReceipts             []deliveryevidence.ReviewDerivationReceipt           `json:"retained_review_receipts"`
+	ValidationCompatibilityAssessments []deliveryevidence.ValidationCompatibilityAssessment `json:"validation_compatibility_assessments,omitempty"`
+	ValidationDerivationReceipts       []deliveryevidence.ValidationDerivationReceipt       `json:"validation_derivation_receipts,omitempty"`
+	FallbackReason                     string                                               `json:"fallback_reason,omitempty"`
 }
 
 type AuthenticatedImpactAuthority interface {

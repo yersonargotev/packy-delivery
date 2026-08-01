@@ -474,14 +474,16 @@ func validateCandidateDerivation(record runRecord, candidateIndex int) error {
 		if derivation.Confirmation != nil || !decision.IndependentConfirmationRequired ||
 			packet.Schema != impactConfirmationPacketSchema || packet.PacketID != wantID ||
 			packet.AssessmentID != derivation.Assessment.ID || packet.ParentCandidateID != parent.ID ||
-			packet.DerivedCandidateID != candidate.ID || len(derivation.RetainedReviewReceipts) != 0 {
+			packet.DerivedCandidateID != candidate.ID || len(derivation.RetainedReviewReceipts) != 0 ||
+			len(derivation.ValidationCompatibilityAssessments) != 0 || len(derivation.ValidationDerivationReceipts) != 0 {
 			return errors.New("issue delivery candidate impact confirmation packet is invalid")
 		}
 		return nil
 	}
 	if derivation.FallbackReason != "" {
 		if derivation.PendingConfirmation != nil || derivation.Confirmation != nil ||
-			len(derivation.RetainedReviewReceipts) != 0 {
+			len(derivation.RetainedReviewReceipts) != 0 || len(derivation.ValidationCompatibilityAssessments) != 0 ||
+			len(derivation.ValidationDerivationReceipts) != 0 {
 			return errors.New("issue delivery candidate impact fallback retained derivation authority")
 		}
 		return nil
@@ -507,6 +509,77 @@ func validateCandidateDerivation(record runRecord, candidateIndex int) error {
 	}
 	if !reflect.DeepEqual(expectedReceipts, derivation.RetainedReviewReceipts) {
 		return errors.New("issue delivery candidate review derivation receipts are incomplete or conflicting")
+	}
+	if err := validateValidationDerivationReceipts(record, parent, candidate, derivation); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateValidationDerivationReceipts(record runRecord, parent, candidate Candidate, derivation *CandidateDerivation) error {
+	if len(derivation.ValidationCompatibilityAssessments) != len(derivation.ValidationDerivationReceipts) {
+		return errors.New("issue delivery candidate validation derivation is incomplete")
+	}
+	if len(derivation.ValidationDerivationReceipts) != 0 &&
+		(derivation.Decision.ExhaustiveValidationRequired || len(derivation.Decision.FullBoundaryValidations) != 0) {
+		return errors.New("issue delivery candidate validation derivation retained an obligation that requires fresh evidence")
+	}
+	seen := map[deliveryevidence.ValidationObligationIdentity]bool{}
+	for index, receipt := range derivation.ValidationDerivationReceipts {
+		assessment := derivation.ValidationCompatibilityAssessments[index]
+		canonical, err := deliveryevidence.NewValidationCompatibilityAssessment(assessment.ValidationCompatibilityAssessmentInput)
+		if err != nil || !reflect.DeepEqual(canonical, assessment) {
+			return errors.New("issue delivery candidate validation compatibility assessment is not canonical")
+		}
+		if receipt.Schema != deliveryevidence.ValidationDerivationReceiptSchema ||
+			receipt.Identity != deliveryevidence.ValidationDerivationReceiptIdentity(receipt) ||
+			receipt.CompatibilityAssessmentID != assessment.ID ||
+			receipt.ImpactAssessmentID != derivation.Assessment.ID || derivation.Confirmation == nil ||
+			receipt.ConfirmationID != derivation.Confirmation.ID || receipt.ParentCandidateID != parent.ID ||
+			receipt.DerivedCandidateID != candidate.ID || receipt.Obligation != assessment.Required.Obligation ||
+			receipt.SourceSessionID != assessment.Source.SessionID ||
+			receipt.SourceCompletionSHA256 != assessment.Source.CompletionSHA256 || seen[receipt.Obligation] {
+			return errors.New("issue delivery candidate validation derivation receipt is invalid")
+		}
+		seen[receipt.Obligation] = true
+		source, found := validationSessionByCompletion(record.ValidationSessions, receipt.SourceCompletionSHA256)
+		if !found || source.ID != receipt.SourceSessionID || source.CandidateID != parent.ID ||
+			source.State != ValidationSessionCompleted || source.Result == nil {
+			return errors.New("issue delivery candidate validation derivation source is invalid")
+		}
+		expectedSource, registered := registeredValidationArtifact(record, source, parent, receipt.Obligation)
+		if !registered {
+			return errors.New("issue delivery candidate validation derivation obligation is not registered")
+		}
+		expectedRequired := deliveryevidence.ValidationCompatibilityRequirement{
+			Candidate: evidenceCandidateIdentity(candidate), CheckoutSHA256: source.CheckoutSHA256,
+			Environment: validationEnvironment(source), Obligation: receipt.Obligation,
+			ExpiresAt: source.ValidatorIdentityExpiresAt, WorkspaceClean: true,
+		}
+		if assessment.ImpactAssessmentID != derivation.Assessment.ID ||
+			assessment.ImpactConfirmationID != derivation.Confirmation.ID {
+			return errors.New("issue delivery candidate validation compatibility authority is stale")
+		}
+		if !reflect.DeepEqual(assessment.Source, expectedSource) {
+			return errors.New("issue delivery candidate validation compatibility source tuple is stale")
+		}
+		if !reflect.DeepEqual(assessment.Required, expectedRequired) {
+			return errors.New("issue delivery candidate validation compatibility tuple is stale")
+		}
+	}
+	if len(derivation.ValidationDerivationReceipts) != 0 {
+		expected := map[deliveryevidence.ValidationObligationIdentity]bool{
+			{Kind: deliveryevidence.ValidationObligationExhaustive}: true,
+		}
+		for _, boundary := range candidate.Boundaries {
+			expected[deliveryevidence.ValidationObligationIdentity{
+				Kind:     deliveryevidence.ValidationObligationBoundary,
+				Boundary: deliveryevidence.SensitiveBoundary(boundary),
+			}] = true
+		}
+		if !reflect.DeepEqual(seen, expected) {
+			return errors.New("issue delivery candidate validation derivation obligations are incomplete")
+		}
 	}
 	return nil
 }

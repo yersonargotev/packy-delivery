@@ -190,6 +190,23 @@ func projectAutomaticAssurance(record *runRecord) error {
 		}
 		for proofIndex := range exhaustiveProofs {
 			proof := exhaustiveProofs[proofIndex]
+			if proof.ValidationDerivationReceiptID != "" {
+				if validationDerivationReceiptID(candidate, deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationExhaustive}) != proof.ValidationDerivationReceiptID {
+					return fmt.Errorf("exhaustive proof validation derivation receipt is invalid")
+				}
+				if candidate.Exhaustive != nil && proofIndex == len(exhaustiveProofs)-1 {
+					for acceptanceIndex := range candidate.Acceptance {
+						reference := candidate.Acceptance[acceptanceIndex].ValidationReceipt
+						if reference != nil {
+							if reference.ReceiptID != "" && reference.ReceiptID != proof.ValidationDerivationReceiptID {
+								return fmt.Errorf("acceptance validation derivation receipt identity conflicts with canonical assurance")
+							}
+							reference.ReceiptID = proof.ValidationDerivationReceiptID
+						}
+					}
+				}
+				continue
+			}
 			result := proof.Result
 			receipt := deliveryevidence.ExhaustiveAssuranceReceipt{
 				Repository: record.Repository, CandidateID: candidate.ID,

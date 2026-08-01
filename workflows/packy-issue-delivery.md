@@ -484,7 +484,9 @@ submits the exact accepted confirmation packet. It persists new canonical
 derivation receipts linked to the parent receipts; it never copies or relabels
 parent review content. Invalid, rejected, incomplete, stale, mismatched, or
 ambiguous input clears the confirmation pause and takes the complete fresh
-review path. Cross-candidate validation reuse remains disabled.
+review path. After those same identities are admitted, `Advance` may also
+adopt a canonical completed parent validation session for a distinct derived
+candidate when every member of the validation compatibility tuple matches.
 
 ## Exact final validation
 
@@ -509,10 +511,20 @@ completion through the trusted canonical validation-session registry and match
 the complete registered artifact; a claimed kind or schema string is not
 registration. Any mismatch requires a fresh execution.
 
-The current lifecycle admits validation reuse only for its already-supported
-exact-candidate session. Cross-candidate validation adoption remains disabled
-until it can persist the canonical source and compatibility identities required
-by ADR 0003; review derivation does not satisfy validation obligations.
+For cross-candidate adoption, `Advance` evaluates and persists one canonical
+validation derivation receipt per exact obligation: exhaustive validation or
+one named sensitive boundary. Each receipt links the parent session and
+completion, impact assessment, independent confirmation, compatibility
+assessment, candidate pair, and owning obligation. The parent session remains
+unchanged. Replay and crash recovery adopt the same receipt; a conflict blocks.
+If a crash interrupts projection after receipt admission but before exhaustive
+assurance is complete, resume re-evaluates the tuple against the trusted clock;
+an artifact that expired during the interruption is refused and validation runs
+fresh.
+Compact JSON and text name every reused receipt and its exhaustive or boundary
+owner. Any typed compatibility refusal is recorded with a bounded reason and
+the existing fresh validation-session lifecycle remains the fallback. Review
+derivation alone never satisfies a validation obligation.
 
 Also retain the acceptance evidence and `git diff --check` result required by
 the matrix. Bind every artifact to the exact commit and tree. A later repository

@@ -24,6 +24,7 @@ type CandidateReviewReceipt struct {
 }
 
 const ReviewDerivationReceiptSchema = "packy.review-derivation-receipt/v1"
+const ValidationDerivationReceiptSchema = "packy.validation-derivation-receipt/v1"
 
 // ReviewDerivationReceipt retains one exact parent obligation without copying
 // or relabeling the parent's review content.
@@ -41,6 +42,28 @@ type ReviewDerivationReceipt struct {
 }
 
 func ReviewDerivationReceiptIdentity(receipt ReviewDerivationReceipt) string {
+	receipt.Identity = ""
+	raw, _ := json.Marshal(receipt)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// ValidationDerivationReceipt adopts one exact obligation from a registered
+// parent validation session without copying or relabeling that session.
+type ValidationDerivationReceipt struct {
+	Schema                    string                       `json:"schema"`
+	Identity                  string                       `json:"identity"`
+	SourceSessionID           string                       `json:"source_session_id"`
+	SourceCompletionSHA256    string                       `json:"source_completion_sha256"`
+	CompatibilityAssessmentID string                       `json:"compatibility_assessment_id"`
+	ImpactAssessmentID        string                       `json:"impact_assessment_id"`
+	ConfirmationID            string                       `json:"confirmation_id"`
+	ParentCandidateID         string                       `json:"parent_candidate_id"`
+	DerivedCandidateID        string                       `json:"derived_candidate_id"`
+	Obligation                ValidationObligationIdentity `json:"obligation"`
+}
+
+func ValidationDerivationReceiptIdentity(receipt ValidationDerivationReceipt) string {
 	receipt.Identity = ""
 	raw, _ := json.Marshal(receipt)
 	sum := sha256.Sum256(raw)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,10 +17,11 @@ import (
 )
 
 type fakeValidationSessionExecutor struct {
-	observeCalls int
-	executeCalls int
-	executeHook  func(ValidationSession)
-	executeErr   error
+	observeCalls      int
+	executeCalls      int
+	observationMutate func(*ValidationSessionObservation)
+	executeHook       func(ValidationSession)
+	executeErr        error
 }
 
 func readActiveValidationSessionRecord(
@@ -59,7 +61,7 @@ func (f *fakeValidationSessionExecutor) ObserveValidationSession(
 	request ValidationSessionObserveRequest,
 ) (ValidationSessionObservation, error) {
 	f.observeCalls++
-	return ValidationSessionObservation{
+	observation := ValidationSessionObservation{
 		CheckoutSHA256:    strings.Repeat("7", 64),
 		CommitSHA:         request.CommitSHA,
 		TreeSHA:           request.TreeSHA,
@@ -77,7 +79,11 @@ func (f *fakeValidationSessionExecutor) ObserveValidationSession(
 			[]SensitiveBoundary(nil),
 			request.CoveredBoundaries...,
 		),
-	}, nil
+	}
+	if f.observationMutate != nil {
+		f.observationMutate(&observation)
+	}
+	return observation, nil
 }
 
 func (f *fakeValidationSessionExecutor) ExecuteValidationSession(
@@ -209,6 +215,283 @@ func TestValidationSessionRunsCandidateValidatorOnceAndDerivesAllAssuranceArtifa
 	}
 	if session.executeCalls != 1 {
 		t.Fatalf("completed validation session reran: executions=%d", session.executeCalls)
+	}
+}
+
+func TestAdvanceReusesCompatibleParentValidationSessionForDerivedCandidate(t *testing.T) {
+	module, git, _, reviewer, validator := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+
+	var parentOutcome Outcome
+	for step := 0; step < 16; step++ {
+		parentOutcome = mustAdvance(t, module, request)
+		if parentOutcome.LocalReadiness != nil {
+			break
+		}
+	}
+	if parentOutcome.LocalReadiness == nil || parentOutcome.Candidate == nil || session.executeCalls != 1 {
+		t.Fatalf("parent validation did not complete once: outcome=%#v executions=%d", parentOutcome, session.executeCalls)
+	}
+	parent := *parentOutcome.Candidate
+	parentStandardsCalls := reviewer.calls[deliveryevidence.ReviewStandards]
+
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	derivedOutcome := mustAdvance(t, module, request)
+	derived := *derivedOutcome.Candidate
+	if derived.ID == parent.ID || derived.TreeSHA != parent.TreeSHA {
+		t.Fatalf("derived candidate does not preserve the parent tree: parent=%#v derived=%#v", parent, derived)
+	}
+	assessment := lifecycleImpactAssessment(t, derivedOutcome, parent, derived,
+		[]deliveryevidence.EvidenceChange{{
+			Class: deliveryevidence.ChangeNonBehavioral, Rationale: "commit metadata only",
+		}})
+	mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment,
+	})
+	confirmation, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
+		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.ID,
+		Confirmer: deliveryevidence.ImpactAuthor{
+			Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "independent-reviewer",
+		},
+		Decision: deliveryevidence.ImpactConfirmationAccepted, Rationale: "tree and validation conditions are unchanged", Completed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, ImpactConfirmationResponse: &confirmation,
+	})
+
+	var ready Outcome
+	for step := 0; step < 12; step++ {
+		ready = mustAdvance(t, module, request)
+		if ready.LocalReadiness != nil {
+			break
+		}
+	}
+	if ready.LocalReadiness == nil || ready.Candidate == nil {
+		t.Fatalf("derived candidate did not reach local readiness: %#v", ready)
+	}
+	if session.executeCalls != 1 || validator.exhaustiveCalls != 0 {
+		t.Fatalf("compatible registered validation reran: sessions=%d legacy=%d invalidations=%#v derivation=%#v", session.executeCalls, validator.exhaustiveCalls, ready.ValidationInvalidations, ready.Candidate.Derivation)
+	}
+	if reviewer.calls[deliveryevidence.ReviewStandards] != parentStandardsCalls+1 {
+		t.Fatalf("derived candidate did not receive its Standards delta review: calls=%#v", reviewer.calls)
+	}
+	if got := ready.Candidate.Derivation.ValidationDerivationReceipts; len(got) != 1 ||
+		got[0].Obligation.Kind != deliveryevidence.ValidationObligationExhaustive ||
+		got[0].SourceSessionID == "" || got[0].SourceCompletionSHA256 == "" ||
+		got[0].CompatibilityAssessmentID == "" {
+		t.Fatalf("validation derivation receipts=%#v", got)
+	}
+	projection, err := BuildCompactRunProjection(ready, module.clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Assurance.ReusedValidationArtifacts; len(got) != 1 ||
+		got[0].Kind != ReusedValidationExhaustive || got[0].Identity == "" {
+		t.Fatalf("compact reused validation artifacts=%#v", got)
+	}
+	replayed := mustAdvance(t, module, request)
+	if session.executeCalls != 1 || !reflect.DeepEqual(
+		replayed.Candidate.Derivation.ValidationDerivationReceipts,
+		ready.Candidate.Derivation.ValidationDerivationReceipts,
+	) {
+		t.Fatalf("replay changed derived validation evidence: executions=%d receipts=%#v", session.executeCalls, replayed.Candidate.Derivation.ValidationDerivationReceipts)
+	}
+	_, persisted := readActiveValidationSessionRecord(t, git.value.CommonDir, 357)
+	latest := &persisted.Candidates[len(persisted.Candidates)-1]
+	latest.Derivation.ValidationDerivationReceipts[0].Identity = strings.Repeat("f", 64)
+	if err := validateRun(persisted); err == nil {
+		t.Fatal("conflicting validation derivation receipt passed persisted-record validation")
+	}
+}
+
+func TestAdvanceRecordsCompatibilityRefusalAndRunsFreshValidation(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	var parentOutcome Outcome
+	for step := 0; step < 16; step++ {
+		parentOutcome = mustAdvance(t, module, request)
+		if parentOutcome.LocalReadiness != nil {
+			break
+		}
+	}
+	parent := *parentOutcome.Candidate
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	derivedOutcome := mustAdvance(t, module, request)
+	derived := *derivedOutcome.Candidate
+	assessment := lifecycleImpactAssessment(t, derivedOutcome, parent, derived,
+		[]deliveryevidence.EvidenceChange{{Class: deliveryevidence.ChangeNonBehavioral, Rationale: "metadata only"}})
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment})
+	confirmation, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
+		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.ID,
+		Confirmer: deliveryevidence.ImpactAuthor{Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "independent-reviewer"},
+		Decision:  deliveryevidence.ImpactConfirmationAccepted, Rationale: "confirmed", Completed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactConfirmationResponse: &confirmation})
+	session.observationMutate = func(observation *ValidationSessionObservation) {
+		observation.ValidatorSHA256 = strings.Repeat("9", 64)
+	}
+	var ready Outcome
+	for step := 0; step < 12; step++ {
+		ready = mustAdvance(t, module, request)
+		if ready.LocalReadiness != nil {
+			break
+		}
+	}
+	if ready.LocalReadiness == nil || session.executeCalls != 2 {
+		t.Fatalf("refused reuse did not take fresh lifecycle: outcome=%#v executions=%d", ready, session.executeCalls)
+	}
+	found := false
+	for _, invalidation := range ready.ValidationInvalidations {
+		if invalidation.CandidateID == derived.ID && invalidation.Class == ValidationInvalidationValidator && invalidation.Reason != "" {
+			found = true
+		}
+	}
+	if !found || len(ready.Candidate.Derivation.ValidationDerivationReceipts) != 0 {
+		t.Fatalf("validator refusal was not explained and rejected: invalidations=%#v derivation=%#v", ready.ValidationInvalidations, ready.Candidate.Derivation)
+	}
+}
+
+func TestAdvanceReusesOnlyTheExactExhaustiveAndBoundaryObligations(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
+		Effect: EffectSecurity, Evidence: "security boundary is unchanged", Complete: true,
+	}}
+	module.specialist = &fakeSpecialistReviewExecutor{}
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	var parentOutcome Outcome
+	for step := 0; step < 20; step++ {
+		parentOutcome = mustAdvance(t, module, request)
+		if parentOutcome.LocalReadiness != nil {
+			break
+		}
+	}
+	if parentOutcome.LocalReadiness == nil {
+		t.Fatalf("high-risk parent did not reach readiness: %#v", parentOutcome)
+	}
+	parent := *parentOutcome.Candidate
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	derivedOutcome := mustAdvance(t, module, request)
+	derived := *derivedOutcome.Candidate
+	assessment := lifecycleImpactAssessment(t, derivedOutcome, parent, derived,
+		[]deliveryevidence.EvidenceChange{{Class: deliveryevidence.ChangeNonBehavioral, Rationale: "metadata only"}})
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment})
+	confirmation, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
+		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.ID,
+		Confirmer: deliveryevidence.ImpactAuthor{Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "independent-reviewer"},
+		Decision:  deliveryevidence.ImpactConfirmationAccepted, Rationale: "boundary and exhaustive obligations are unchanged", Completed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactConfirmationResponse: &confirmation})
+	var ready Outcome
+	for step := 0; step < 16; step++ {
+		ready = mustAdvance(t, module, request)
+		if ready.LocalReadiness != nil {
+			break
+		}
+	}
+	if ready.LocalReadiness == nil || session.executeCalls != 1 {
+		t.Fatalf("high-risk compatible validation reran: outcome=%#v executions=%d", ready, session.executeCalls)
+	}
+	receipts := ready.Candidate.Derivation.ValidationDerivationReceipts
+	if len(receipts) != 2 {
+		t.Fatalf("validation derivation receipts=%#v", receipts)
+	}
+	owners := map[deliveryevidence.ValidationObligationIdentity]bool{}
+	for _, receipt := range receipts {
+		owners[receipt.Obligation] = true
+	}
+	if !owners[deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationExhaustive}] ||
+		!owners[deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationBoundary, Boundary: deliveryevidence.BoundarySecurity}] {
+		t.Fatalf("validation obligations were relabeled: %#v", owners)
+	}
+	if len(ready.Candidate.BoundaryProofs) != 1 || ready.Candidate.BoundaryProofs[0].ValidationDerivationReceiptID == "" ||
+		ready.Candidate.Exhaustive == nil || ready.Candidate.Exhaustive.ValidationDerivationReceiptID == "" ||
+		ready.Candidate.BoundaryProofs[0].ValidationDerivationReceiptID == ready.Candidate.Exhaustive.ValidationDerivationReceiptID {
+		t.Fatalf("obligation proofs do not reference distinct derivation receipts: candidate=%#v", ready.Candidate)
+	}
+}
+
+func TestAdvanceCrashRecoveryExpiresPartiallyAdoptedValidationBeforeFreshFallback(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
+		Effect: EffectSecurity, Evidence: "security boundary is unchanged", Complete: true,
+	}}
+	module.specialist = &fakeSpecialistReviewExecutor{}
+	session := &fakeValidationSessionExecutor{}
+	module.validationSession = session
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	var parentOutcome Outcome
+	for step := 0; step < 20; step++ {
+		parentOutcome = mustAdvance(t, module, request)
+		if parentOutcome.LocalReadiness != nil {
+			break
+		}
+	}
+	parent := *parentOutcome.Candidate
+	git.value.HeadSHA = strings.Repeat("d", 40)
+	derivedOutcome := mustAdvance(t, module, request)
+	derived := *derivedOutcome.Candidate
+	assessment := lifecycleImpactAssessment(t, derivedOutcome, parent, derived,
+		[]deliveryevidence.EvidenceChange{{Class: deliveryevidence.ChangeNonBehavioral, Rationale: "metadata only"}})
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment})
+	confirmation, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
+		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.ID,
+		Confirmer: deliveryevidence.ImpactAuthor{Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "independent-reviewer"},
+		Decision:  deliveryevidence.ImpactConfirmationAccepted, Rationale: "confirmed", Completed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactConfirmationResponse: &confirmation})
+	mustAdvance(t, module, request) // Standards delta review.
+	partial := mustAdvance(t, module, request)
+	if partial.Candidate == nil || len(partial.Candidate.BoundaryProofs) != 1 ||
+		partial.Candidate.Exhaustive != nil || len(partial.Candidate.Derivation.ValidationDerivationReceipts) != 2 ||
+		session.executeCalls != 1 {
+		t.Fatalf("crash point lacks partially projected adoption: %#v", partial)
+	}
+
+	clock := module.clock.(*fakeClock)
+	clock.mu.Lock()
+	clock.next = clock.next.Add(48 * time.Hour)
+	clock.mu.Unlock()
+	var ready Outcome
+	for step := 0; step < 12; step++ {
+		ready = mustAdvance(t, module, request)
+		if ready.LocalReadiness != nil {
+			break
+		}
+	}
+	if ready.LocalReadiness == nil || session.executeCalls != 2 ||
+		len(ready.Candidate.Derivation.ValidationDerivationReceipts) != 0 {
+		t.Fatalf("expired crash recovery did not take fresh validation: outcome=%#v executions=%d", ready, session.executeCalls)
+	}
+	foundExpiry := false
+	for _, invalidation := range ready.ValidationInvalidations {
+		if invalidation.CandidateID == derived.ID && invalidation.Class == ValidationInvalidationExpiry && invalidation.Reason != "" {
+			foundExpiry = true
+		}
+	}
+	if !foundExpiry {
+		t.Fatalf("expired partial adoption lacks typed refusal: %#v", ready.ValidationInvalidations)
 	}
 }
 

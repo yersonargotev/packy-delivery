@@ -320,17 +320,25 @@ func (m *Module) advanceAssurance(
 		)
 	}
 	var validationSession *ValidationSession
+	validationReused := false
 	if record.Schema != legacyRunSchema && m.validationSession != nil {
-		session, outcome, handled, err := m.advanceValidationSession(
-			ctx, store, record, *candidate, request,
-		)
+		var err error
+		validationSession, validationReused, err = m.reusableDerivedValidationSession(ctx, &record, candidate, request)
 		if err != nil {
-			return outcome, err
+			return Outcome{}, err
 		}
-		if handled {
-			return outcome, nil
+		if !validationReused {
+			session, outcome, handled, advanceErr := m.advanceValidationSession(
+				ctx, store, record, *candidate, request,
+			)
+			if advanceErr != nil {
+				return outcome, advanceErr
+			}
+			if handled {
+				return outcome, nil
+			}
+			validationSession = session
 		}
-		validationSession = session
 	}
 	if missing := missingBoundaryProofs(candidate); len(missing) > 0 {
 		var proofs []BoundaryProof
@@ -339,6 +347,16 @@ func (m *Module) advanceAssurance(
 				*validationSession, *candidate, missing,
 				m.clock.Now().UTC().Format(timeFormat),
 			)
+			if validationReused {
+				for index := range proofs {
+					proofs[index].ValidationDerivationReceiptID = validationDerivationReceiptID(
+						candidate, deliveryevidence.ValidationObligationIdentity{
+							Kind:     deliveryevidence.ValidationObligationBoundary,
+							Boundary: deliveryevidence.SensitiveBoundary(proofs[index].Result.Boundary),
+						},
+					)
+				}
+			}
 		} else {
 			var err error
 			proofs, err = m.executeBoundaryProofs(ctx, record, *candidate, missing)
@@ -418,28 +436,31 @@ func (m *Module) advanceAssurance(
 		}
 		completed := m.clock.Now().UTC()
 		completedAt := completed.Format(time.RFC3339Nano)
-		nextEvidence, err := deliveryevidence.RecordExhaustiveValidation(
-			nextEvidence,
-			deliveryevidence.ExhaustiveValidationResult{
-				Observation: deliveryevidence.ValidationObservation{
-					Repository: record.Repository, CheckoutSHA256: result.CheckoutSHA256,
-					CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA, WorkspaceClean: result.WorkspaceClean,
-					ValidatorIdentity: result.ValidatorIdentity, ValidatorSHA256: result.ValidatorSHA256,
-					ValidatorIdentityExpiresAt: result.ValidatorIdentityExpiresAt,
-					RequiredCommand:            result.Command,
-					Sandbox: deliveryevidence.SandboxFacts{
-						HomeRoot: result.HomeRoot, ConfigHomeRoot: result.ConfigRoot, Sandboxed: result.Sandboxed,
+		if !validationReused {
+			var receiptErr error
+			nextEvidence, receiptErr = deliveryevidence.RecordExhaustiveValidation(
+				nextEvidence,
+				deliveryevidence.ExhaustiveValidationResult{
+					Observation: deliveryevidence.ValidationObservation{
+						Repository: record.Repository, CheckoutSHA256: result.CheckoutSHA256,
+						CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA, WorkspaceClean: result.WorkspaceClean,
+						ValidatorIdentity: result.ValidatorIdentity, ValidatorSHA256: result.ValidatorSHA256,
+						ValidatorIdentityExpiresAt: result.ValidatorIdentityExpiresAt,
+						RequiredCommand:            result.Command,
+						Sandbox: deliveryevidence.SandboxFacts{
+							HomeRoot: result.HomeRoot, ConfigHomeRoot: result.ConfigRoot, Sandboxed: result.Sandboxed,
+						},
 					},
+					CompletedAt: completedAt, Succeeded: result.Succeeded, Completed: result.Completed,
 				},
-				CompletedAt: completedAt, Succeeded: result.Succeeded, Completed: result.Completed,
-			},
-		)
-		if err != nil {
-			return m.persistAssuranceTransition(
-				store, record, StateBlocked,
-				"canonical exhaustive validation receipt is invalid: "+err.Error(),
-				"exhaustive-validation",
 			)
+			if receiptErr != nil {
+				return m.persistAssuranceTransition(
+					store, record, StateBlocked,
+					"canonical exhaustive validation receipt is invalid: "+receiptErr.Error(),
+					"exhaustive-validation",
+				)
+			}
 		}
 		if record.Schema != legacyRunSchema {
 			started, parseErr := time.Parse(timeFormat, record.UpdatedAt)
@@ -457,6 +478,10 @@ func (m *Module) advanceAssurance(
 			Schema: deliveryevidence.ValidationReceiptV1, CandidateID: candidate.ID,
 			CommitSHA: result.CommitSHA, TreeSHA: result.TreeSHA, CompletedAt: completedAt,
 		}
+		if validationReused {
+			validationReference.Schema = deliveryevidence.ValidationReceiptSchema(deliveryevidence.ValidationDerivationReceiptSchema)
+			validationReference.ReceiptID = validationDerivationReceiptID(candidate, deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationExhaustive})
+		}
 		for index := range candidate.Acceptance {
 			candidate.Acceptance[index].ValidationReceipt = validationReference
 		}
@@ -466,6 +491,9 @@ func (m *Module) advanceAssurance(
 		if validationSession != nil {
 			candidate.Exhaustive.ValidationCompletionSHA256 =
 				validationSession.CompletionSHA256
+		}
+		if validationReused {
+			candidate.Exhaustive.ValidationDerivationReceiptID = validationReference.ReceiptID
 		}
 		if record.Schema != legacyRunSchema {
 			candidate.Exhaustive.TimingSequence = len(record.Timing)
