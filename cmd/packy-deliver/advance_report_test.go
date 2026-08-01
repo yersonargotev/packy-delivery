@@ -262,6 +262,232 @@ func TestCompactAdvanceReportKeepsOnlyCurrentDeliveryIdentity(t *testing.T) {
 	}
 }
 
+func TestCompactAdvanceReportExposesAssuranceProgressAtThePublicSeam(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	commit, tree := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	completedReview := func(axis deliveryevidence.ReviewAxis) issuedelivery.CandidateReview {
+		return issuedelivery.CandidateReview{
+			CandidateID: "candidate-progress", Axis: axis, Iteration: 1,
+			CommitSHA: commit, TreeSHA: tree,
+			Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+		}
+	}
+	completedSpecialist := func(boundary issuedelivery.SensitiveBoundary) issuedelivery.SpecialistReview {
+		identities := map[issuedelivery.SensitiveBoundary]string{
+			issuedelivery.BoundaryPublication: "publication-specialist",
+			issuedelivery.BoundarySecurity:    "security-specialist",
+		}
+		return issuedelivery.SpecialistReview{
+			CandidateID: "candidate-progress", Boundary: boundary,
+			Specialist: identities[boundary], Findings: []issuedelivery.SpecialistFinding{}, Completed: true,
+		}
+	}
+	newCandidate := func(reviews []issuedelivery.CandidateReview, specialists []issuedelivery.SpecialistReview) *issuedelivery.Candidate {
+		return &issuedelivery.Candidate{
+			ID: "candidate-progress", CommitSHA: commit, TreeSHA: tree,
+			RequiredReviews: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			ReviewIteration: 1, Reviews: reviews,
+			RequiredSpecialists: []issuedelivery.SensitiveBoundary{
+				issuedelivery.BoundaryPublication, issuedelivery.BoundarySecurity,
+			},
+			SpecialistReviews: specialists,
+		}
+	}
+	tests := []struct {
+		name                string
+		candidate           *issuedelivery.Candidate
+		completedAxes       []deliveryevidence.ReviewAxis
+		pendingAxes         []deliveryevidence.ReviewAxis
+		completedBoundaries []issuedelivery.CompactSpecialistBoundary
+		pendingBoundaries   []issuedelivery.CompactSpecialistBoundary
+	}{
+		{
+			name: "no candidate",
+		},
+		{
+			name: "initial candidate", candidate: newCandidate(nil, nil),
+			completedAxes: []deliveryevidence.ReviewAxis{},
+			pendingAxes: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryPublication, Specialist: "publication-specialist"},
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+		},
+		{
+			name: "partial candidate reviews", candidate: newCandidate(
+				[]issuedelivery.CandidateReview{completedReview(deliveryevidence.ReviewStandards)}, nil,
+			),
+			completedAxes:       []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards},
+			pendingAxes:         []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryPublication, Specialist: "publication-specialist"},
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+		},
+		{
+			name: "partial specialist reviews", candidate: newCandidate(
+				[]issuedelivery.CandidateReview{
+					completedReview(deliveryevidence.ReviewStandards),
+					completedReview(deliveryevidence.ReviewSpec),
+				},
+				[]issuedelivery.SpecialistReview{completedSpecialist(issuedelivery.BoundarySecurity)},
+			),
+			completedAxes: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			pendingAxes: []deliveryevidence.ReviewAxis{},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryPublication, Specialist: "publication-specialist"},
+			},
+		},
+		{
+			name: "completed assurance", candidate: newCandidate(
+				[]issuedelivery.CandidateReview{
+					completedReview(deliveryevidence.ReviewStandards),
+					completedReview(deliveryevidence.ReviewSpec),
+				},
+				[]issuedelivery.SpecialistReview{
+					completedSpecialist(issuedelivery.BoundaryPublication),
+					completedSpecialist(issuedelivery.BoundarySecurity),
+				},
+			),
+			completedAxes: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			pendingAxes: []deliveryevidence.ReviewAxis{},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryPublication, Specialist: "publication-specialist"},
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := issuedelivery.Outcome{
+				RunID: "run-progress", State: issuedelivery.StateNeedsReview,
+				PauseCause: issuedelivery.PauseIndependentReview,
+				NextAction: issuedelivery.ActionProvideCandidateReview,
+				Candidate:  test.candidate,
+			}
+			jsonOutput := runAdvanceOutput(t, outcome)
+			var report compactAdvanceReport
+			if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+				t.Fatal(err)
+			}
+			if test.candidate == nil {
+				if report.Assurance.Progress != nil {
+					t.Fatalf("no-candidate report invented progress: %#v", report.Assurance.Progress)
+				}
+				if statusOutput := runStatusOutput(t, outcome); statusOutput != jsonOutput {
+					t.Fatalf("status and Advance compact JSON differ:\nstatus:\n%s\nadvance:\n%s", statusOutput, jsonOutput)
+				}
+				return
+			}
+			if report.Assurance.Progress == nil {
+				t.Fatal("candidate report omitted assurance progress")
+			}
+			progress := report.Assurance.Progress
+			if !reflect.DeepEqual(progress.CandidateReviewAxes.Completed, test.completedAxes) ||
+				!reflect.DeepEqual(progress.CandidateReviewAxes.Pending, test.pendingAxes) ||
+				!reflect.DeepEqual(progress.SpecialistBoundaries.Completed, test.completedBoundaries) ||
+				!reflect.DeepEqual(progress.SpecialistBoundaries.Pending, test.pendingBoundaries) {
+				t.Fatalf("progress=%#v", progress)
+			}
+			textOutput := runAdvanceOutput(t, outcome, "--output", "text")
+			if statusOutput := runStatusOutput(t, outcome); statusOutput != jsonOutput {
+				t.Fatalf("status and Advance compact JSON differ:\nstatus:\n%s\nadvance:\n%s", statusOutput, jsonOutput)
+			}
+			if statusOutput := runStatusOutput(t, outcome, "--output", "text"); statusOutput != textOutput {
+				t.Fatalf("status and Advance compact text differ:\nstatus:\n%s\nadvance:\n%s", statusOutput, textOutput)
+			}
+			textEntries := append(
+				compactProgressTextEntries(test.completedAxes, test.pendingAxes),
+				compactSpecialistProgressTextEntries(test.completedBoundaries, test.pendingBoundaries)...,
+			)
+			for _, entry := range textEntries {
+				if !strings.Contains(textOutput, entry) {
+					t.Errorf("text output missing %q:\n%s", entry, textOutput)
+				}
+			}
+		})
+	}
+}
+
+func TestCompactAdvanceReportTextHandlesCandidateWithoutSpecialistWork(t *testing.T) {
+	commit, tree := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	outcome := issuedelivery.Outcome{
+		RunID: "run-standard", State: issuedelivery.StateNeedsReview,
+		PauseCause: issuedelivery.PauseIndependentReview,
+		NextAction: issuedelivery.ActionProvideCandidateReview,
+		Candidate: &issuedelivery.Candidate{
+			ID: "candidate-standard", CommitSHA: commit, TreeSHA: tree,
+			RequiredReviews: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			ReviewIteration: 1, Reviews: []issuedelivery.CandidateReview{},
+		},
+	}
+	output := runAdvanceOutput(t, outcome, "--output", "text")
+	if !strings.Contains(output, "candidate review pending: standards") ||
+		!strings.Contains(output, "candidate review pending: spec") ||
+		strings.Contains(output, "specialist review") {
+		t.Fatalf("standard candidate text report=%s", output)
+	}
+}
+
+func compactProgressTextEntries(
+	completed, pending []deliveryevidence.ReviewAxis,
+) []string {
+	entries := make([]string, 0, len(completed)+len(pending))
+	for _, axis := range completed {
+		entries = append(entries, "candidate review completed: "+string(axis))
+	}
+	for _, axis := range pending {
+		entries = append(entries, "candidate review pending: "+string(axis))
+	}
+	return entries
+}
+
+func compactSpecialistProgressTextEntries(
+	completed, pending []issuedelivery.CompactSpecialistBoundary,
+) []string {
+	entries := make([]string, 0, len(completed)+len(pending))
+	for _, item := range completed {
+		entries = append(entries, "specialist review completed: "+string(item.Boundary)+" specialist="+item.Specialist)
+	}
+	for _, item := range pending {
+		entries = append(entries, "specialist review pending: "+string(item.Boundary)+" specialist="+item.Specialist)
+	}
+	return entries
+}
+
+func runStatusOutput(t *testing.T, outcome issuedelivery.Outcome, extra ...string) string {
+	t.Helper()
+	repository := t.TempDir()
+	fake := &fakeIssueDeliveryStatuser{outcome: outcome}
+	cmd := command{StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
+		return fake, nil
+	}}
+	args := []string{"status", "--repository", repository, "--issue", "7"}
+	args = append(args, extra...)
+	var stdout bytes.Buffer
+	if err := cmd.run(context.Background(), args, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	return stdout.String()
+}
+
 func representativeCandidate() *issuedelivery.Candidate {
 	commit, tree := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	return &issuedelivery.Candidate{

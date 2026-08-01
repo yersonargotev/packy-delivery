@@ -533,6 +533,24 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 			objective.EndToEnd.ObservedNanoseconds, objective.EndToEnd.MinimumNanoseconds,
 			objective.EndToEnd.MaximumNanoseconds, objective.EndToEnd.Comparison)
 	}
+	if progress := report.Assurance.Progress; progress != nil {
+		for _, axis := range progress.CandidateReviewAxes.Completed {
+			fmt.Fprintf(&out, "candidate review completed: %s\n", axis)
+		}
+		for _, axis := range progress.CandidateReviewAxes.Pending {
+			fmt.Fprintf(&out, "candidate review pending: %s\n", axis)
+		}
+		if boundaries := progress.SpecialistBoundaries; boundaries != nil {
+			for _, boundary := range boundaries.Completed {
+				fmt.Fprintf(&out, "specialist review completed: %s specialist=%s\n",
+					boundary.Boundary, boundary.Specialist)
+			}
+			for _, boundary := range boundaries.Pending {
+				fmt.Fprintf(&out, "specialist review pending: %s specialist=%s\n",
+					boundary.Boundary, boundary.Specialist)
+			}
+		}
+	}
 	for _, receipt := range report.Assurance.RetainedReviewReceipts {
 		fmt.Fprintf(&out, "retained review receipt: %s iteration=%d\n",
 			receipt.Identity, receipt.Iteration)
