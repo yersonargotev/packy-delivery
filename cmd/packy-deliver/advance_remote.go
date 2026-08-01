@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +36,52 @@ type remoteDecodeError struct {
 
 func (e *remoteDecodeError) Error() string { return e.err.Error() }
 func (e *remoteDecodeError) Unwrap() error { return e.err }
+
+type workflowDefinitionDiagnostic struct {
+	CommandPurpose    string
+	Repository        string
+	Ref               string
+	WorkflowPath      string
+	ObservationSource string
+	RetryCount        int
+	FinalFailureClass string
+	Detail            string
+	cause             error
+}
+
+func (e *workflowDefinitionDiagnostic) Error() string {
+	return fmt.Sprintf(
+		"workflow-definition observation failed: command purpose=%q repository=%q ref=%q workflow path=%q observation source=%q retry count=%d final failure class=%q detail=%q",
+		sanitizeDiagnosticValue(e.CommandPurpose),
+		sanitizeDiagnosticValue(e.Repository),
+		sanitizeDiagnosticValue(e.Ref),
+		sanitizeDiagnosticValue(e.WorkflowPath),
+		sanitizeDiagnosticValue(e.ObservationSource),
+		e.RetryCount,
+		sanitizeDiagnosticValue(e.FinalFailureClass),
+		sanitizeDiagnosticValue(e.Detail),
+	)
+}
+
+func (e *workflowDefinitionDiagnostic) Unwrap() error { return e.cause }
+
+func (e *workflowDefinitionDiagnostic) ObservationDiagnostic() string { return e.Error() }
+
+const (
+	workflowDefinitionSourceDirect         = "direct lookup"
+	workflowDefinitionSourceCheckRun       = "check-run"
+	workflowDefinitionSourceCommitStatus   = "commit-status"
+	workflowDefinitionFailureMalformedRef  = "malformed-ref"
+	workflowDefinitionFailureUntrustedPath = "untrusted-path"
+	workflowDefinitionFailureIncompatible  = "incompatible-identity"
+	workflowDefinitionFailureRefAbsent     = "ref-absent"
+	workflowDefinitionFailurePathAbsent    = "workflow-path-absent"
+	workflowDefinitionFailurePersistent    = "persistent-ref-absence"
+	workflowDefinitionFailureMalformedBlob = "malformed-blob"
+	workflowDefinitionFailureCancellation  = "cancellation"
+	workflowDefinitionFailureAuthorization = "authorization"
+	workflowDefinitionFailureCommand       = "command-failure"
+)
 
 type remoteRepository struct {
 	ID            string `json:"id"`
@@ -205,7 +252,7 @@ func (gateway productionNonLocalGateway) observeNonLocal(
 		return observation.PullRequests[i].Number < observation.PullRequests[j].Number
 	})
 	if len(observation.PullRequests) > 0 {
-		checks, err := gateway.observeChecks(ctx, request, baseHead)
+		checks, err := gateway.observeChecksWithRefresh(ctx, request, baseHead, refreshTracking)
 		if err != nil {
 			return issuedelivery.NonLocalObservation{}, err
 		}
@@ -376,7 +423,20 @@ func (gateway productionNonLocalGateway) EnsureRemoteIssueBranchAbsent(ctx conte
 	return nil
 }
 
-func (gateway productionNonLocalGateway) observeChecks(ctx context.Context, request issuedelivery.NonLocalObserveRequest, baseSHA string) ([]issuedelivery.CICheckObservation, error) {
+func (gateway productionNonLocalGateway) observeChecks(
+	ctx context.Context,
+	request issuedelivery.NonLocalObserveRequest,
+	baseSHA string,
+) ([]issuedelivery.CICheckObservation, error) {
+	return gateway.observeChecksWithRefresh(ctx, request, baseSHA, true)
+}
+
+func (gateway productionNonLocalGateway) observeChecksWithRefresh(
+	ctx context.Context,
+	request issuedelivery.NonLocalObserveRequest,
+	baseSHA string,
+	allowDefinitionRefRefresh bool,
+) ([]issuedelivery.CICheckObservation, error) {
 	repo := repositoryName(request.Repository)
 	raw, err := gateway.output(ctx, "gh", "api", "-H", "Accept: application/vnd.github+json",
 		"repos/"+repo+"/commits/"+request.HeadSHA+"/check-runs?filter=latest",
@@ -411,7 +471,16 @@ func (gateway productionNonLocalGateway) observeChecks(ctx context.Context, requ
 		if err != nil {
 			return nil, err
 		}
-		definitionSHA, err := gateway.definitionSHA(ctx, request.HeadSHA, workflow.Path)
+		if err := validateObservedWorkflow(
+			request.Repository, request.HeadSHA, workflow, run.Name, run.HeadSHA,
+			workflowDefinitionSourceCheckRun,
+		); err != nil {
+			return nil, err
+		}
+		definitionSHA, err := gateway.definitionSHAForObservation(
+			ctx, repositoryName(request.Repository), request.HeadSHA, workflow.Path,
+			workflowDefinitionSourceCheckRun, allowDefinitionRefRefresh,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +510,16 @@ func (gateway productionNonLocalGateway) observeChecks(ctx context.Context, requ
 		if err != nil {
 			return nil, err
 		}
-		definitionSHA, err := gateway.definitionSHA(ctx, baseSHA, workflow.Path)
+		if err := validateObservedWorkflow(
+			request.Repository, baseSHA, workflow, status.Context, workflow.HeadSHA,
+			workflowDefinitionSourceCommitStatus,
+		); err != nil {
+			return nil, err
+		}
+		definitionSHA, err := gateway.definitionSHAForObservation(
+			ctx, repositoryName(request.Repository), baseSHA, workflow.Path,
+			workflowDefinitionSourceCommitStatus, allowDefinitionRefRefresh,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -570,18 +648,308 @@ func (gateway productionNonLocalGateway) workflowRun(ctx context.Context, reposi
 }
 
 func (gateway productionNonLocalGateway) definitionSHA(ctx context.Context, ref, path string) (string, error) {
-	if !validSHA(ref) || !trustedWorkflowPath(path) {
-		return "", errors.New("workflow definition identity is incompatible")
+	return gateway.definitionSHAForObservation(
+		ctx, "unknown repository", ref, path, workflowDefinitionSourceDirect, true,
+	)
+}
+
+func (gateway productionNonLocalGateway) definitionSHAForObservation(
+	ctx context.Context,
+	repository string,
+	ref string,
+	path string,
+	source string,
+	allowRefRefresh bool,
+) (string, error) {
+	if !validSHA(ref) {
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 0,
+			workflowDefinitionFailureMalformedRef,
+			"exact workflow definition ref is not a lowercase SHA",
+			nil,
+		)
 	}
-	raw, err := gateway.output(ctx, "git", "rev-parse", ref+":"+path)
+	if !trustedWorkflowPath(path) {
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 0,
+			workflowDefinitionFailureUntrustedPath,
+			"workflow path is outside the trusted Packy workflow set",
+			nil,
+		)
+	}
+
+	lookup := func() ([]byte, error) {
+		return gateway.output(ctx, "git", "rev-parse", ref+":"+path)
+	}
+	raw, err := lookup()
+	if err == nil {
+		return validateWorkflowDefinitionBlob(repository, ref, path, source, 0, raw)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 0,
+			workflowDefinitionFailureCancellation,
+			"exact workflow definition lookup was cancelled",
+			ctxErr,
+		)
+	}
+	if !workflowDefinitionLookupNeedsRefProbe(err) {
+		return "", workflowDefinitionCommandFailure(repository, ref, path, source, 0, err)
+	}
+	refPresent, probeErr := gateway.workflowDefinitionRefPresent(ctx, ref)
+	if probeErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", newWorkflowDefinitionDiagnostic(
+				repository, ref, path, source, 0,
+				workflowDefinitionFailureCancellation,
+				"exact workflow definition ref probe was cancelled",
+				ctxErr,
+			)
+		}
+		if !workflowDefinitionRefAbsent(probeErr) {
+			return "", workflowDefinitionCommandFailure(repository, ref, path, source, 0, probeErr)
+		}
+	}
+	if refPresent {
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 0,
+			workflowDefinitionFailurePathAbsent,
+			"exact workflow definition path is absent from the locally available ref",
+			err,
+		)
+	}
+	if !allowRefRefresh {
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 0,
+			workflowDefinitionFailureRefAbsent,
+			"exact workflow definition ref is not locally available for observation-only status",
+			err,
+		)
+	}
+
+	if _, err := gateway.output(ctx, "git", "fetch", "--quiet", "--no-tags", "origin", ref); err != nil {
+		return "", workflowDefinitionCommandFailure(repository, ref, path, source, 1, err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 1,
+			workflowDefinitionFailureCancellation,
+			"workflow definition ref refresh was cancelled",
+			ctxErr,
+		)
+	}
+
+	raw, err = lookup()
 	if err != nil {
-		return "", fmt.Errorf("resolve exact workflow definition: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", newWorkflowDefinitionDiagnostic(
+				repository, ref, path, source, 1,
+				workflowDefinitionFailureCancellation,
+				"exact workflow definition retry was cancelled",
+				ctxErr,
+			)
+		}
+		if !workflowDefinitionLookupNeedsRefProbe(err) {
+			return "", workflowDefinitionCommandFailure(repository, ref, path, source, 1, err)
+		}
+		refPresent, probeErr := gateway.workflowDefinitionRefPresent(ctx, ref)
+		if probeErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", newWorkflowDefinitionDiagnostic(
+					repository, ref, path, source, 1,
+					workflowDefinitionFailureCancellation,
+					"exact workflow definition ref probe after retry was cancelled",
+					ctxErr,
+				)
+			}
+			if !workflowDefinitionRefAbsent(probeErr) {
+				return "", workflowDefinitionCommandFailure(repository, ref, path, source, 1, probeErr)
+			}
+		}
+		if refPresent {
+			return "", newWorkflowDefinitionDiagnostic(
+				repository, ref, path, source, 1,
+				workflowDefinitionFailurePathAbsent,
+				"exact workflow definition path is absent after the ref refresh",
+				err,
+			)
+		}
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, 1,
+			workflowDefinitionFailurePersistent,
+			"exact workflow definition ref remained absent after one ref refresh",
+			err,
+		)
 	}
+	return validateWorkflowDefinitionBlob(repository, ref, path, source, 1, raw)
+}
+
+func (gateway productionNonLocalGateway) workflowDefinitionRefPresent(
+	ctx context.Context,
+	ref string,
+) (bool, error) {
+	_, err := gateway.output(ctx, "git", "cat-file", "-e", ref+"^{commit}")
+	return err == nil, err
+}
+
+func validateWorkflowDefinitionBlob(
+	repository string,
+	ref string,
+	path string,
+	source string,
+	retryCount int,
+	raw []byte,
+) (string, error) {
 	sha := strings.TrimSpace(string(raw))
 	if !validSHA(sha) {
-		return "", errors.New("workflow definition blob identity is malformed")
+		return "", newWorkflowDefinitionDiagnostic(
+			repository, ref, path, source, retryCount,
+			workflowDefinitionFailureMalformedBlob,
+			"workflow definition blob identity is malformed",
+			nil,
+		)
 	}
 	return sha, nil
+}
+
+func validateObservedWorkflow(
+	repository deliveryevidence.RepositoryIdentity,
+	ref string,
+	workflow workflowRun,
+	identity string,
+	observedHead string,
+	source string,
+) error {
+	if trustedCheckIdentity(identity, workflow.Name, workflow.Path) &&
+		validSHA(observedHead) && observedHead == ref &&
+		validSHA(workflow.HeadSHA) && workflow.HeadSHA == ref {
+		return nil
+	}
+	return newWorkflowDefinitionDiagnostic(
+		repositoryName(repository), ref, workflow.Path, source, 0,
+		workflowDefinitionFailureIncompatible,
+		"observed workflow or check-run identity is incompatible with the required check",
+		nil,
+	)
+}
+
+func workflowDefinitionCommandFailure(
+	repository string,
+	ref string,
+	path string,
+	source string,
+	retryCount int,
+	err error,
+) error {
+	failureClass := workflowDefinitionFailureCommand
+	detail := "exact workflow definition command failed"
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		failureClass = workflowDefinitionFailureCancellation
+		detail = "exact workflow definition command was cancelled"
+	} else if workflowDefinitionAuthorizationFailure(err) {
+		failureClass = workflowDefinitionFailureAuthorization
+		detail = "exact workflow definition ref refresh was not authorized"
+	}
+	return newWorkflowDefinitionDiagnostic(
+		repository, ref, path, source, retryCount, failureClass, detail, err,
+	)
+}
+
+func newWorkflowDefinitionDiagnostic(
+	repository string,
+	ref string,
+	path string,
+	source string,
+	retryCount int,
+	failureClass string,
+	detail string,
+	cause error,
+) error {
+	return &workflowDefinitionDiagnostic{
+		CommandPurpose:    "resolve exact workflow definition",
+		Repository:        repository,
+		Ref:               ref,
+		WorkflowPath:      path,
+		ObservationSource: source,
+		RetryCount:        retryCount,
+		FinalFailureClass: failureClass,
+		Detail:            detail,
+		cause:             cause,
+	}
+}
+
+func workflowDefinitionRefAbsent(err error) bool {
+	message := workflowDefinitionErrorText(err)
+	for _, marker := range []string{
+		"unknown revision",
+		"invalid object name",
+		"bad object",
+		"not a valid object name",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowDefinitionLookupNeedsRefProbe(err error) bool {
+	if workflowDefinitionRefAbsent(err) {
+		return true
+	}
+	message := workflowDefinitionErrorText(err)
+	for _, marker := range []string{
+		"does not exist in",
+		"exists on disk, but not in",
+		"ambiguous argument",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowDefinitionAuthorizationFailure(err error) bool {
+	message := workflowDefinitionErrorText(err)
+	for _, marker := range []string{
+		"authentication failed",
+		"authorization failed",
+		"not authorized",
+		"unauthorized",
+		"permission denied",
+		"access denied",
+		"could not read username",
+		"http 401",
+		"http 403",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowDefinitionErrorText(err error) string {
+	parts := []string{err.Error()}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		parts = append(parts, string(exitError.Stderr))
+	}
+	return strings.ToLower(strings.Join(parts, " "))
+}
+
+func sanitizeDiagnosticValue(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || r < 0x20 {
+			return '_'
+		}
+		return r
+	}, value)
+	if len(value) > 200 {
+		return value[:200] + "..."
+	}
+	return value
 }
 
 func (gateway productionNonLocalGateway) containsOriginMain(ctx context.Context, sha string) (bool, error) {

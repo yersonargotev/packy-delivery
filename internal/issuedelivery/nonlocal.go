@@ -66,7 +66,9 @@ func (m *Module) advanceNonLocal(
 	if err != nil {
 		return m.persistAssuranceTransition(
 			store, record, StateWaiting,
-			"non-local observation failed; retry without changing the candidate",
+			nonLocalObservationReason(
+				"non-local observation failed; retry without changing the candidate", err,
+			),
 			"non-local-observation",
 		)
 	}
@@ -91,9 +93,13 @@ func (m *Module) advanceNonLocal(
 		}
 		observation, err = m.nonlocal.ObserveNonLocal(ctx, observeRequest)
 		if err != nil || observation.Branch == nil {
+			reason := "issue branch push is not yet observable; retry observation"
+			if err != nil {
+				reason = nonLocalObservationReason(reason, err)
+			}
 			return m.persistAssuranceTransition(
 				store, record, StateWaiting,
-				"issue branch push is not yet observable; retry observation",
+				reason,
 				"branch-push",
 			)
 		}
@@ -123,9 +129,13 @@ func (m *Module) advanceNonLocal(
 		}
 		observation, err = m.nonlocal.ObserveNonLocal(ctx, observeRequest)
 		if err != nil || observation.Branch == nil {
+			reason := "updated issue branch is not yet observable; retry observation"
+			if err != nil {
+				reason = nonLocalObservationReason(reason, err)
+			}
 			return m.persistAssuranceTransition(
 				store, record, StateWaiting,
-				"updated issue branch is not yet observable; retry observation",
+				reason,
 				"branch-push",
 			)
 		}
@@ -198,9 +208,13 @@ func (m *Module) advanceNonLocal(
 
 	confirmation, err := m.nonlocal.ObserveNonLocal(ctx, observeRequest)
 	if err != nil || confirmation.PullRequests == nil || confirmation.Checks == nil {
+		reason := "pull-request head/base confirmation is not yet available after CI collection"
+		if err != nil {
+			reason = nonLocalObservationReason(reason, err)
+		}
 		return m.persistAssuranceTransition(
 			store, record, StateWaiting,
-			"pull-request head/base confirmation is not yet available after CI collection",
+			reason,
 			"ci-wait",
 		)
 	}
@@ -398,6 +412,18 @@ func (m *Module) advanceRequiredCI(
 		}
 		return m.persistAssuranceTransition(store, record, StateBlocked, reason, "ci-wait")
 	}
+}
+
+type nonLocalObservationDiagnostic interface {
+	ObservationDiagnostic() string
+}
+
+func nonLocalObservationReason(prefix string, err error) string {
+	var diagnostic nonLocalObservationDiagnostic
+	if errors.As(err, &diagnostic) {
+		return prefix + ": " + diagnostic.ObservationDiagnostic()
+	}
+	return prefix
 }
 
 func canonicalCICheckObservations(values []CICheckObservation) []CICheckObservation {
