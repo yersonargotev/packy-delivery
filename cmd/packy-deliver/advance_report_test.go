@@ -446,6 +446,56 @@ func TestCompactAdvanceReportTextHandlesCandidateWithoutSpecialistWork(t *testin
 	}
 }
 
+func TestCompactAdvanceReportNamesEachReusedValidationObligation(t *testing.T) {
+	completion := strings.Repeat("c", 64)
+	sessionID := strings.Repeat("d", 64)
+	candidate := &issuedelivery.Candidate{
+		ID: "derived-candidate", RequiredReviews: []deliveryevidence.ReviewAxis{},
+		RequiredSpecialists: []issuedelivery.SensitiveBoundary{},
+		Derivation: &issuedelivery.CandidateDerivation{
+			ValidationDerivationReceipts: []deliveryevidence.ValidationDerivationReceipt{
+				{
+					Identity: "derived-exhaustive", SourceSessionID: sessionID,
+					SourceCompletionSHA256: completion,
+					Obligation:             deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationExhaustive},
+				},
+				{
+					Identity: "derived-security", SourceSessionID: sessionID,
+					SourceCompletionSHA256: completion,
+					Obligation: deliveryevidence.ValidationObligationIdentity{
+						Kind: deliveryevidence.ValidationObligationBoundary, Boundary: deliveryevidence.BoundarySecurity,
+					},
+				},
+			},
+		},
+	}
+	outcome := issuedelivery.Outcome{
+		RunID: "run-validation-reuse", State: issuedelivery.StateWaiting,
+		PauseCause: issuedelivery.PauseExternalResult, NextAction: issuedelivery.ActionObserveExternalResult,
+		Candidate: candidate,
+	}
+	jsonOutput := runAdvanceOutput(t, outcome)
+	var report compactAdvanceReport
+	if err := json.Unmarshal([]byte(jsonOutput), &report); err != nil {
+		t.Fatal(err)
+	}
+	if got := report.Assurance.ReusedValidationArtifacts; len(got) != 2 ||
+		got[0].Kind != issuedelivery.ReusedValidationBoundary || got[0].Boundary != issuedelivery.BoundarySecurity ||
+		got[1].Kind != issuedelivery.ReusedValidationExhaustive {
+		t.Fatalf("reused validation JSON=%#v", got)
+	}
+	textOutput := runAdvanceOutput(t, outcome, "--output", "text")
+	for _, expected := range []string{
+		"reused validation artifact: boundary identity=derived-security",
+		"boundary=security",
+		"reused validation artifact: exhaustive identity=derived-exhaustive",
+	} {
+		if !strings.Contains(textOutput, expected) {
+			t.Fatalf("text report omitted %q:\n%s", expected, textOutput)
+		}
+	}
+}
+
 func compactProgressTextEntries(
 	completed, pending []deliveryevidence.ReviewAxis,
 ) []string {

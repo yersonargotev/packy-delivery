@@ -58,6 +58,10 @@ var validationInvalidationClassOrder = [...]ValidationInvalidationClass{
 	ValidationInvalidationExpiry,
 	ValidationInvalidationWorkspace,
 	ValidationInvalidationFailedExecution,
+	ValidationInvalidationSource,
+	ValidationInvalidationCompletion,
+	ValidationInvalidationObligation,
+	ValidationInvalidationImpact,
 }
 
 type CompactRunProjection struct {
@@ -400,6 +404,32 @@ func retainedReviewReceipts(
 }
 
 func reusedValidationArtifacts(outcome Outcome, candidate Candidate) []ReusedValidationArtifact {
+	if candidate.Derivation != nil && len(candidate.Derivation.ValidationDerivationReceipts) != 0 {
+		artifacts := make([]ReusedValidationArtifact, 0, len(candidate.Derivation.ValidationDerivationReceipts))
+		for _, receipt := range candidate.Derivation.ValidationDerivationReceipts {
+			artifact := ReusedValidationArtifact{
+				Identity: receipt.Identity, SessionID: receipt.SourceSessionID,
+				ValidationCompletionSHA256: receipt.SourceCompletionSHA256,
+			}
+			switch receipt.Obligation.Kind {
+			case deliveryevidence.ValidationObligationExhaustive:
+				artifact.Kind = ReusedValidationExhaustive
+			case deliveryevidence.ValidationObligationBoundary:
+				artifact.Kind = ReusedValidationBoundary
+				artifact.Boundary = SensitiveBoundary(receipt.Obligation.Boundary)
+			default:
+				continue
+			}
+			artifacts = append(artifacts, artifact)
+		}
+		sort.Slice(artifacts, func(i, j int) bool {
+			if artifacts[i].Kind == artifacts[j].Kind {
+				return artifacts[i].Boundary < artifacts[j].Boundary
+			}
+			return artifacts[i].Kind < artifacts[j].Kind
+		})
+		return artifacts
+	}
 	sessions := make(map[string]ValidationSession)
 	for _, session := range outcome.ValidationSessions {
 		if session.CompletionSHA256 == "" ||

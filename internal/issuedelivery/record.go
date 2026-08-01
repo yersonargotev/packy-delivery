@@ -539,8 +539,12 @@ func validateCandidates(record runRecord) error {
 			}
 			if candidate.Exhaustive != nil {
 				reference := proof.ValidationReceipt
+				expectedSchema := deliveryevidence.ValidationReceiptSchema(deliveryevidence.ValidationReceiptV1)
+				if candidate.Exhaustive.ValidationDerivationReceiptID != "" {
+					expectedSchema = deliveryevidence.ValidationReceiptSchema(deliveryevidence.ValidationDerivationReceiptSchema)
+				}
 				if reference == nil ||
-					reference.Schema != deliveryevidence.ValidationReceiptV1 ||
+					reference.Schema != expectedSchema ||
 					reference.CandidateID != candidate.ID ||
 					reference.CommitSHA != candidate.CommitSHA ||
 					reference.CommitSHA != candidate.Exhaustive.Result.CommitSHA ||
@@ -552,13 +556,15 @@ func validateCandidates(record runRecord) error {
 			}
 			if candidate.Exhaustive != nil && index == len(record.Candidates)-1 {
 				reference := proof.ValidationReceipt
-				matched := false
-				for _, receipt := range record.Evidence.ValidationReceipts {
-					if receipt.Schema == reference.Schema &&
-						receipt.CommitSHA == reference.CommitSHA &&
-						receipt.TreeSHA == reference.TreeSHA &&
-						receipt.CompletedAt == reference.CompletedAt {
-						matched = true
+				matched := reference.ReceiptID != "" && reference.ReceiptID == candidate.Exhaustive.ValidationDerivationReceiptID
+				if !matched {
+					for _, receipt := range record.Evidence.ValidationReceipts {
+						if receipt.Schema == reference.Schema &&
+							receipt.CommitSHA == reference.CommitSHA &&
+							receipt.TreeSHA == reference.TreeSHA &&
+							receipt.CompletedAt == reference.CompletedAt {
+							matched = true
+						}
 					}
 				}
 				if !matched {
@@ -631,10 +637,12 @@ func validateCandidates(record runRecord) error {
 		return fmt.Errorf("local readiness does not match the current candidate")
 	}
 	if record.LocalReadiness != nil {
+		validationAuthority := len(record.Evidence.ValidationReceipts) != 0
+		if current.Derivation != nil && len(current.Derivation.ValidationDerivationReceipts) != 0 {
+			validationAuthority = validationDerivationReceiptID(&current, deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationExhaustive}) != ""
+		}
 		if current.Exhaustive == nil || !hasCandidateSemanticAssurance(&current, len(record.Evidence.AcceptanceMatrix)) ||
-			len(record.Evidence.ValidationReceipts) == 0 ||
-			len(missingSpecialistBoundaries(&current)) != 0 ||
-			len(missingBoundaryProofs(&current)) != 0 {
+			!validationAuthority || len(missingSpecialistBoundaries(&current)) != 0 || len(missingBoundaryProofs(&current)) != 0 {
 			return fmt.Errorf("local readiness lacks exact candidate assurance")
 		}
 		for _, row := range record.Evidence.AcceptanceMatrix {

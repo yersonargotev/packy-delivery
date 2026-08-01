@@ -607,8 +607,12 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 		out.WriteByte('\n')
 	}
 	for _, invalidation := range report.Assurance.Invalidations {
-		fmt.Fprintf(&out, "validation invalidation: %s session=%s candidate=%s observed=%s\n",
+		fmt.Fprintf(&out, "validation invalidation: %s session=%s candidate=%s observed=%s",
 			invalidation.Class, invalidation.SessionID, invalidation.CandidateID, invalidation.ObservedAt)
+		if invalidation.Reason != "" {
+			fmt.Fprintf(&out, " reason=%s", invalidation.Reason)
+		}
+		out.WriteByte('\n')
 	}
 	if report.Candidate != nil {
 		fmt.Fprintf(&out, "candidate: %s commit=%s tree=%s\n",

@@ -35,7 +35,7 @@ const (
 	InstrumentationSandboxWriteManifest   ValidationInstrumentation = "sandbox-write-manifest"
 )
 
-type ValidationInvalidationClass string
+type ValidationInvalidationClass = deliveryevidence.ValidationInvalidationClass
 
 const (
 	ValidationInvalidationCandidate           ValidationInvalidationClass = "candidate"
@@ -50,6 +50,10 @@ const (
 	ValidationInvalidationExpiry              ValidationInvalidationClass = "expiry"
 	ValidationInvalidationWorkspace           ValidationInvalidationClass = "workspace"
 	ValidationInvalidationFailedExecution     ValidationInvalidationClass = "failed-execution"
+	ValidationInvalidationSource              ValidationInvalidationClass = "source"
+	ValidationInvalidationCompletion          ValidationInvalidationClass = "completion"
+	ValidationInvalidationObligation          ValidationInvalidationClass = "obligation"
+	ValidationInvalidationImpact              ValidationInvalidationClass = "impact-assessment"
 )
 
 type ValidationSessionObserveRequest struct {
@@ -143,6 +147,7 @@ type ValidationInvalidation struct {
 	CandidateID string                      `json:"candidate_id"`
 	Class       ValidationInvalidationClass `json:"class"`
 	ObservedAt  string                      `json:"observed_at"`
+	Reason      string                      `json:"reason,omitempty"`
 }
 
 type ValidationSessionExecutor interface {
@@ -171,6 +176,268 @@ func requiredValidationInstrumentation(candidate Candidate) []ValidationInstrume
 	}
 	sort.Slice(required, func(i, j int) bool { return required[i] < required[j] })
 	return required
+}
+
+type validationArtifactRegistry struct {
+	record     runRecord
+	obligation deliveryevidence.ValidationObligationIdentity
+}
+
+func (r validationArtifactRegistry) RegisteredValidationArtifact(sessionID, completionSHA256 string) (deliveryevidence.RegisteredValidationArtifact, bool) {
+	session, found := validationSessionByCompletion(r.record.ValidationSessions, completionSHA256)
+	if !found || session.ID != sessionID {
+		return deliveryevidence.RegisteredValidationArtifact{}, false
+	}
+	candidate := candidateByID(r.record.Candidates, session.CandidateID)
+	if candidate == nil {
+		return deliveryevidence.RegisteredValidationArtifact{}, false
+	}
+	return registeredValidationArtifact(r.record, session, *candidate, r.obligation)
+}
+
+func registeredValidationArtifact(
+	record runRecord,
+	session ValidationSession,
+	candidate Candidate,
+	obligation deliveryevidence.ValidationObligationIdentity,
+) (deliveryevidence.RegisteredValidationArtifact, bool) {
+	if session.State != ValidationSessionCompleted || session.Result == nil ||
+		!session.Result.Succeeded || !session.Result.Completed {
+		return deliveryevidence.RegisteredValidationArtifact{}, false
+	}
+	switch obligation.Kind {
+	case deliveryevidence.ValidationObligationExhaustive:
+		if obligation.Boundary != "" {
+			return deliveryevidence.RegisteredValidationArtifact{}, false
+		}
+	case deliveryevidence.ValidationObligationBoundary:
+		boundary := SensitiveBoundary(obligation.Boundary)
+		if _, found := validationBoundaryEvidence(session.Result.BoundaryEvidence, boundary); !found ||
+			!containsAllBoundaries(session.CoveredBoundaries, []SensitiveBoundary{boundary}) {
+			return deliveryevidence.RegisteredValidationArtifact{}, false
+		}
+	default:
+		return deliveryevidence.RegisteredValidationArtifact{}, false
+	}
+	return deliveryevidence.RegisteredValidationArtifact{
+		SessionSchema: session.Schema, Kind: deliveryevidence.ValidationArtifactRegisteredSession,
+		SessionID: session.ID, CompletionSHA256: session.CompletionSHA256,
+		CheckoutSHA256: session.CheckoutSHA256, Candidate: evidenceCandidateIdentity(candidate),
+		Environment: validationEnvironment(session), Obligation: obligation,
+		ExpiresAt: session.ValidatorIdentityExpiresAt, CompletedAt: canonicalValidationTimestamp(session.CompletedAt),
+		WorkspaceClean: session.WorkspaceClean, Succeeded: session.Result.Succeeded,
+		Completed:       session.Result.Completed,
+		CompletionCount: validationCompletionCount(record.ValidationSessions, session.CompletionSHA256),
+	}, true
+}
+
+func validationEnvironment(session ValidationSession) deliveryevidence.ValidationEnvironmentIdentity {
+	instrumentation := make([]deliveryevidence.ValidationInstrumentation, len(session.Instrumentation))
+	for index, value := range session.Instrumentation {
+		instrumentation[index] = deliveryevidence.ValidationInstrumentation(value)
+	}
+	var boundaries []deliveryevidence.SensitiveBoundary
+	if len(session.CoveredBoundaries) != 0 {
+		boundaries = make([]deliveryevidence.SensitiveBoundary, len(session.CoveredBoundaries))
+	}
+	for index, value := range session.CoveredBoundaries {
+		boundaries[index] = deliveryevidence.SensitiveBoundary(value)
+	}
+	return deliveryevidence.ValidationEnvironmentIdentity{
+		ValidatorIdentity: session.ValidatorIdentity, ValidatorSHA256: session.ValidatorSHA256,
+		RequiredCommand: session.Command, HomeRoot: session.HomeRoot, ConfigRoot: session.ConfigRoot,
+		Instrumentation: instrumentation, CoveredBoundaries: boundaries,
+	}
+}
+
+func observedValidationEnvironment(observation ValidationSessionObservation) deliveryevidence.ValidationEnvironmentIdentity {
+	session := ValidationSession{
+		ValidatorIdentity: observation.ValidatorIdentity, ValidatorSHA256: observation.ValidatorSHA256,
+		Command: observation.Command, HomeRoot: observation.HomeRoot, ConfigRoot: observation.ConfigRoot,
+		Instrumentation: observation.Instrumentation, CoveredBoundaries: observation.CoveredBoundaries,
+	}
+	return validationEnvironment(session)
+}
+
+func (m *Module) reusableDerivedValidationSession(
+	ctx context.Context,
+	record *runRecord,
+	candidate *Candidate,
+	request Request,
+) (*ValidationSession, bool, error) {
+	derivation := candidate.Derivation
+	if derivation == nil || derivation.Confirmation == nil || derivation.FallbackReason != "" ||
+		derivation.Decision.ExhaustiveValidationRequired ||
+		len(derivation.Decision.FullBoundaryValidations) != 0 {
+		return nil, false, nil
+	}
+	parent := candidateByID(record.Candidates, derivation.ParentCandidateID)
+	if parent == nil {
+		return nil, false, errors.New("validation derivation parent candidate is unavailable")
+	}
+	var source *ValidationSession
+	for index := range record.ValidationSessions {
+		session := &record.ValidationSessions[index]
+		if session.CandidateID == parent.ID && session.State == ValidationSessionCompleted &&
+			session.Result != nil && session.CompletionSHA256 != "" {
+			source = session
+		}
+	}
+	if source == nil {
+		for index := len(record.ValidationSessions) - 1; index >= 0; index-- {
+			session := record.ValidationSessions[index]
+			if session.CandidateID == parent.ID {
+				appendValidationInvalidationReason(record, session.ID, candidate.ID,
+					ValidationInvalidationFailedExecution,
+					"parent validation session did not complete successfully and unambiguously",
+					m.clock.Now().UTC())
+				break
+			}
+		}
+		return nil, false, nil
+	}
+	requiredInstrumentation := requiredValidationInstrumentation(*candidate)
+	requiredBoundaries := append([]SensitiveBoundary(nil), candidate.Boundaries...)
+	sort.Slice(requiredBoundaries, func(i, j int) bool { return requiredBoundaries[i] < requiredBoundaries[j] })
+	observation, err := m.validationSession.ObserveValidationSession(ctx, ValidationSessionObserveRequest{
+		RunID: record.ID, Repository: record.Repository, Issue: record.Issue,
+		RepositoryPath: request.RepositoryPath, CandidateID: candidate.ID,
+		CommitSHA: candidate.CommitSHA, TreeSHA: candidate.TreeSHA,
+		HomeRoot: filepath.Join(m.sandboxRoot, "home"), ConfigRoot: filepath.Join(m.sandboxRoot, "config"),
+		RequiredInstrumentation: requiredInstrumentation, CoveredBoundaries: requiredBoundaries,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("observe derived candidate validation compatibility: %w", err)
+	}
+	obligations := []deliveryevidence.ValidationObligationIdentity{{Kind: deliveryevidence.ValidationObligationExhaustive}}
+	for _, boundary := range requiredBoundaries {
+		obligations = append(obligations, deliveryevidence.ValidationObligationIdentity{
+			Kind:     deliveryevidence.ValidationObligationBoundary,
+			Boundary: deliveryevidence.SensitiveBoundary(boundary),
+		})
+	}
+
+	assessments := make([]deliveryevidence.ValidationCompatibilityAssessment, 0, len(obligations))
+	receipts := make([]deliveryevidence.ValidationDerivationReceipt, 0, len(obligations))
+	now := m.clock.Now().UTC()
+	for _, obligation := range obligations {
+		sourceArtifact, registered := registeredValidationArtifact(*record, *source, *parent, obligation)
+		if !registered {
+			appendValidationInvalidationReason(record, source.ID, candidate.ID,
+				ValidationInvalidationObligation,
+				"registered validation session does not prove the required exact obligation", now)
+			clearValidationDerivation(candidate)
+			return nil, false, nil
+		}
+		assessment, assessmentErr := deliveryevidence.NewValidationCompatibilityAssessment(deliveryevidence.ValidationCompatibilityAssessmentInput{
+			ImpactAssessmentID: derivation.Assessment.ID, ImpactConfirmationID: derivation.Confirmation.ID,
+			Source: sourceArtifact,
+			Required: deliveryevidence.ValidationCompatibilityRequirement{
+				Candidate: evidenceCandidateIdentity(*candidate), CheckoutSHA256: observation.CheckoutSHA256,
+				Environment: observedValidationEnvironment(observation), Obligation: obligation,
+				ExpiresAt: source.ValidatorIdentityExpiresAt, WorkspaceClean: observation.WorkspaceClean,
+			},
+		})
+		if assessmentErr != nil {
+			return nil, false, assessmentErr
+		}
+		decision, evaluationErr := deliveryevidence.EvaluateValidationCompatibility(
+			persistedImpactAuthorAuthority{ImpactAuthority: m.impactAuthority, author: derivation.Assessment.Author},
+			validationArtifactRegistry{record: *record, obligation: obligation}, derivation.Assessment,
+			[]deliveryevidence.ImpactConfirmation{*derivation.Confirmation}, assessment, now,
+		)
+		if evaluationErr != nil {
+			return nil, false, evaluationErr
+		}
+		if !decision.Eligible {
+			for _, invalidation := range decision.Invalidations {
+				appendValidationInvalidationReason(record, source.ID, candidate.ID, invalidation.Class, invalidation.Reason, now)
+			}
+			clearValidationDerivation(candidate)
+			return nil, false, nil
+		}
+		receipt := deliveryevidence.ValidationDerivationReceipt{
+			Schema:          deliveryevidence.ValidationDerivationReceiptSchema,
+			SourceSessionID: source.ID, SourceCompletionSHA256: source.CompletionSHA256,
+			CompatibilityAssessmentID: assessment.ID, ImpactAssessmentID: derivation.Assessment.ID,
+			ConfirmationID: derivation.Confirmation.ID, ParentCandidateID: parent.ID,
+			DerivedCandidateID: candidate.ID, Obligation: obligation,
+		}
+		receipt.Identity = deliveryevidence.ValidationDerivationReceiptIdentity(receipt)
+		assessments = append(assessments, assessment)
+		receipts = append(receipts, receipt)
+	}
+	derivation.ValidationCompatibilityAssessments = assessments
+	derivation.ValidationDerivationReceipts = receipts
+	return derivedValidationSession(*source, *candidate), true, nil
+}
+
+func clearValidationDerivation(candidate *Candidate) {
+	if candidate == nil || candidate.Derivation == nil {
+		return
+	}
+	candidate.Derivation.ValidationCompatibilityAssessments = nil
+	candidate.Derivation.ValidationDerivationReceipts = nil
+	keptBoundaries := candidate.BoundaryProofs[:0]
+	for _, proof := range candidate.BoundaryProofs {
+		if proof.ValidationDerivationReceiptID == "" {
+			keptBoundaries = append(keptBoundaries, proof)
+		}
+	}
+	candidate.BoundaryProofs = keptBoundaries
+	if candidate.Exhaustive != nil && candidate.Exhaustive.ValidationDerivationReceiptID != "" {
+		candidate.Exhaustive = nil
+		for index := range candidate.Acceptance {
+			reference := candidate.Acceptance[index].ValidationReceipt
+			if reference != nil && reference.Schema == deliveryevidence.ValidationReceiptSchema(deliveryevidence.ValidationDerivationReceiptSchema) {
+				candidate.Acceptance[index].ValidationReceipt = nil
+			}
+		}
+	}
+}
+
+func canonicalValidationTimestamp(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return value
+	}
+	return parsed.UTC().Format(time.RFC3339Nano)
+}
+
+func candidateByID(candidates []Candidate, id string) *Candidate {
+	for index := range candidates {
+		if candidates[index].ID == id {
+			return &candidates[index]
+		}
+	}
+	return nil
+}
+
+func validationCompletionCount(sessions []ValidationSession, completionSHA256 string) int {
+	count := 0
+	for _, session := range sessions {
+		if session.CompletionSHA256 == completionSHA256 {
+			count++
+		}
+	}
+	return count
+}
+
+func derivedValidationSession(source ValidationSession, candidate Candidate) *ValidationSession {
+	derived := source
+	derived.CandidateID, derived.CommitSHA, derived.TreeSHA = candidate.ID, candidate.CommitSHA, candidate.TreeSHA
+	result := *source.Result
+	result.Acceptance = append([]AcceptanceProof(nil), source.Result.Acceptance...)
+	result.Traceability = append([]ValidationTrace(nil), source.Result.Traceability...)
+	result.BoundaryEvidence = append([]ValidationSessionBoundaryEvidence(nil), source.Result.BoundaryEvidence...)
+	result.CommitSHA, result.TreeSHA = candidate.CommitSHA, candidate.TreeSHA
+	for index := range result.Traceability {
+		result.Traceability[index].CandidateID = candidate.ID
+		result.Traceability[index].CommitSHA = candidate.CommitSHA
+		result.Traceability[index].TreeSHA = candidate.TreeSHA
+	}
+	derived.Result = &result
+	return &derived
 }
 
 func (m *Module) advanceValidationSession(
@@ -594,6 +861,16 @@ func appendValidationInvalidation(
 	class ValidationInvalidationClass,
 	observed time.Time,
 ) {
+	appendValidationInvalidationReason(record, sessionID, candidateID, class, "", observed)
+}
+
+func appendValidationInvalidationReason(
+	record *runRecord,
+	sessionID, candidateID string,
+	class ValidationInvalidationClass,
+	reason string,
+	observed time.Time,
+) {
 	if class == "" {
 		return
 	}
@@ -606,8 +883,20 @@ func appendValidationInvalidation(
 	}
 	record.ValidationInvalidations = append(record.ValidationInvalidations, ValidationInvalidation{
 		SessionID: sessionID, CandidateID: candidateID, Class: class,
-		ObservedAt: observed.Format(timeFormat),
+		ObservedAt: observed.Format(timeFormat), Reason: reason,
 	})
+}
+
+func validationDerivationReceiptID(candidate *Candidate, obligation deliveryevidence.ValidationObligationIdentity) string {
+	if candidate == nil || candidate.Derivation == nil {
+		return ""
+	}
+	for _, receipt := range candidate.Derivation.ValidationDerivationReceipts {
+		if receipt.Obligation == obligation {
+			return receipt.Identity
+		}
+	}
+	return ""
 }
 
 func canonicalInstrumentation(values []ValidationInstrumentation) bool {
@@ -751,13 +1040,18 @@ func validateValidationSessions(record runRecord) error {
 		if _, err := time.Parse(timeFormat, invalidation.ObservedAt); err != nil {
 			return errors.New("issue delivery validation invalidation time is invalid")
 		}
+		if invalidation.Reason != "" && (strings.TrimSpace(invalidation.Reason) != invalidation.Reason || len(invalidation.Reason) > 240) {
+			return errors.New("issue delivery validation invalidation reason is invalid")
+		}
 		switch invalidation.Class {
 		case ValidationInvalidationCandidate, ValidationInvalidationCommit,
 			ValidationInvalidationTree, ValidationInvalidationCheckout,
 			ValidationInvalidationValidator, ValidationInvalidationCommand,
 			ValidationInvalidationSandbox, ValidationInvalidationInstrumentation,
 			ValidationInvalidationBoundaryRequirement, ValidationInvalidationExpiry,
-			ValidationInvalidationWorkspace, ValidationInvalidationFailedExecution:
+			ValidationInvalidationWorkspace, ValidationInvalidationFailedExecution,
+			ValidationInvalidationSource, ValidationInvalidationCompletion,
+			ValidationInvalidationObligation, ValidationInvalidationImpact:
 		default:
 			return errors.New("issue delivery validation invalidation class is invalid")
 		}
@@ -772,7 +1066,8 @@ func validateValidationSessions(record runRecord) error {
 				proof.ValidationCompletionSHA256,
 			)
 			if !found || session.State != ValidationSessionCompleted ||
-				session.CandidateID != candidate.ID ||
+				!validValidationProofOwner(candidate, session, proof.ValidationDerivationReceiptID,
+					deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationBoundary, Boundary: deliveryevidence.SensitiveBoundary(proof.Result.Boundary)}) ||
 				!containsAllBoundaries(session.CoveredBoundaries, []SensitiveBoundary{proof.Result.Boundary}) {
 				return errors.New("boundary proof validation session reference is invalid")
 			}
@@ -786,11 +1081,30 @@ func validateValidationSessions(record runRecord) error {
 			candidate.Exhaustive.ValidationCompletionSHA256,
 		)
 		if !found || session.State != ValidationSessionCompleted ||
-			session.CandidateID != candidate.ID {
+			!validValidationProofOwner(candidate, session, candidate.Exhaustive.ValidationDerivationReceiptID,
+				deliveryevidence.ValidationObligationIdentity{Kind: deliveryevidence.ValidationObligationExhaustive}) {
 			return errors.New("exhaustive validation session reference is invalid")
 		}
 	}
 	return nil
+}
+
+func validValidationProofOwner(candidate Candidate, session ValidationSession, receiptID string, obligation deliveryevidence.ValidationObligationIdentity) bool {
+	if session.CandidateID == candidate.ID {
+		return receiptID == ""
+	}
+	if candidate.Derivation == nil || receiptID == "" {
+		return false
+	}
+	for _, receipt := range candidate.Derivation.ValidationDerivationReceipts {
+		if receipt.Identity == receiptID && receipt.SourceSessionID == session.ID &&
+			receipt.SourceCompletionSHA256 == session.CompletionSHA256 &&
+			receipt.ParentCandidateID == session.CandidateID &&
+			receipt.DerivedCandidateID == candidate.ID && receipt.Obligation == obligation {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCanonicalValidationSessionExpiry(value string) (time.Time, error) {
