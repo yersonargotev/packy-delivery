@@ -1,6 +1,7 @@
 package issuedelivery
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -208,6 +209,151 @@ func TestCompactRunProjectionBoundsEveryPersistedInvalidationClass(t *testing.T)
 	}
 	if len(empty.Assurance.Invalidations) != 0 {
 		t.Fatalf("missing evidence inferred an invalidation: %#v", empty.Assurance.Invalidations)
+	}
+}
+
+func TestCompactRunProjectionExposesCurrentCandidateAssuranceProgress(t *testing.T) {
+	commit, tree := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	candidate := Candidate{
+		ID: "candidate-current", CommitSHA: commit, TreeSHA: tree,
+		RequiredReviews: []deliveryevidence.ReviewAxis{
+			deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+		},
+		ReviewIteration: 2,
+		Reviews: []CandidateReview{
+			{
+				CandidateID: "candidate-current", Axis: deliveryevidence.ReviewStandards,
+				Iteration: 1, CommitSHA: commit, TreeSHA: tree,
+				Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+			},
+			{
+				CandidateID: "candidate-current", Axis: deliveryevidence.ReviewStandards,
+				Iteration: 2, CommitSHA: commit, TreeSHA: tree,
+				Findings: []deliveryevidence.ReviewFinding{}, Completed: true,
+			},
+		},
+		RequiredSpecialists: []SensitiveBoundary{BoundaryPublication, BoundarySecurity},
+		SpecialistReviews: []SpecialistReview{{
+			CandidateID: "candidate-current", Boundary: BoundarySecurity,
+			Specialist: "security-specialist", Findings: []SpecialistFinding{}, Completed: true,
+		}},
+	}
+
+	projection, err := BuildCompactRunProjection(Outcome{Candidate: &candidate}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &CompactAssuranceProgress{
+		CandidateReviewAxes: CompactReviewProgress{
+			Completed: []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards},
+			Pending:   []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec},
+		},
+		SpecialistBoundaries: &CompactSpecialistProgress{
+			Completed: []CompactSpecialistBoundary{{
+				Boundary: BoundarySecurity, Specialist: "security-specialist",
+			}},
+			Pending: []CompactSpecialistBoundary{{
+				Boundary: BoundaryPublication, Specialist: "publication-specialist",
+			}},
+		},
+	}
+	if !reflect.DeepEqual(projection.Assurance.Progress, want) {
+		t.Fatalf("assurance progress=%#v want %#v", projection.Assurance.Progress, want)
+	}
+}
+
+func TestCompactRunProjectionDoesNotInventAssuranceBeforeCandidateRisk(t *testing.T) {
+	projection, err := BuildCompactRunProjection(Outcome{
+		State: StateWaiting, Reason: "qualification is approved; awaiting candidate development",
+	}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Assurance.Progress != nil {
+		t.Fatalf("qualification-only outcome invented assurance progress: %#v", projection.Assurance.Progress)
+	}
+}
+
+type partialSpecialistReviewExecutorForProjection struct {
+	incomplete SensitiveBoundary
+}
+
+func (f partialSpecialistReviewExecutorForProjection) ReviewSpecialist(
+	_ context.Context,
+	request SpecialistReviewRequest,
+) (SpecialistReview, error) {
+	return SpecialistReview{
+		CandidateID: request.CandidateID, Boundary: request.Boundary,
+		Specialist: request.Specialist, Findings: []SpecialistFinding{},
+		Completed: request.Boundary != f.incomplete,
+	}, nil
+}
+
+func TestCompactRunProjectionReflectsPersistedPartialAssurance(t *testing.T) {
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	module, _, _, reviewer, _ := assuranceFixture(t)
+	reviewer.responses[deliveryevidence.ReviewSpec] = []CandidateReview{{
+		Completed: false, Acceptance: []AcceptanceProof{},
+	}}
+	mustAdvance(t, module, request)
+	partialCandidate := mustAdvance(t, module, request)
+	if partialCandidate.Candidate == nil || len(partialCandidate.Candidate.Reviews) != 1 {
+		t.Fatalf("partial candidate was not persisted: %#v", partialCandidate)
+	}
+	status, err := module.Status(context.Background(), StatusRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := BuildCompactRunProjection(status, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Assurance.Progress.CandidateReviewAxes; !reflect.DeepEqual(
+		got,
+		CompactReviewProgress{
+			Completed: []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards},
+			Pending:   []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec},
+		},
+	) {
+		t.Fatalf("persisted partial candidate progress=%#v", got)
+	}
+
+	module, _, _, _, _ = assuranceFixture(t)
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{
+		{Effect: EffectPublication, Evidence: "publishes an artifact", Complete: true},
+		{Effect: EffectSecurity, Evidence: "changes credential handling", Complete: true},
+	}
+	module.specialist = partialSpecialistReviewExecutorForProjection{incomplete: BoundarySecurity}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	partialSpecialist := mustAdvance(t, module, request)
+	if partialSpecialist.Candidate == nil || len(partialSpecialist.Candidate.SpecialistReviews) != 1 {
+		t.Fatalf("partial specialist review was not persisted: %#v", partialSpecialist)
+	}
+	status, err = module.Status(context.Background(), StatusRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err = BuildCompactRunProjection(status, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projection.Assurance.Progress.SpecialistBoundaries; got == nil || !reflect.DeepEqual(
+		*got,
+		CompactSpecialistProgress{
+			Completed: []CompactSpecialistBoundary{{
+				Boundary: BoundaryPublication, Specialist: "publication-specialist",
+			}},
+			Pending: []CompactSpecialistBoundary{{
+				Boundary: BoundarySecurity, Specialist: "security-specialist",
+			}},
+		},
+	) {
+		t.Fatalf("persisted partial specialist progress=%#v", got)
 	}
 }
 

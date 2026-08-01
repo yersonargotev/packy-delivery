@@ -143,6 +143,14 @@ pause cause and next action for a human. `--full-report` explicitly selects the
 existing complete canonical JSON report for automation compatibility, judgment,
 or audit and cannot be combined with text output.
 
+When a current candidate exists, the compact `assurance.progress` projection
+also exposes its completed and pending `candidate_review_axes` and
+`specialist_boundaries` when specialist work is required. Specialist entries
+include both the boundary and its canonical specialist identity. This progress
+is derived from the candidate's persisted risk and review evidence;
+qualification without a candidate exposes no review requirements, and the
+projection never creates packets or advances the run.
+
 Every normal `Advance` report includes a typed `pause_cause` and exact
 `next_action`. The pause cause is one of `semantic-input`,
 `independent-review`, `external-result`, `non-local-authorization`,
