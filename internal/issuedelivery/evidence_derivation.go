@@ -180,7 +180,8 @@ func (m *Module) admitImpactConfirmation(
 		return Outcome{}, errors.New("impact confirmation is not required for the accepted assessment")
 	}
 	if err := deliveryevidence.AdmitImpactConfirmation(
-		m.impactAuthority, derivation.Assessment, confirmation,
+		persistedImpactAuthorAuthority{ImpactAuthority: m.impactAuthority, author: derivation.Assessment.Author},
+		derivation.Assessment, confirmation,
 	); err != nil {
 		return m.persistImpactFallback(store, record, candidate, "impact confirmation is rejected, incomplete, stale, mismatched, or not independent")
 	}
@@ -195,6 +196,15 @@ func (m *Module) admitImpactConfirmation(
 	return m.persistAssuranceTransition(
 		store, record, StateNeedsReview, "independent impact confirmation admitted; delta review is pending", "impact-confirmation",
 	)
+}
+
+type persistedImpactAuthorAuthority struct {
+	deliveryevidence.ImpactAuthority
+	author deliveryevidence.ImpactAuthor
+}
+
+func (a persistedImpactAuthorAuthority) AuthorizedImpactAuthor(author deliveryevidence.ImpactAuthor) bool {
+	return author == a.author || a.ImpactAuthority.AuthorizedImpactAuthor(author)
 }
 
 func (m *Module) persistImpactFallback(

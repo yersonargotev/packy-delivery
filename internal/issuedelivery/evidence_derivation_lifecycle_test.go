@@ -237,6 +237,13 @@ func TestAdvanceChangedAcceptanceMeaningRequiresFreshSpecProof(t *testing.T) {
 			Class:     deliveryevidence.ChangeAcceptanceMeaning,
 			Rationale: "criterion semantics changed",
 		}})
+	assessmentInput := assessment.EvidenceImpactAssessmentInput
+	assessmentInput.Obligations[0].Disposition = deliveryevidence.ImpactChanged
+	assessmentInput.Obligations[0].Rationale = "the first criterion requires fresh semantic proof"
+	assessment, err := deliveryevidence.NewEvidenceImpactAssessment(assessmentInput)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment})
 	confirmation, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
 		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.Candidate.ID,
@@ -253,6 +260,14 @@ func TestAdvanceChangedAcceptanceMeaningRequiresFreshSpecProof(t *testing.T) {
 	if len(confirmed.Candidate.Derivation.RetainedReviewReceipts) != 0 ||
 		!containsAxis(confirmed.Candidate.Derivation.Decision.FullReviewAxes, deliveryevidence.ReviewSpec) {
 		t.Fatalf("changed acceptance derivation = %#v", confirmed.Candidate.Derivation)
+	}
+	packets, err := module.ReviewPackets(context.Background(), ReviewPacketRequest{
+		RepositoryPath: "/repo", IssueNumber: 357, Kind: ReviewPacketCandidate,
+		Axis: deliveryevidence.ReviewSpec,
+	})
+	if err != nil || len(packets.Packets) != 1 || packets.Packets[0].Derivation == nil ||
+		len(packets.Packets[0].Derivation.ChangedObligations) != 1 {
+		t.Fatalf("changed acceptance packet=%#v error=%v", packets, err)
 	}
 	reviewed := mustAdvance(t, module, request)
 	if reviewer.calls[deliveryevidence.ReviewStandards] != before[deliveryevidence.ReviewStandards]+1 ||
@@ -396,6 +411,81 @@ func TestAdvanceSafeDeltaRetainsExactSpecialistButRefreshesBoundaryProof(t *test
 	}
 	if len(specialist.calls) != 1 || len(boundary.calls) != 2 {
 		t.Fatalf("derived specialist assurance calls=%v boundary=%v", specialist.calls, boundary.calls)
+	}
+}
+
+func TestAdvanceValidationEnvironmentChangesAlwaysRequireFreshExhaustiveValidation(t *testing.T) {
+	classes := []deliveryevidence.EvidenceChangeClass{
+		deliveryevidence.ChangeValidator,
+		deliveryevidence.ChangeRequiredCommand,
+		deliveryevidence.ChangeSandbox,
+		deliveryevidence.ChangeInstrumentation,
+		deliveryevidence.ChangeExpiry,
+		deliveryevidence.ChangeWorkspaceState,
+	}
+	for _, class := range classes {
+		t.Run(string(class), func(t *testing.T) {
+			module, git, _, _, _ := assuranceFixture(t)
+			module.impactAuthority = lifecycleImpactAuthority{}
+			request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+			for range 4 {
+				mustAdvance(t, module, request)
+			}
+			parent := *mustAdvance(t, module, request).Candidate
+			git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+			derived := mustAdvance(t, module, request)
+			assessment := lifecycleImpactAssessment(t, derived, parent, *derived.Candidate,
+				[]deliveryevidence.EvidenceChange{{Class: class, Rationale: "validation compatibility changed"}})
+			pending := mustAdvance(t, module, Request{
+				RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment,
+			})
+			if pending.Candidate.Derivation == nil ||
+				!pending.Candidate.Derivation.Decision.ExhaustiveValidationRequired ||
+				pending.ImpactConfirmation == nil {
+				t.Fatalf("validation invalidation decision=%#v", pending.Candidate.Derivation)
+			}
+		})
+	}
+}
+
+func TestAdvanceNewSensitiveBoundaryRequiresFreshFullReviewsAndSpecialist(t *testing.T) {
+	module, git, _, reviewer, _ := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	parent := *mustAdvance(t, module, request).Candidate
+	before := map[deliveryevidence.ReviewAxis]int{
+		deliveryevidence.ReviewStandards: reviewer.calls[deliveryevidence.ReviewStandards],
+		deliveryevidence.ReviewSpec:      reviewer.calls[deliveryevidence.ReviewSpec],
+	}
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
+		Effect: EffectSecurity, Evidence: "new credential boundary", Complete: true,
+	}}
+	specialist := &fakeSpecialistReviewExecutor{}
+	module.specialist, module.boundary = specialist, &fakeBoundaryValidationExecutor{}
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+	derived := mustAdvance(t, module, request)
+	assessment := lifecycleImpactAssessment(t, derived, parent, *derived.Candidate,
+		[]deliveryevidence.EvidenceChange{{
+			Class:      deliveryevidence.ChangeSensitiveBoundary,
+			Rationale:  "security boundary was introduced",
+			Boundaries: []deliveryevidence.SensitiveBoundary{deliveryevidence.BoundarySecurity},
+		}})
+	admitted := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment,
+	})
+	if admitted.ImpactConfirmation != nil ||
+		!containsEvidenceBoundary(admitted.Candidate.Derivation.Decision.FullSpecialistBoundaries, BoundarySecurity) {
+		t.Fatalf("new boundary derivation=%#v", admitted.Candidate.Derivation)
+	}
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	if reviewer.calls[deliveryevidence.ReviewStandards] != before[deliveryevidence.ReviewStandards]+1 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != before[deliveryevidence.ReviewSpec]+1 ||
+		len(specialist.calls) != 1 || specialist.calls[0] != BoundarySecurity {
+		t.Fatalf("new boundary reviews=%#v specialist=%v", reviewer.calls, specialist.calls)
 	}
 }
 

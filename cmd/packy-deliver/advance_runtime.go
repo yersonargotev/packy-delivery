@@ -110,21 +110,28 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 type productionImpactAuthority struct {
 	authorized    map[string]bool
 	authenticated string
+	policies      map[string]bool
+	principal     deliveryevidence.ImpactAuthor
 }
 
 func (a productionImpactAuthority) AuthorizedImpactAuthor(author deliveryevidence.ImpactAuthor) bool {
-	return author.Kind == deliveryevidence.ImpactAuthorAuthorizedHuman && a.authorized[author.Identity]
+	switch author.Kind {
+	case deliveryevidence.ImpactAuthorAuthorizedHuman:
+		return a.authorized[author.Identity]
+	case deliveryevidence.ImpactAuthorRegisteredPolicy:
+		return a.policies[impactPolicyKey(author)]
+	default:
+		return false
+	}
 }
 
 func (a productionImpactAuthority) IndependentImpactConfirmer(author, confirmer deliveryevidence.ImpactAuthor) bool {
-	return a.AuthorizedImpactAuthor(author) && a.AuthorizedImpactAuthor(confirmer) &&
-		confirmer.Identity == a.authenticated && author.Identity != confirmer.Identity
+	return a.AuthorizedImpactAuthor(confirmer) && confirmer.Identity == a.authenticated &&
+		(author.Identity != confirmer.Identity || author.Kind != confirmer.Kind)
 }
 
 func (a productionImpactAuthority) AuthenticatedImpactPrincipal() deliveryevidence.ImpactAuthor {
-	return deliveryevidence.ImpactAuthor{
-		Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: a.authenticated,
-	}
+	return a.principal
 }
 
 func newProductionImpactAuthority(options advanceOptions, runner Runner) (deliveryevidence.ImpactAuthority, error) {
@@ -171,7 +178,38 @@ func newProductionImpactAuthority(options advanceOptions, runner Runner) (delive
 			authorized[collaborator.Login] = true
 		}
 	}
-	return productionImpactAuthority{authorized: authorized, authenticated: authenticated}, nil
+	principal := deliveryevidence.ImpactAuthor{
+		Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: authenticated,
+	}
+	policies := make(map[string]bool)
+	if options.ImpactAssessment != nil &&
+		options.ImpactAssessment.Author.Kind == deliveryevidence.ImpactAuthorRegisteredPolicy {
+		policy := options.ImpactAssessment.Author
+		identity := filepath.ToSlash(filepath.Clean(policy.Identity))
+		if identity != policy.Identity || !strings.HasPrefix(identity, ".packy/impact-policies/") ||
+			strings.Contains(identity, "..") {
+			return nil, errors.New("impact policy identity is not a canonical registered policy path")
+		}
+		raw, err := runner.Output(
+			options.Context, "git", "-C", options.RepositoryPath, "show", "origin/main:"+identity,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("resolve registered impact policy: %w", err)
+		}
+		digest := sha256.Sum256(raw)
+		if fmt.Sprintf("%x", digest) != policy.RegistrationSHA256 {
+			return nil, errors.New("registered impact policy digest does not match trusted origin/main")
+		}
+		policies[impactPolicyKey(policy)] = true
+		principal = policy
+	}
+	return productionImpactAuthority{
+		authorized: authorized, authenticated: authenticated, policies: policies, principal: principal,
+	}, nil
+}
+
+func impactPolicyKey(author deliveryevidence.ImpactAuthor) string {
+	return string(author.Kind) + "\x00" + author.Identity + "\x00" + author.RegistrationSHA256
 }
 
 func (e productionValidationSessionExecutor) ObserveValidationSession(

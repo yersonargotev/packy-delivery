@@ -461,6 +461,13 @@ independence; caller-authored identity strings or policy aliases do not.
 Self-confirmation, stale or duplicate identity, partial obligation
 coverage, rejection, and ambiguity fail closed.
 
+The Packy adapter resolves a registered policy only from its canonical
+repository-relative identity below `.packy/impact-policies/` at trusted
+`origin/main`; the SHA-256 of those exact bytes must equal the assessment's
+registration digest. A later independent human confirmation is bound to the
+current authenticated GitHub principal. Policy paths from the candidate tree,
+unregistered files, and caller-provided aliases have no authority.
+
 A complete non-behavioral delta may identify explicitly unaffected evidence as
 retainable and requires a Standards delta review. Authority, behavior,
 contract, scope, architecture, security, acceptance meaning, profile, or

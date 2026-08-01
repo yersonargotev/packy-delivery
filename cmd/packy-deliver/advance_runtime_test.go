@@ -19,6 +19,44 @@ import (
 
 type productionPathReviewExecutor struct{}
 
+func TestProductionImpactAuthorityResolvesRegisteredPolicyFromTrustedBase(t *testing.T) {
+	policyBytes := []byte("policy-v1\n")
+	digest := sha256.Sum256(policyBytes)
+	policy := deliveryevidence.ImpactAuthor{
+		Kind:               deliveryevidence.ImpactAuthorRegisteredPolicy,
+		Identity:           ".packy/impact-policies/review-delta.json",
+		RegistrationSHA256: hex.EncodeToString(digest[:]),
+	}
+	runner := runtimeRunnerFunc(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		joined := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "remote get-url origin"):
+			return []byte("git@github.com:yersonargotev/packy.git\n"), nil
+		case joined == "gh api user --jq .login":
+			return []byte("maintainer\n"), nil
+		case strings.Contains(joined, "collaborators?affiliation=all"):
+			return []byte(`[{"login":"maintainer","permissions":{"push":true}}]`), nil
+		case strings.Contains(joined, "show origin/main:.packy/impact-policies/review-delta.json"):
+			return policyBytes, nil
+		default:
+			return nil, errors.New("unexpected command: " + joined)
+		}
+	})
+	authority, err := newProductionImpactAuthority(advanceOptions{
+		Context: context.Background(), RepositoryPath: "/repo",
+		ImpactAssessment: &deliveryevidence.EvidenceImpactAssessment{
+			EvidenceImpactAssessmentInput: deliveryevidence.EvidenceImpactAssessmentInput{Author: policy},
+		},
+	}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated := authority.(issuedelivery.AuthenticatedImpactAuthority)
+	if !authority.AuthorizedImpactAuthor(policy) || authenticated.AuthenticatedImpactPrincipal() != policy {
+		t.Fatalf("registered policy authority=%#v principal=%#v", authority, authenticated.AuthenticatedImpactPrincipal())
+	}
+}
+
 type runtimeRunnerFunc func(context.Context, string, ...string) ([]byte, error)
 
 func (run runtimeRunnerFunc) Output(
