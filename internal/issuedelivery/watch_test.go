@@ -96,6 +96,74 @@ func TestWatchEmitsInitialAndExternalSemanticChange(t *testing.T) {
 	}
 }
 
+func TestWatchTimeoutEmitsTypedTerminalEventWithLastSuccessfulProjection(t *testing.T) {
+	module, git, _ := moduleFixture(t, 356)
+	if _, err := module.Advance(context.Background(), Request{
+		RepositoryPath: "/repo", IssueNumber: 356,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := module.store.withIssueLock(
+		context.Background(),
+		git.value.CommonDir,
+		356,
+		func(store lockedIssueStore) error {
+			runID, data, found, err := store.loadActive()
+			if err != nil || !found {
+				return err
+			}
+			record, err := decodeRun(data)
+			if err != nil {
+				return err
+			}
+			record.State = StateWaiting
+			record.Reason = "awaiting an external repository result"
+			record.PendingQualificationCorrection = nil
+			record.Timing[len(record.Timing)-1].To = StateWaiting
+			updated, err := encodeRun(record)
+			if err != nil {
+				return err
+			}
+			_, err = store.storeRevisionAndActivate(runID, updated)
+			return err
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotRegularFiles(t, git.value.CommonDir)
+	module.waiter = &timeoutAfterInitialPollWaiter{ready: make(chan struct{})}
+	var events []WatchEvent
+	err = module.Watch(context.Background(), WatchRequest{
+		RepositoryPath: "/repo", IssueNumber: 356,
+		Interval: MinimumWatchInterval, Timeout: MinimumWatchTimeout,
+	}, func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	var timeoutErr *WatchTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events=%#v", events)
+	}
+	initial, terminal := events[0], events[1]
+	if terminal.TerminalOutcome != WatchTerminalTimeoutNoChange ||
+		terminal.Sequence != initial.Sequence+1 ||
+		terminal.Outcome.RunID != initial.Outcome.RunID ||
+		terminal.Outcome.PauseCause != initial.Outcome.PauseCause ||
+		terminal.Outcome.NextAction != initial.Outcome.NextAction ||
+		!reflect.DeepEqual(terminal.Outcome.StatusObservation, initial.Outcome.StatusObservation) ||
+		!reflect.DeepEqual(terminal.Outcome.Operation, initial.Outcome.Operation) {
+		t.Fatalf("initial=%#v terminal=%#v", initial, terminal)
+	}
+	after := snapshotRegularFiles(t, git.value.CommonDir)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("watch timeout changed persisted run state")
+	}
+}
+
 func TestWatchRejectsInvalidRequestBeforeObservation(t *testing.T) {
 	module, git, _ := moduleFixture(t, 356)
 	git.mu.Lock()
@@ -143,6 +211,25 @@ func (immediateTimeoutWaiter) Wait(ctx context.Context, duration time.Duration) 
 	return ctx.Err()
 }
 
+type timeoutAfterInitialPollWaiter struct {
+	ready chan struct{}
+	once  sync.Once
+}
+
+func (w *timeoutAfterInitialPollWaiter) Wait(ctx context.Context, duration time.Duration) error {
+	if duration >= MinimumWatchTimeout {
+		select {
+		case <-w.ready:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	w.once.Do(func() { close(w.ready) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func TestWatchTimeoutCancelsInflightStatus(t *testing.T) {
 	git := &blockingGitObserver{started: make(chan struct{})}
 	module, err := New(Config{
@@ -164,6 +251,31 @@ func TestWatchTimeoutCancelsInflightStatus(t *testing.T) {
 	case <-git.started:
 	default:
 		t.Fatal("Status was not started")
+	}
+}
+
+func TestWatchContextCancellationRemainsDistinctFromTimeout(t *testing.T) {
+	git := &blockingGitObserver{started: make(chan struct{})}
+	module, err := New(Config{
+		Git: git, GitHub: &fakeGitHubObserver{}, Waiter: systemWaiter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- module.Watch(ctx, WatchRequest{
+			RepositoryPath: "/repo", IssueNumber: 356,
+			Interval: MinimumWatchInterval, Timeout: MinimumWatchTimeout,
+		}, func(WatchEvent) error { return nil })
+	}()
+	<-git.started
+	cancel()
+	err = <-done
+	var timeoutErr *WatchTimeoutError
+	if !errors.Is(err, context.Canceled) || errors.As(err, &timeoutErr) {
+		t.Fatalf("cancellation error=%T %v", err, err)
 	}
 }
 

@@ -40,6 +40,7 @@ type watchEvent struct {
 	NextAction       issuedelivery.NextAction              `json:"next_action,omitempty"`
 	RelevantIdentity *issuedelivery.StatusRelevantIdentity `json:"relevant_identity,omitempty"`
 	ErrorClass       issuedelivery.StatusErrorClass        `json:"error_class,omitempty"`
+	TerminalOutcome  issuedelivery.WatchTerminalOutcome    `json:"terminal_outcome,omitempty"`
 	Operation        *issuedelivery.Operation              `json:"operation,omitempty"`
 }
 
@@ -141,8 +142,8 @@ func watchEventFromDomain(observed issuedelivery.WatchEvent) watchEvent {
 		ObservedAt: observed.ObservedAt.UTC().Format(time.RFC3339Nano),
 		RunID:      outcome.RunID, State: outcome.State,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
-		ErrorClass: observed.ErrorClass,
-		Operation:  outcome.Operation,
+		ErrorClass: observed.ErrorClass, TerminalOutcome: observed.TerminalOutcome,
+		Operation: outcome.Operation,
 	}
 	if outcome.StatusObservation != nil {
 		identity := outcome.StatusObservation.Current
@@ -176,6 +177,10 @@ func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
 	if event.ErrorClass != "" {
 		errorClass = " error=" + string(event.ErrorClass)
 	}
+	terminal := ""
+	if event.TerminalOutcome != "" {
+		terminal = " terminal=" + string(event.TerminalOutcome)
+	}
 	operation := ""
 	if event.Operation != nil {
 		operation = fmt.Sprintf(
@@ -192,7 +197,7 @@ func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
 	}
 	_, err := fmt.Fprintf(
 		stdout,
-		"watch[%d] at=%s run=%s state=%s pause=%s next=%s%s%s%s\n",
+		"watch[%d] at=%s run=%s state=%s pause=%s next=%s%s%s%s%s\n",
 		event.Sequence,
 		event.ObservedAt,
 		event.RunID,
@@ -202,6 +207,7 @@ func emitWatchEvent(stdout io.Writer, output string, event watchEvent) error {
 		identity,
 		operation,
 		errorClass,
+		terminal,
 	)
 	return err
 }

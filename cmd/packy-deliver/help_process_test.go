@@ -96,7 +96,7 @@ func TestWatchHelpCommandsAsProcess(t *testing.T) {
 			}
 			for _, value := range []string{
 				"--repository", "--issue", "--interval", "--timeout", "--output",
-				"100ms", "24h", "code 2",
+				"100ms", "24h", "terminal_outcome", "timeout-no-change", "code 2",
 			} {
 				if !strings.Contains(stdout, value) {
 					t.Errorf("stdout does not contain %q:\n%s", value, stdout)
@@ -128,9 +128,31 @@ func TestWatchTimeoutAndInterruptionAsProcess(t *testing.T) {
 		if exitCode != 2 || !strings.Contains(stderr, "watch timed out after 1s") {
 			t.Fatalf("exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
 		}
-		if strings.Count(strings.TrimSpace(stdout), "\n") != 0 ||
-			!strings.Contains(stdout, `"pause_cause":"lock-contention"`) {
+		if strings.Count(strings.TrimSpace(stdout), "\n") != 1 ||
+			!strings.Contains(stdout, `"pause_cause":"lock-contention"`) ||
+			!strings.Contains(stdout, `"terminal_outcome":"timeout-no-change"`) {
 			t.Fatalf("timeout output=%q", stdout)
+		}
+	})
+
+	t.Run("observer failure keeps operational exit", func(t *testing.T) {
+		repository, unlock := prepareLockContendedWatchRepository(t)
+		unlock()
+		stdout, stderr, exitCode := runPackyDeliverForHelpTest(
+			t,
+			binary,
+			"watch",
+			"--repository", repository,
+			"--issue", "29",
+			"--interval", "100ms",
+			"--timeout", "1s",
+			"--output", "jsonl",
+		)
+		if exitCode != 1 ||
+			!strings.Contains(stdout, `"error_class":"run-state"`) ||
+			strings.Contains(stdout, `"terminal_outcome":`) ||
+			!strings.Contains(stderr, "watch observation failed") {
+			t.Fatalf("exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
 		}
 	})
 
@@ -164,6 +186,9 @@ func TestWatchTimeoutAndInterruptionAsProcess(t *testing.T) {
 		status, ok := exitError.Sys().(syscall.WaitStatus)
 		if !ok || !status.Signaled() || status.Signal() != syscall.SIGINT {
 			t.Fatalf("wait status=%v stdout=%q stderr=%q", status, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stdout.String(), `"terminal_outcome":"timeout-no-change"`) {
+			t.Fatalf("signal interruption was reported as timeout: %q", stdout.String())
 		}
 	})
 }

@@ -86,6 +86,54 @@ func TestWatchCommandRendersTextWithoutInventingEvents(t *testing.T) {
 	}
 }
 
+func TestWatchCommandRendersTypedTerminalTimeoutInJSONLAndText(t *testing.T) {
+	observedAt := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	initial := watchDomainEvent(1, observedAt, issuedelivery.ActionObserveExternalResult, "same", "")
+	terminal := initial
+	terminal.Sequence = 2
+	terminal.ObservedAt = observedAt.Add(time.Second)
+	terminal.TerminalOutcome = issuedelivery.WatchTerminalTimeoutNoChange
+	watcher := &scriptedWatcher{
+		events: []issuedelivery.WatchEvent{initial, terminal},
+		err:    &issuedelivery.WatchTimeoutError{Timeout: time.Second},
+	}
+
+	var jsonl bytes.Buffer
+	err := watchTestCommand(watcher).run(
+		context.Background(),
+		watchArgs(t, "jsonl", "1s"),
+		&jsonl,
+	)
+	var timeout *watchTimeoutError
+	if !errors.As(err, &timeout) || commandExitCode(err) != 2 {
+		t.Fatalf("error=%T %v code=%d", err, err, commandExitCode(err))
+	}
+	events := decodeWatchEvents(t, jsonl.String())
+	if len(events) != 2 ||
+		events[1].TerminalOutcome != issuedelivery.WatchTerminalTimeoutNoChange ||
+		events[1].RunID != events[0].RunID ||
+		events[1].PauseCause != events[0].PauseCause ||
+		events[1].NextAction != events[0].NextAction ||
+		events[1].RelevantIdentity == nil ||
+		events[1].RelevantIdentity.Value != events[0].RelevantIdentity.Value {
+		t.Fatalf("events=%#v", events)
+	}
+
+	watcher.err = &issuedelivery.WatchTimeoutError{Timeout: time.Second}
+	var textOutput bytes.Buffer
+	if err := watchTestCommand(watcher).run(
+		context.Background(),
+		watchArgs(t, "text", "1s"),
+		&textOutput,
+	); err == nil {
+		t.Fatal("text timeout unexpectedly succeeded")
+	}
+	if !strings.Contains(textOutput.String(), "terminal=timeout-no-change") ||
+		!strings.Contains(textOutput.String(), "next=observe-external-result") {
+		t.Fatalf("text output=%q", textOutput.String())
+	}
+}
+
 func TestWatchCommandRendersBoundedErrorClass(t *testing.T) {
 	observedAt := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
 	watcher := &scriptedWatcher{events: []issuedelivery.WatchEvent{
