@@ -435,6 +435,36 @@ func TestAdvanceBlocksExistingPullRequestWithoutRemoteObserverBeforeAuthorityRec
 	}
 }
 
+func TestAdvancePersistsStructuredPostMergeObservationDiagnosticForStatus(t *testing.T) {
+	module, _, _, remote, local, request, ready := completionFixture(t)
+	adoptExactMerge(t, module, remote, local, request, ready)
+	remote.observeErr = nonLocalDiagnosticTestError{}
+	request.NonLocal = nil
+
+	waiting := mustAdvance(t, module, request)
+	want := nonLocalDiagnosticTestError{}.ObservationDiagnostic()
+	if waiting.State != StateWaiting || waiting.ObservationDiagnostic == nil ||
+		*waiting.ObservationDiagnostic != want {
+		t.Fatalf("post-merge diagnostic=%#v; want %#v", waiting.ObservationDiagnostic, want)
+	}
+
+	status, err := module.Status(context.Background(), StatusRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ObservationDiagnostic == nil || *status.ObservationDiagnostic != want {
+		t.Fatalf("persisted status diagnostic=%#v; want %#v", status.ObservationDiagnostic, want)
+	}
+
+	remote.observeErr = nil
+	resumed := mustAdvance(t, module, request)
+	if resumed.ObservationDiagnostic != nil {
+		t.Fatalf("successful resume retained stale diagnostic=%#v", resumed.ObservationDiagnostic)
+	}
+}
+
 func TestAdvanceAdoptsCleanupThatCompletedBeforePersisting(t *testing.T) {
 	module, git, tracker, remote, local, request, ready := completionFixture(t)
 	adoptExactMerge(t, module, remote, local, request, ready)

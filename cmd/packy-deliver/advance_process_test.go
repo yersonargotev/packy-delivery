@@ -30,6 +30,7 @@ const (
 	advanceProcessSignalsEnv        = "PACKY_ADVANCE_PROCESS_SIGNALS"
 	advanceProcessContenderEnv      = "PACKY_ADVANCE_PROCESS_CONTENDER"
 	advanceProcessAssuranceEnv      = "PACKY_ADVANCE_PROCESS_ASSURANCE"
+	advanceProcessBranchEnv         = "PACKY_ADVANCE_PROCESS_BRANCH_REMEDIATION"
 )
 
 func TestAdvanceProcessLifecycle(t *testing.T) {
@@ -239,6 +240,42 @@ func TestAdvanceProcessAssuranceProgress(t *testing.T) {
 	}
 }
 
+func TestAdvanceProcessReportsStructuredBranchRemediation(t *testing.T) {
+	fixture := newAdvanceProcessFixture(t, "")
+	runFixtureGit(t, fixture.repository, fixture.environment, "branch", "-m", "main")
+	command := exec.Command(os.Args[0], "-test.run=^TestAdvanceProcessHelper$")
+	command.Env = replacedEnvironment(fixture.environment, map[string]string{
+		advanceProcessHelperEnvironment: "1",
+		advanceProcessBranchEnv:         "1",
+		advanceProcessRepositoryEnv:     fixture.repository,
+		advanceProcessSignalsEnv:        fixture.signals,
+	})
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("branch remediation subprocess: %v\n%s", err, output)
+	}
+	var snapshot processBranchRemediationSnapshot
+	if err := json.NewDecoder(bytes.NewReader(output)).Decode(&snapshot); err != nil {
+		t.Fatalf("decode branch remediation subprocess output: %v\n%s", err, output)
+	}
+	var report compactAdvanceReport
+	if err := json.Unmarshal(snapshot.JSON, &report); err != nil {
+		t.Fatalf("decode branch remediation JSON: %v\n%s", err, snapshot.JSON)
+	}
+	want := []string{
+		"chore/issue-44-*", "feat/issue-44-*", "fix/issue-44-*",
+	}
+	if report.BlockerKind != issuedelivery.BlockerLocalReadiness ||
+		report.Remediation == nil ||
+		!reflect.DeepEqual(report.Remediation.AcceptedBranchForms, want) {
+		t.Fatalf("process branch remediation=%#v; want %#v", report.Remediation, want)
+	}
+	if !strings.Contains(snapshot.Text,
+		"accepted branch forms: chore/issue-44-*, feat/issue-44-*, fix/issue-44-*\n") {
+		t.Fatalf("process text remediation=%q", snapshot.Text)
+	}
+}
+
 // TestAdvanceProcessHelper is a test-only process host. It exercises the public
 // command parser with a cancellable context while the harness below reproduces
 // Advance's real issue flock and production validator adapter.
@@ -250,6 +287,10 @@ func TestAdvanceProcessHelper(t *testing.T) {
 	signals := os.Getenv(advanceProcessSignalsEnv)
 	if os.Getenv(advanceProcessAssuranceEnv) != "" {
 		runProcessAssuranceProgressHelper(t, repository, signals)
+		return
+	}
+	if os.Getenv(advanceProcessBranchEnv) != "" {
+		runProcessBranchRemediationHelper(t, repository, signals)
 		return
 	}
 	ctx, cancel := commandContext([]string{"advance"})
@@ -293,6 +334,41 @@ type processAssuranceSnapshot struct {
 	Name string          `json:"name"`
 	JSON json.RawMessage `json:"json"`
 	Text string          `json:"text"`
+}
+
+type processBranchRemediationSnapshot struct {
+	JSON json.RawMessage `json:"json"`
+	Text string          `json:"text"`
+}
+
+func runProcessBranchRemediationHelper(t *testing.T, repository, signals string) {
+	t.Helper()
+	module := newProcessLifecycleModuleWithExecutors(
+		t, repository, signals, productionPathReviewExecutor{}, productionPathRiskObserver{},
+		productionPathSpecialistExecutor{}, false,
+	)
+	qualifyProcessLifecycleModule(t, module, repository)
+	cmd := command{
+		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) { return module, nil },
+		StatusFactory:  func(statusOptions) (issueDeliveryStatuser, error) { return module, nil },
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		if err := cmd.run(context.Background(), args, &output); err != nil {
+			t.Fatal(err)
+		}
+		return output.String()
+	}
+	snapshot := processBranchRemediationSnapshot{
+		JSON: json.RawMessage(run(
+			"advance", "--repository", repository, "--issue", "44", "--risk-profile", "low-risk",
+		)),
+		Text: run("status", "--repository", repository, "--issue", "44", "--output", "text"),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(snapshot); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type processStagedReviewExecutor struct {
@@ -481,7 +557,7 @@ func newProcessLifecycleModuleWithExecutors(
 		OriginURL: "git@github.com:yersonargotev/packy.git",
 		Owner:     "yersonargotev", Name: "packy", StartingBaseSHA: base,
 		HeadSHA: commit, TreeSHA: tree, WorkspaceClean: true,
-		Branch: "chore/issue-44-process-lifecycle",
+		Branch: gitOutput("branch", "--show-current"),
 	}}
 	tracker := &commandMutableTrackerObserver{observation: issuedelivery.TrackerObservation{
 		Repository: deliveryevidence.RepositoryIdentity{

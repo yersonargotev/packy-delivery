@@ -415,15 +415,24 @@ func (m *Module) advanceRequiredCI(
 }
 
 type nonLocalObservationDiagnostic interface {
-	ObservationDiagnostic() string
+	ObservationDiagnostic() ObservationDiagnostic
 }
 
 func nonLocalObservationReason(prefix string, err error) string {
-	var diagnostic nonLocalObservationDiagnostic
-	if errors.As(err, &diagnostic) {
-		return prefix + ": " + diagnostic.ObservationDiagnostic()
+	diagnostic := nonLocalObservationDiagnosticFromError(err)
+	if diagnostic != nil {
+		return prefix + ": " + diagnostic.String()
 	}
 	return prefix
+}
+
+func nonLocalObservationDiagnosticFromError(err error) *ObservationDiagnostic {
+	var diagnostic nonLocalObservationDiagnostic
+	if errors.As(err, &diagnostic) {
+		value := diagnostic.ObservationDiagnostic()
+		return &value
+	}
+	return nil
 }
 
 func canonicalCICheckObservations(values []CICheckObservation) []CICheckObservation {

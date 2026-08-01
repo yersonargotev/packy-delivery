@@ -40,6 +40,7 @@ type runWire struct {
 	ValidationSessions             []ValidationSession                  `json:"validation_sessions,omitempty"`
 	ValidationInvalidations        []ValidationInvalidation             `json:"validation_invalidations,omitempty"`
 	NonLocal                       *NonLocalDelivery                    `json:"non_local,omitempty"`
+	ObservationDiagnostic          *ObservationDiagnostic               `json:"observation_diagnostic,omitempty"`
 	Timing                         []Timing                             `json:"timing"`
 	CreatedAt                      string                               `json:"created_at"`
 	UpdatedAt                      string                               `json:"updated_at"`
@@ -65,6 +66,7 @@ func encodeRun(record runRecord) ([]byte, error) {
 		ValidationSessions:      record.ValidationSessions,
 		ValidationInvalidations: record.ValidationInvalidations,
 		NonLocal:                record.NonLocal,
+		ObservationDiagnostic:   record.ObservationDiagnostic,
 		CreatedAt:               record.CreatedAt, UpdatedAt: record.UpdatedAt,
 	}
 	if record.Evidence != nil {
@@ -116,6 +118,7 @@ func decodeRun(data []byte) (runRecord, error) {
 		ValidationSessions:      wire.ValidationSessions,
 		ValidationInvalidations: wire.ValidationInvalidations,
 		NonLocal:                wire.NonLocal,
+		ObservationDiagnostic:   wire.ObservationDiagnostic,
 		CreatedAt:               wire.CreatedAt, UpdatedAt: wire.UpdatedAt,
 	}
 	if len(wire.Evidence) > 0 {
@@ -162,6 +165,15 @@ func validateRun(record runRecord) error {
 		}
 	default:
 		return fmt.Errorf("persisted issue delivery run has invalid state %q", record.State)
+	}
+	if record.ObservationDiagnostic != nil {
+		if record.State != StateWaiting || len(record.Timing) == 0 ||
+			record.Timing[len(record.Timing)-1].Phase != "post-merge-observation" {
+			return fmt.Errorf("observation diagnostic requires a post-merge observation pause")
+		}
+		if err := validateObservationDiagnostic(*record.ObservationDiagnostic); err != nil {
+			return err
+		}
 	}
 	if record.Evidence != nil {
 		if record.Evidence.Repository != record.Repository || record.Evidence.Issue != record.Issue ||

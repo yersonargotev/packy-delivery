@@ -42,45 +42,50 @@ type workflowDefinitionDiagnostic struct {
 	Repository        string
 	Ref               string
 	WorkflowPath      string
-	ObservationSource string
+	ObservationSource issuedelivery.WorkflowDefinitionObservationSource
 	RetryCount        int
-	FinalFailureClass string
+	FinalFailureClass issuedelivery.WorkflowDefinitionFailureClass
 	Detail            string
 	cause             error
 }
 
 func (e *workflowDefinitionDiagnostic) Error() string {
-	return fmt.Sprintf(
-		"workflow-definition observation failed: command purpose=%q repository=%q ref=%q workflow path=%q observation source=%q retry count=%d final failure class=%q detail=%q",
-		sanitizeDiagnosticValue(e.CommandPurpose),
-		sanitizeDiagnosticValue(e.Repository),
-		sanitizeDiagnosticValue(e.Ref),
-		sanitizeDiagnosticValue(e.WorkflowPath),
-		sanitizeDiagnosticValue(e.ObservationSource),
-		e.RetryCount,
-		sanitizeDiagnosticValue(e.FinalFailureClass),
-		sanitizeDiagnosticValue(e.Detail),
-	)
+	return e.ObservationDiagnostic().String()
 }
 
 func (e *workflowDefinitionDiagnostic) Unwrap() error { return e.cause }
 
-func (e *workflowDefinitionDiagnostic) ObservationDiagnostic() string { return e.Error() }
+func (e *workflowDefinitionDiagnostic) ObservationDiagnostic() issuedelivery.ObservationDiagnostic {
+	return issuedelivery.ObservationDiagnostic{
+		Kind:           issuedelivery.ObservationDiagnosticWorkflowDefinition,
+		CommandPurpose: sanitizeDiagnosticValue(e.CommandPurpose),
+		Repository:     sanitizeDiagnosticValue(e.Repository), Ref: sanitizeDiagnosticValue(e.Ref),
+		WorkflowPath: sanitizeDiagnosticValue(e.WorkflowPath),
+		ObservationSource: issuedelivery.WorkflowDefinitionObservationSource(
+			sanitizeDiagnosticValue(string(e.ObservationSource)),
+		),
+		RetryCount: e.RetryCount,
+		FinalFailureClass: issuedelivery.WorkflowDefinitionFailureClass(
+			sanitizeDiagnosticValue(string(e.FinalFailureClass)),
+		),
+		Detail: sanitizeDiagnosticValue(e.Detail),
+	}
+}
 
 const (
-	workflowDefinitionSourceDirect         = "direct lookup"
-	workflowDefinitionSourceCheckRun       = "check-run"
-	workflowDefinitionSourceCommitStatus   = "commit-status"
-	workflowDefinitionFailureMalformedRef  = "malformed-ref"
-	workflowDefinitionFailureUntrustedPath = "untrusted-path"
-	workflowDefinitionFailureIncompatible  = "incompatible-identity"
-	workflowDefinitionFailureRefAbsent     = "ref-absent"
-	workflowDefinitionFailurePathAbsent    = "workflow-path-absent"
-	workflowDefinitionFailurePersistent    = "persistent-ref-absence"
-	workflowDefinitionFailureMalformedBlob = "malformed-blob"
-	workflowDefinitionFailureCancellation  = "cancellation"
-	workflowDefinitionFailureAuthorization = "authorization"
-	workflowDefinitionFailureCommand       = "command-failure"
+	workflowDefinitionSourceDirect         = issuedelivery.ObservationSourceDirect
+	workflowDefinitionSourceCheckRun       = issuedelivery.ObservationSourceCheckRun
+	workflowDefinitionSourceCommitStatus   = issuedelivery.ObservationSourceCommitStatus
+	workflowDefinitionFailureMalformedRef  = issuedelivery.WorkflowDefinitionFailureMalformedRef
+	workflowDefinitionFailureUntrustedPath = issuedelivery.WorkflowDefinitionFailureUntrustedPath
+	workflowDefinitionFailureIncompatible  = issuedelivery.WorkflowDefinitionFailureIncompatible
+	workflowDefinitionFailureRefAbsent     = issuedelivery.WorkflowDefinitionFailureRefAbsent
+	workflowDefinitionFailurePathAbsent    = issuedelivery.WorkflowDefinitionFailurePathAbsent
+	workflowDefinitionFailurePersistent    = issuedelivery.WorkflowDefinitionFailurePersistent
+	workflowDefinitionFailureMalformedBlob = issuedelivery.WorkflowDefinitionFailureMalformedBlob
+	workflowDefinitionFailureCancellation  = issuedelivery.WorkflowDefinitionFailureCancellation
+	workflowDefinitionFailureAuthorization = issuedelivery.WorkflowDefinitionFailureAuthorization
+	workflowDefinitionFailureCommand       = issuedelivery.WorkflowDefinitionFailureCommand
 )
 
 type remoteRepository struct {
@@ -658,7 +663,7 @@ func (gateway productionNonLocalGateway) definitionSHAForObservation(
 	repository string,
 	ref string,
 	path string,
-	source string,
+	source issuedelivery.WorkflowDefinitionObservationSource,
 	allowRefRefresh bool,
 ) (string, error) {
 	if !validSHA(ref) {
@@ -796,7 +801,7 @@ func validateWorkflowDefinitionBlob(
 	repository string,
 	ref string,
 	path string,
-	source string,
+	source issuedelivery.WorkflowDefinitionObservationSource,
 	retryCount int,
 	raw []byte,
 ) (string, error) {
@@ -818,7 +823,7 @@ func validateObservedWorkflow(
 	workflow workflowRun,
 	identity string,
 	observedHead string,
-	source string,
+	source issuedelivery.WorkflowDefinitionObservationSource,
 ) error {
 	if trustedCheckIdentity(identity, workflow.Name, workflow.Path) &&
 		validSHA(observedHead) && observedHead == ref &&
@@ -837,7 +842,7 @@ func workflowDefinitionCommandFailure(
 	repository string,
 	ref string,
 	path string,
-	source string,
+	source issuedelivery.WorkflowDefinitionObservationSource,
 	retryCount int,
 	err error,
 ) error {
@@ -859,9 +864,9 @@ func newWorkflowDefinitionDiagnostic(
 	repository string,
 	ref string,
 	path string,
-	source string,
+	source issuedelivery.WorkflowDefinitionObservationSource,
 	retryCount int,
-	failureClass string,
+	failureClass issuedelivery.WorkflowDefinitionFailureClass,
 	detail string,
 	cause error,
 ) error {

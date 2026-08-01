@@ -29,13 +29,21 @@ type fakeNonLocalGateway struct {
 type nonLocalDiagnosticTestError struct{}
 
 func (nonLocalDiagnosticTestError) Error() string { return "unbounded test detail" }
-func (nonLocalDiagnosticTestError) ObservationDiagnostic() string {
-	return "bounded diagnostic detail"
+func (nonLocalDiagnosticTestError) ObservationDiagnostic() ObservationDiagnostic {
+	return ObservationDiagnostic{
+		Kind: "workflow-definition", CommandPurpose: "resolve exact workflow definition",
+		Repository: "yersonargotev/packy", Ref: strings.Repeat("a", 40),
+		WorkflowPath: ".github/workflows/governance.yml", ObservationSource: "commit-status",
+		RetryCount: 1, FinalFailureClass: "persistent-ref-absence",
+		Detail: "bounded diagnostic detail",
+	}
 }
 
 func TestNonLocalObservationReasonUsesBoundedDiagnostics(t *testing.T) {
 	reason := nonLocalObservationReason("retry observation", nonLocalDiagnosticTestError{})
-	if reason != "retry observation: bounded diagnostic detail" || strings.Contains(reason, "unbounded") {
+	if !strings.HasPrefix(reason, "retry observation: workflow-definition observation failed:") ||
+		!strings.Contains(reason, `ref="`+strings.Repeat("a", 40)+`"`) ||
+		!strings.Contains(reason, "bounded diagnostic detail") || strings.Contains(reason, "unbounded") {
 		t.Fatalf("reason = %q", reason)
 	}
 }

@@ -395,6 +395,9 @@ func TestAdvanceCommandReportsEarlyIncompatibleBranchRemediation(t *testing.T) {
 		BlockerKind: issuedelivery.BlockerLocalReadiness,
 		PauseCause:  issuedelivery.PauseInvariantBlock,
 		NextAction:  issuedelivery.ActionRestoreLocalReadiness,
+		Remediation: &issuedelivery.LocalReadinessRemediation{AcceptedBranchForms: []string{
+			"chore/issue-57-*", "feat/issue-57-*", "fix/issue-57-*",
+		}},
 	}}}
 	cmd := command{AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
 		return fake, nil
@@ -421,6 +424,27 @@ func TestAdvanceCommandReportsEarlyIncompatibleBranchRemediation(t *testing.T) {
 		if !strings.Contains(report.Reason, form) {
 			t.Fatalf("early branch remediation %q omitted %q", report.Reason, form)
 		}
+	}
+	var public struct {
+		Remediation *struct {
+			AcceptedBranchForms []string `json:"accepted_branch_forms"`
+		} `json:"remediation"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &public); err != nil {
+		t.Fatal(err)
+	}
+	wantForms := []string{
+		"chore/issue-57-*", "feat/issue-57-*", "fix/issue-57-*",
+	}
+	if public.Remediation == nil ||
+		!reflect.DeepEqual(public.Remediation.AcceptedBranchForms, wantForms) {
+		t.Fatalf("structured branch remediation = %#v; want %#v", public.Remediation, wantForms)
+	}
+
+	textReport := renderCompactAdvanceReport(report)
+	if !strings.Contains(textReport,
+		"accepted branch forms: chore/issue-57-*, feat/issue-57-*, fix/issue-57-*\n") {
+		t.Fatalf("text branch remediation = %q", textReport)
 	}
 }
 

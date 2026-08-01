@@ -71,6 +71,8 @@ type advanceReport struct {
 	Reason                   string                                        `json:"reason"`
 	PauseCause               issuedelivery.PauseCause                      `json:"pause_cause"`
 	NextAction               issuedelivery.NextAction                      `json:"next_action"`
+	Remediation              *issuedelivery.LocalReadinessRemediation      `json:"remediation,omitempty"`
+	ObservationDiagnostic    *issuedelivery.ObservationDiagnostic          `json:"observation_diagnostic,omitempty"`
 	SupersedesRunID          string                                        `json:"supersedes_run_id,omitempty"`
 	Decision                 *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                   *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
@@ -98,6 +100,8 @@ type compactAdvanceReport struct {
 	PauseCause              issuedelivery.PauseCause                      `json:"pause_cause"`
 	NextAction              issuedelivery.NextAction                      `json:"next_action"`
 	BlockerKind             issuedelivery.BlockerKind                     `json:"blocker_kind,omitempty"`
+	Remediation             *issuedelivery.LocalReadinessRemediation      `json:"remediation,omitempty"`
+	ObservationDiagnostic   *issuedelivery.ObservationDiagnostic          `json:"observation_diagnostic,omitempty"`
 	SupersedesRunID         string                                        `json:"supersedes_run_id,omitempty"`
 	Decision                *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                  *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
@@ -460,7 +464,9 @@ func compactReportFromOutcome(
 		RunID:     outcome.RunID, State: outcome.State, Reason: outcome.Reason,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		BlockerKind: outcome.BlockerKind, SupersedesRunID: outcome.SupersedesRunID,
-		Decision: outcome.Decision, Repair: outcome.Repair,
+		Remediation:           outcome.Remediation,
+		ObservationDiagnostic: outcome.ObservationDiagnostic,
+		Decision:              outcome.Decision, Repair: outcome.Repair,
 		ImpactConfirmation:      outcome.ImpactConfirmation,
 		QualificationCorrection: outcome.QualificationCorrection,
 		Timing:                  run.Timing,
@@ -529,6 +535,18 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 	}
 	if report.BlockerKind != "" {
 		fmt.Fprintf(&out, "blocker: %s\n", report.BlockerKind)
+	}
+	if report.Remediation != nil {
+		fmt.Fprintf(&out, "accepted branch forms: %s\n",
+			strings.Join(report.Remediation.AcceptedBranchForms, ", "))
+	}
+	if diagnostic := report.ObservationDiagnostic; diagnostic != nil {
+		fmt.Fprintf(&out,
+			"observation diagnostic: %s purpose=%s repository=%s ref=%s workflow=%s source=%s retries=%d failure=%s detail=%s\n",
+			diagnostic.Kind, diagnostic.CommandPurpose, diagnostic.Repository, diagnostic.Ref,
+			diagnostic.WorkflowPath, diagnostic.ObservationSource, diagnostic.RetryCount,
+			diagnostic.FinalFailureClass, diagnostic.Detail,
+		)
 	}
 	for _, category := range report.Timing.Categories {
 		fmt.Fprintf(&out, "timing: %s=%dns\n", category.Category, category.DurationNanoseconds)
@@ -656,7 +674,9 @@ func reportFromOutcome(outcome issuedelivery.Outcome, now time.Time) (advanceRep
 	return advanceReport{
 		RunID: outcome.RunID, State: outcome.State, Reason: outcome.Reason,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
-		SupersedesRunID: outcome.SupersedesRunID, Decision: outcome.Decision,
+		Remediation:           outcome.Remediation,
+		ObservationDiagnostic: outcome.ObservationDiagnostic,
+		SupersedesRunID:       outcome.SupersedesRunID, Decision: outcome.Decision,
 		Repair: outcome.Repair, ImpactConfirmation: outcome.ImpactConfirmation,
 		Evidence: outcome.Evidence, Observations: outcome.Observations,
 		QualificationCorrection:  outcome.QualificationCorrection,

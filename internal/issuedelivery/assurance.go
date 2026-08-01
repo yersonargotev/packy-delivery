@@ -806,6 +806,27 @@ func (m *Module) persistAssuranceTransition(
 	state State,
 	reason, phase string,
 ) (Outcome, error) {
+	record.ObservationDiagnostic = nil
+	return m.persistAssuranceTransitionRecord(store, record, state, reason, phase)
+}
+
+func (m *Module) persistAssuranceTransitionWithObservationDiagnostic(
+	store lockedIssueStore,
+	record runRecord,
+	state State,
+	reason, phase string,
+	diagnostic ObservationDiagnostic,
+) (Outcome, error) {
+	record.ObservationDiagnostic = cloneObservationDiagnostic(&diagnostic)
+	return m.persistAssuranceTransitionRecord(store, record, state, reason, phase)
+}
+
+func (m *Module) persistAssuranceTransitionRecord(
+	store lockedIssueStore,
+	record runRecord,
+	state State,
+	reason, phase string,
+) (Outcome, error) {
 	started, err := time.Parse(time.RFC3339Nano, record.UpdatedAt)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("parse issue delivery transition start: %w", err)

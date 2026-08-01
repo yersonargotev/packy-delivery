@@ -262,7 +262,7 @@ func outcomeFromRecord(record runRecord) Outcome {
 		value := *current
 		candidate = &value
 	}
-	return Outcome{
+	outcome := Outcome{
 		RunID: record.ID, State: record.State, Reason: record.Reason,
 		RunSchema:       record.Schema,
 		BlockerKind:     blockerKindFromRecord(record),
@@ -282,10 +282,25 @@ func outcomeFromRecord(record runRecord) Outcome {
 		ValidationInvalidations: append(
 			[]ValidationInvalidation(nil), record.ValidationInvalidations...,
 		),
-		NonLocal:         record.NonLocal,
-		Timing:           append([]Timing(nil), record.Timing...),
-		EffectiveProfile: record.EffectiveProfile,
+		NonLocal:              record.NonLocal,
+		ObservationDiagnostic: cloneObservationDiagnostic(record.ObservationDiagnostic),
+		Timing:                append([]Timing(nil), record.Timing...),
+		EffectiveProfile:      record.EffectiveProfile,
 	}
+	if outcome.BlockerKind == BlockerLocalReadiness {
+		outcome.Remediation = &LocalReadinessRemediation{
+			AcceptedBranchForms: deliveryBranchForms(record.Issue.Number),
+		}
+	}
+	return outcome
+}
+
+func cloneObservationDiagnostic(value *ObservationDiagnostic) *ObservationDiagnostic {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func outcomeWithPause(outcome Outcome) Outcome {

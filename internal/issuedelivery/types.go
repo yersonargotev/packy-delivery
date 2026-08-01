@@ -219,6 +219,8 @@ type Outcome struct {
 	Operation                *Operation
 	RunSchema                string
 	BlockerKind              BlockerKind
+	Remediation              *LocalReadinessRemediation
+	ObservationDiagnostic    *ObservationDiagnostic
 	SupersedesRunID          string
 	Decision                 *DecisionRequest
 	Evidence                 *deliveryevidence.Bundle
@@ -237,6 +239,97 @@ type Outcome struct {
 	Timing                   []Timing
 	EffectiveProfile         deliveryevidence.DeliveryRiskProfile
 	StatusObservation        *StatusObservation
+}
+
+type LocalReadinessRemediation struct {
+	AcceptedBranchForms []string `json:"accepted_branch_forms"`
+}
+
+type ObservationDiagnosticKind string
+type WorkflowDefinitionObservationSource string
+type WorkflowDefinitionFailureClass string
+
+const (
+	ObservationDiagnosticWorkflowDefinition ObservationDiagnosticKind           = "workflow-definition"
+	ObservationSourceDirect                 WorkflowDefinitionObservationSource = "direct lookup"
+	ObservationSourceCheckRun               WorkflowDefinitionObservationSource = "check-run"
+	ObservationSourceCommitStatus           WorkflowDefinitionObservationSource = "commit-status"
+	WorkflowDefinitionFailureMalformedRef   WorkflowDefinitionFailureClass      = "malformed-ref"
+	WorkflowDefinitionFailureUntrustedPath  WorkflowDefinitionFailureClass      = "untrusted-path"
+	WorkflowDefinitionFailureIncompatible   WorkflowDefinitionFailureClass      = "incompatible-identity"
+	WorkflowDefinitionFailureRefAbsent      WorkflowDefinitionFailureClass      = "ref-absent"
+	WorkflowDefinitionFailurePathAbsent     WorkflowDefinitionFailureClass      = "workflow-path-absent"
+	WorkflowDefinitionFailurePersistent     WorkflowDefinitionFailureClass      = "persistent-ref-absence"
+	WorkflowDefinitionFailureMalformedBlob  WorkflowDefinitionFailureClass      = "malformed-blob"
+	WorkflowDefinitionFailureCancellation   WorkflowDefinitionFailureClass      = "cancellation"
+	WorkflowDefinitionFailureAuthorization  WorkflowDefinitionFailureClass      = "authorization"
+	WorkflowDefinitionFailureCommand        WorkflowDefinitionFailureClass      = "command-failure"
+)
+
+type ObservationDiagnostic struct {
+	Kind              ObservationDiagnosticKind           `json:"kind"`
+	CommandPurpose    string                              `json:"command_purpose"`
+	Repository        string                              `json:"repository"`
+	Ref               string                              `json:"ref"`
+	WorkflowPath      string                              `json:"workflow_path"`
+	ObservationSource WorkflowDefinitionObservationSource `json:"observation_source"`
+	RetryCount        int                                 `json:"retry_count"`
+	FinalFailureClass WorkflowDefinitionFailureClass      `json:"final_failure_class"`
+	Detail            string                              `json:"detail"`
+}
+
+func (d ObservationDiagnostic) String() string {
+	return fmt.Sprintf(
+		"workflow-definition observation failed: command purpose=%q repository=%q ref=%q workflow path=%q observation source=%q retry count=%d final failure class=%q detail=%q",
+		d.CommandPurpose, d.Repository, d.Ref, d.WorkflowPath, d.ObservationSource,
+		d.RetryCount, d.FinalFailureClass, d.Detail,
+	)
+}
+
+func validateObservationDiagnostic(d ObservationDiagnostic) error {
+	if d.Kind != ObservationDiagnosticWorkflowDefinition ||
+		d.CommandPurpose != "resolve exact workflow definition" ||
+		d.Repository == "" || d.Ref == "" ||
+		d.WorkflowPath == "" || d.Detail == "" || d.RetryCount < 0 || d.RetryCount > 1 {
+		return fmt.Errorf("workflow-definition observation diagnostic is incomplete or invalid")
+	}
+	switch d.ObservationSource {
+	case ObservationSourceDirect, ObservationSourceCheckRun, ObservationSourceCommitStatus:
+	default:
+		return fmt.Errorf("workflow-definition observation source is invalid")
+	}
+	switch d.FinalFailureClass {
+	case WorkflowDefinitionFailureMalformedRef,
+		WorkflowDefinitionFailureUntrustedPath,
+		WorkflowDefinitionFailureIncompatible,
+		WorkflowDefinitionFailureRefAbsent,
+		WorkflowDefinitionFailurePathAbsent,
+		WorkflowDefinitionFailurePersistent,
+		WorkflowDefinitionFailureMalformedBlob,
+		WorkflowDefinitionFailureCancellation,
+		WorkflowDefinitionFailureAuthorization,
+		WorkflowDefinitionFailureCommand:
+	default:
+		return fmt.Errorf("workflow-definition failure class is invalid")
+	}
+	if d.FinalFailureClass != WorkflowDefinitionFailureMalformedRef &&
+		!fullGitSHAPattern.MatchString(d.Ref) {
+		return fmt.Errorf("workflow-definition observation ref is invalid")
+	}
+	for _, value := range []string{
+		d.Repository, d.WorkflowPath, string(d.ObservationSource),
+		string(d.FinalFailureClass), d.Detail,
+	} {
+		if len(value) > 512 {
+			return fmt.Errorf("workflow-definition observation diagnostic is too long")
+		}
+		for _, char := range value {
+			if char < ' ' || char == '\u007f' {
+				return fmt.Errorf("workflow-definition observation diagnostic contains control characters")
+			}
+		}
+	}
+	return nil
 }
 
 type AuthorityItem struct {
@@ -1069,6 +1162,7 @@ type runRecord struct {
 	ValidationSessions             []ValidationSession
 	ValidationInvalidations        []ValidationInvalidation
 	NonLocal                       *NonLocalDelivery
+	ObservationDiagnostic          *ObservationDiagnostic
 	Timing                         []Timing
 	CreatedAt                      string
 	UpdatedAt                      string

@@ -1723,6 +1723,13 @@ func TestAdvanceRejectsCandidateBranchBeforeAssuranceWork(t *testing.T) {
 		blocked.NextAction != ActionRestoreLocalReadiness || blocked.Candidate != nil {
 		t.Fatalf("incompatible candidate branch outcome=%#v", blocked)
 	}
+	wantForms := []string{
+		"chore/issue-357-*", "feat/issue-357-*", "fix/issue-357-*",
+	}
+	if blocked.Remediation == nil ||
+		!reflect.DeepEqual(blocked.Remediation.AcceptedBranchForms, wantForms) {
+		t.Fatalf("structured branch remediation=%#v; want %#v", blocked.Remediation, wantForms)
+	}
 	if validator.focusedCalls != 0 || validator.exhaustiveCalls != 0 ||
 		module.risk.(*fakeCandidateRiskObserver).calls != 0 ||
 		reviewer.calls[deliveryevidence.ReviewStandards] != 0 ||

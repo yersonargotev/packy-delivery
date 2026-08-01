@@ -36,11 +36,17 @@ func (m *Module) resumeMergedBeforeAuthority(
 	observation, err := m.nonlocal.ObserveNonLocal(ctx, observeRequest)
 	if err != nil {
 		if record.NonLocal.Merge != nil || !strings.EqualFold(tracker.State, "OPEN") {
+			const prefix = "post-merge observation failed; retry verification without rollback"
+			if diagnostic := nonLocalObservationDiagnosticFromError(err); diagnostic != nil {
+				outcome, persistErr := m.persistAssuranceTransitionWithObservationDiagnostic(
+					store, record, StateWaiting, prefix+": "+diagnostic.String(),
+					"post-merge-observation", *diagnostic,
+				)
+				return outcome, true, persistErr
+			}
 			outcome, persistErr := m.persistAssuranceTransition(
 				store, record, StateWaiting,
-				nonLocalObservationReason(
-					"post-merge observation failed; retry verification without rollback", err,
-				),
+				prefix,
 				"post-merge-observation",
 			)
 			return outcome, true, persistErr

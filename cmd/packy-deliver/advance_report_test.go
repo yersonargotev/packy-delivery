@@ -70,6 +70,9 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 		RunID: "run-roundtrip", State: issuedelivery.StateNeedsReview,
 		Reason: "review the exact candidate", PauseCause: issuedelivery.PauseIndependentReview,
 		NextAction: issuedelivery.ActionProvideCandidateReview, Candidate: candidate,
+		Remediation: &issuedelivery.LocalReadinessRemediation{AcceptedBranchForms: []string{
+			"chore/issue-7-*", "feat/issue-7-*", "fix/issue-7-*",
+		}},
 		QualificationReviews: []issuedelivery.QualificationReview{{
 			AuthoritySHA256:        strings.Repeat("d", 64),
 			AcceptanceMatrixSHA256: strings.Repeat("e", 64),
@@ -92,6 +95,7 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(decoded.Candidate, candidate) ||
+		!reflect.DeepEqual(decoded.Remediation, outcome.Remediation) ||
 		!reflect.DeepEqual(decoded.ValidationSessions, outcome.ValidationSessions) ||
 		!reflect.DeepEqual(decoded.ValidationInvalidations, outcome.ValidationInvalidations) ||
 		len(decoded.QualificationReviews) != len(outcome.QualificationReviews) {
@@ -101,6 +105,51 @@ func TestFullAdvanceReportRoundTripsWithoutProjectionLoss(t *testing.T) {
 	if strings.Contains(compact, "/Users/operator") ||
 		strings.Contains(compact, `"validation_session"`) {
 		t.Fatalf("compact projection leaked raw validation details: %s", compact)
+	}
+}
+
+func TestAdvanceReportsStructuredObservationDiagnosticInEveryFormat(t *testing.T) {
+	diagnostic := &issuedelivery.ObservationDiagnostic{
+		Kind:           issuedelivery.ObservationDiagnosticWorkflowDefinition,
+		CommandPurpose: "resolve exact workflow definition",
+		Repository:     "yersonargotev/packy", Ref: strings.Repeat("a", 40),
+		WorkflowPath:      ".github/workflows/governance.yml",
+		ObservationSource: issuedelivery.ObservationSourceCommitStatus,
+		RetryCount:        1, FinalFailureClass: issuedelivery.WorkflowDefinitionFailurePersistent,
+		Detail: "exact workflow definition ref remained absent after one ref refresh",
+	}
+	outcome := issuedelivery.Outcome{
+		RunID: "run-diagnostic", State: issuedelivery.StateWaiting,
+		Reason: "post-merge observation failed", PauseCause: issuedelivery.PauseExternalResult,
+		NextAction:            issuedelivery.ActionObserveExternalResult,
+		ObservationDiagnostic: diagnostic,
+	}
+
+	for _, args := range [][]string{nil, {"--full-report"}} {
+		output := runAdvanceOutput(t, outcome, args...)
+		var public struct {
+			ObservationDiagnostic *issuedelivery.ObservationDiagnostic `json:"observation_diagnostic"`
+		}
+		if err := json.Unmarshal([]byte(output), &public); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(public.ObservationDiagnostic, diagnostic) {
+			t.Fatalf("structured diagnostic=%#v; want %#v; output=%s",
+				public.ObservationDiagnostic, diagnostic, output)
+		}
+	}
+
+	text := runAdvanceOutput(t, outcome, "--output", "text")
+	for _, expected := range []string{
+		"observation diagnostic: workflow-definition",
+		"purpose=resolve exact workflow definition",
+		"ref=" + strings.Repeat("a", 40),
+		"workflow=.github/workflows/governance.yml",
+		"source=commit-status", "retries=1", "failure=persistent-ref-absence",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("text diagnostic missing %q: %s", expected, text)
+		}
 	}
 }
 

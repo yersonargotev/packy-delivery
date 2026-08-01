@@ -173,6 +173,10 @@ Blocked reports are classified inside `Advance` from the persisted transition
 and expose a specific reconciliation action. Callers never classify free-form
 reason text. Unknown blocked transitions fail closed with
 `inspect-blocked-transition`.
+When local readiness is blocked, the report also includes typed
+`remediation.accepted_branch_forms` for the exact issue. JSON automation uses
+that array directly; the human text report renders the same ordered chore,
+feat, and fix forms without requiring either caller to parse `reason`.
 
 An approved schema-v2 run with no candidate and `HEAD` still equal to its
 starting base pauses in `waiting` with phase `candidate-development`, reason
@@ -577,6 +581,15 @@ identities. Projection is append-only and idempotent: an absent historical v2
 projection may bootstrap, while a stale, conflicting, or incomplete persisted
 projection fails closed. A green validation receipt never supplies semantic
 acceptance evidence.
+
+A failed post-merge workflow-definition observation persists one bounded
+`observation_diagnostic` object with its diagnostic kind, command purpose,
+repository, exact ref, workflow path, observation source, retry count, final
+failure class, and controlled detail. Compact and full JSON expose that object,
+and text renders the same fields. `status` returns the persisted object without
+reconstructing it from `reason`; the next successful transition removes the
+stale diagnostic. This optional schema-v2 field is additive, and historical
+runs without it remain byte-compatible and readable.
 
 Derivation replay may adopt only one exact
 canonical derived receipt linked to its parent receipt, impact assessment,

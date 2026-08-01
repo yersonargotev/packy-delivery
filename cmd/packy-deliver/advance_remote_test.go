@@ -336,6 +336,16 @@ func TestWorkflowDefinitionSHAReportsPersistentAbsenceWithoutSecondRefresh(t *te
 		diagnostic.FinalFailureClass != workflowDefinitionFailurePersistent {
 		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
 	}
+	structured := diagnostic.ObservationDiagnostic()
+	if structured.Kind != issuedelivery.ObservationDiagnosticWorkflowDefinition ||
+		structured.CommandPurpose != "resolve exact workflow definition" ||
+		structured.Repository != "yersonargotev/packy" || structured.Ref != ref ||
+		structured.WorkflowPath != path ||
+		structured.ObservationSource != issuedelivery.ObservationSourceCommitStatus ||
+		structured.RetryCount != 1 ||
+		structured.FinalFailureClass != issuedelivery.WorkflowDefinitionFailurePersistent {
+		t.Fatalf("structured diagnostic = %#v", structured)
+	}
 	for _, expected := range []string{
 		`command purpose="resolve exact workflow definition"`,
 		`repository="yersonargotev/packy"`,
@@ -386,7 +396,7 @@ func TestWorkflowDefinitionSHARejectsInvalidIdentityWithoutRefresh(t *testing.T)
 		name string
 		ref  string
 		path string
-		want string
+		want issuedelivery.WorkflowDefinitionFailureClass
 	}{
 		{name: "malformed SHA", ref: "not-a-sha", path: ".github/workflows/ci.yml", want: workflowDefinitionFailureMalformedRef},
 		{name: "untrusted workflow path", ref: validRef, path: ".github/workflows/foreign.yml", want: workflowDefinitionFailureUntrustedPath},
