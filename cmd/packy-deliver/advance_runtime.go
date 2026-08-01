@@ -66,6 +66,10 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 	if err != nil {
 		return nil, err
 	}
+	impactAuthority, err := newProductionImpactAuthority(options, runner)
+	if err != nil {
+		return nil, err
+	}
 	validation := execValidationRunner{}
 	boundary := productionBoundaryExecutor{
 		repository: options.RepositoryPath, runner: runner,
@@ -92,6 +96,7 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 			acceptance: append([]issuedelivery.AcceptanceProof(nil), options.Acceptance...),
 			boundary:   boundary,
 		},
+		ImpactAuthority: impactAuthority,
 		NonLocal: productionNonLocalGateway{
 			runner: runner, repository: options.RepositoryPath,
 			attributions: options.CIFailureAttributions,
@@ -100,6 +105,57 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 		SandboxRoot:     sandboxRoot,
 		DeclaredProfile: options.DeclaredProfile,
 	})
+}
+
+type productionImpactAuthority struct {
+	authorized map[string]bool
+}
+
+func (a productionImpactAuthority) AuthorizedImpactAuthor(author deliveryevidence.ImpactAuthor) bool {
+	return author.Kind == deliveryevidence.ImpactAuthorAuthorizedHuman && a.authorized[author.Identity]
+}
+
+func (a productionImpactAuthority) IndependentImpactConfirmer(author, confirmer deliveryevidence.ImpactAuthor) bool {
+	return a.AuthorizedImpactAuthor(author) && a.AuthorizedImpactAuthor(confirmer) && author.Identity != confirmer.Identity
+}
+
+func newProductionImpactAuthority(options advanceOptions, runner Runner) (deliveryevidence.ImpactAuthority, error) {
+	if options.ImpactAssessment == nil && options.ImpactConfirmation == nil {
+		return nil, nil
+	}
+	origin, err := gitOutput(options.Context, runner, options.RepositoryPath, "remote", "get-url", "origin")
+	if err != nil {
+		return nil, fmt.Errorf("resolve impact authority repository: %w", err)
+	}
+	slug, err := githubSlug(origin)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := runner.Output(
+		options.Context, "gh", "api", "repos/"+slug+"/collaborators?affiliation=all&per_page=100",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve impact authority principals: %w", err)
+	}
+	var collaborators []struct {
+		Login       string `json:"login"`
+		Permissions struct {
+			Admin    bool `json:"admin"`
+			Maintain bool `json:"maintain"`
+			Push     bool `json:"push"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(raw, &collaborators); err != nil {
+		return nil, fmt.Errorf("decode impact authority principals: %w", err)
+	}
+	authorized := make(map[string]bool)
+	for _, collaborator := range collaborators {
+		if collaborator.Login != "" &&
+			(collaborator.Permissions.Admin || collaborator.Permissions.Maintain || collaborator.Permissions.Push) {
+			authorized[collaborator.Login] = true
+		}
+	}
+	return productionImpactAuthority{authorized: authorized}, nil
 }
 
 func (e productionValidationSessionExecutor) ObserveValidationSession(

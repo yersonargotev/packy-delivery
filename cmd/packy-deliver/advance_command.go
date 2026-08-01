@@ -26,6 +26,8 @@ type advanceOptions struct {
 	DeclaredProfile         deliveryevidence.DeliveryRiskProfile
 	Decision                *issuedelivery.Decision
 	Repair                  *issuedelivery.RepairDecision
+	ImpactAssessment        *deliveryevidence.EvidenceImpactAssessment
+	ImpactConfirmation      *deliveryevidence.ImpactConfirmation
 	Reviews                 []issuedelivery.CandidateReview
 	Specialists             []issuedelivery.SpecialistReview
 	Acceptance              []issuedelivery.AcceptanceProof
@@ -72,6 +74,7 @@ type advanceReport struct {
 	SupersedesRunID          string                                        `json:"supersedes_run_id,omitempty"`
 	Decision                 *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                   *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
+	ImpactConfirmation       *issuedelivery.ImpactConfirmationPacket       `json:"impact_confirmation,omitempty"`
 	QualificationCorrection  *issuedelivery.QualificationCorrectionRequest `json:"qualification_correction,omitempty"`
 	QualificationApproved    bool                                          `json:"qualification_approved,omitempty"`
 	QualificationReviews     []issuedelivery.QualificationReview           `json:"qualification_reviews,omitempty"`
@@ -98,6 +101,7 @@ type compactAdvanceReport struct {
 	SupersedesRunID         string                                        `json:"supersedes_run_id,omitempty"`
 	Decision                *issuedelivery.DecisionRequest                `json:"decision,omitempty"`
 	Repair                  *issuedelivery.RepairDecisionRequest          `json:"repair,omitempty"`
+	ImpactConfirmation      *issuedelivery.ImpactConfirmationPacket       `json:"impact_confirmation,omitempty"`
 	QualificationCorrection *issuedelivery.QualificationCorrectionRequest `json:"qualification_correction,omitempty"`
 	Timing                  issuedelivery.CompactTimingProjection         `json:"timing_summary"`
 	Assurance               issuedelivery.CompactAssuranceProjection      `json:"assurance"`
@@ -135,7 +139,7 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	f := flag.NewFlagSet("deliveryevidence advance", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	var options advanceOptions
-	var profile, decisionPath, repairPath, ciAttributionPath string
+	var profile, decisionPath, repairPath, impactAssessmentPath, impactConfirmationPath, ciAttributionPath string
 	var reviewPaths repeatedPaths
 	f.StringVar(&options.RepositoryPath, "repository", ".", "repository to observe")
 	f.IntVar(&options.IssueNumber, "issue", 0, "approved Packy issue number")
@@ -143,6 +147,8 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	f.StringVar(&profile, "risk-profile", string(deliveryevidence.RiskStandard), "declared low-risk, standard, or high-risk profile")
 	f.StringVar(&decisionPath, "decision", "", "PATH to a file containing exactly one Decision JSON value")
 	f.StringVar(&repairPath, "repair", "", "PATH to a file containing exactly one RepairDecision JSON value")
+	f.StringVar(&impactAssessmentPath, "impact-assessment", "", "PATH to one canonical EvidenceImpactAssessment JSON value")
+	f.StringVar(&impactConfirmationPath, "impact-confirmation", "", "PATH to one canonical ImpactConfirmation JSON value")
 	f.Var(&reviewPaths, "review-content", "PATH to a review-content JSON object; repeat to submit multiple responses")
 	f.StringVar(&ciAttributionPath, "ci-attribution", "", "PATH to a file containing exactly one JSON array of CI failure attributions")
 	f.BoolVar(&options.AuthorizeRemote, "authorize-non-local", false, "authorize deterministic delivery effects after exact local readiness")
@@ -178,6 +184,12 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	if err := decodeOptionalExactJSON("--repair", repairPath, &options.Repair); err != nil {
 		return err
 	}
+	if err := decodeOptionalExactJSON("--impact-assessment", impactAssessmentPath, &options.ImpactAssessment); err != nil {
+		return err
+	}
+	if err := decodeOptionalExactJSON("--impact-confirmation", impactConfirmationPath, &options.ImpactConfirmation); err != nil {
+		return err
+	}
 	for _, reviewPath := range reviewPaths {
 		contents, err := loadAdvanceReviewContents(reviewPath)
 		if err != nil {
@@ -200,6 +212,9 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 	if options.Decision != nil && options.Repair != nil {
 		return errors.New("one Advance call cannot submit both a qualification decision and repair adjudication")
 	}
+	if options.ImpactAssessment != nil && options.ImpactConfirmation != nil {
+		return errors.New("one Advance call cannot submit both an impact assessment and confirmation")
+	}
 	if options.Output != "json" && options.Output != "text" {
 		return fmt.Errorf("output %q is invalid; use json or text", options.Output)
 	}
@@ -215,14 +230,16 @@ func (c command) advance(ctx context.Context, args []string, stdout io.Writer) e
 		return fmt.Errorf("configure Advance: %w", err)
 	}
 	request := issuedelivery.Request{
-		RepositoryPath:          options.RepositoryPath,
-		IssueNumber:             options.IssueNumber,
-		Decision:                options.Decision,
-		Repair:                  options.Repair,
-		QualificationReview:     options.QualificationReview,
-		QualificationCorrection: options.QualificationCorrection,
-		CandidateReviews:        packetBoundCandidateReviews(options.Reviews),
-		SpecialistReviews:       packetBoundSpecialistReviews(options.Specialists),
+		RepositoryPath:             options.RepositoryPath,
+		IssueNumber:                options.IssueNumber,
+		Decision:                   options.Decision,
+		Repair:                     options.Repair,
+		QualificationReview:        options.QualificationReview,
+		QualificationCorrection:    options.QualificationCorrection,
+		CandidateReviews:           packetBoundCandidateReviews(options.Reviews),
+		SpecialistReviews:          packetBoundSpecialistReviews(options.Specialists),
+		ImpactAssessment:           options.ImpactAssessment,
+		ImpactConfirmationResponse: options.ImpactConfirmation,
 	}
 	outcome, err := convergeAdvance(ctx, advancer, request, options.AuthorizeRemote)
 	if err != nil {
@@ -359,6 +376,7 @@ func convergeAdvance(
 		request.Decision, request.Repair = nil, nil
 		request.QualificationReview, request.QualificationCorrection = nil, nil
 		request.CandidateReviews, request.SpecialistReviews = nil, nil
+		request.ImpactAssessment, request.ImpactConfirmationResponse = nil, nil
 		request.NonLocal = nil
 
 		if authorizationAvailable &&
@@ -443,6 +461,7 @@ func compactReportFromOutcome(
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		BlockerKind: outcome.BlockerKind, SupersedesRunID: outcome.SupersedesRunID,
 		Decision: outcome.Decision, Repair: outcome.Repair,
+		ImpactConfirmation:      outcome.ImpactConfirmation,
 		QualificationCorrection: outcome.QualificationCorrection,
 		Timing:                  run.Timing,
 		Assurance:               run.Assurance,
@@ -610,7 +629,8 @@ func reportFromOutcome(outcome issuedelivery.Outcome, now time.Time) (advanceRep
 		RunID: outcome.RunID, State: outcome.State, Reason: outcome.Reason,
 		PauseCause: outcome.PauseCause, NextAction: outcome.NextAction,
 		SupersedesRunID: outcome.SupersedesRunID, Decision: outcome.Decision,
-		Repair: outcome.Repair, Evidence: outcome.Evidence, Observations: outcome.Observations,
+		Repair: outcome.Repair, ImpactConfirmation: outcome.ImpactConfirmation,
+		Evidence: outcome.Evidence, Observations: outcome.Observations,
 		QualificationCorrection:  outcome.QualificationCorrection,
 		QualificationApproved:    outcome.QualificationApproved,
 		QualificationReviews:     outcome.QualificationReviews,

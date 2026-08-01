@@ -33,6 +33,9 @@ func (m *Module) advanceAssurance(
 		}
 		return m.applyRepairDecision(store, record, *request.Repair)
 	}
+	if request.ImpactAssessment != nil && request.ImpactConfirmationResponse != nil {
+		return Outcome{}, errors.New("one Advance call cannot supply an impact assessment and confirmation")
+	}
 	if record.PendingRepair != nil {
 		return outcomeFromRecord(record), nil
 	}
@@ -150,6 +153,15 @@ func (m *Module) advanceAssurance(
 				"risk-observation",
 			)
 		}
+	}
+	if request.ImpactAssessment != nil {
+		return m.admitImpactAssessment(store, record, candidate, *request.ImpactAssessment)
+	}
+	if request.ImpactConfirmationResponse != nil {
+		return m.admitImpactConfirmation(store, record, candidate, *request.ImpactConfirmationResponse)
+	}
+	if candidate.Derivation != nil && candidate.Derivation.PendingConfirmation != nil {
+		return outcomeFromRecord(record), nil
 	}
 
 	if len(request.CandidateReviews) != 0 {
@@ -384,7 +396,13 @@ func (m *Module) advanceAssurance(
 			}
 			proofs = candidate.Acceptance
 		}
-		if err := admitAcceptanceProofs(&nextEvidence, candidate, proofs); err != nil {
+		var acceptanceErr error
+		if len(proofs) == 0 && containsAxis(retainedReviewAxes(candidate), deliveryevidence.ReviewSpec) {
+			acceptanceErr = admitDerivedAcceptance(&nextEvidence, record, candidate)
+		} else {
+			acceptanceErr = admitAcceptanceProofs(&nextEvidence, candidate, proofs)
+		}
+		if acceptanceErr != nil {
 			return m.persistAssuranceTransition(
 				store, record, StateBlocked, "exhaustive validation lacks exact acceptance traceability",
 				"exhaustive-validation",
@@ -1073,6 +1091,59 @@ func admitAcceptanceProofs(
 	return nil
 }
 
+func admitDerivedAcceptance(
+	evidence *deliveryevidence.Bundle,
+	record runRecord,
+	candidate *Candidate,
+) error {
+	if candidate.Derivation == nil || candidate.Derivation.Confirmation == nil {
+		return errors.New("derived acceptance lacks confirmed derivation")
+	}
+	var specReceipt *deliveryevidence.ReviewDerivationReceipt
+	for index := range candidate.Derivation.RetainedReviewReceipts {
+		receipt := &candidate.Derivation.RetainedReviewReceipts[index]
+		if receipt.Axis == deliveryevidence.ReviewSpec {
+			specReceipt = receipt
+		}
+	}
+	if specReceipt == nil {
+		return errors.New("derived acceptance lacks a canonical Spec derivation receipt")
+	}
+	var parent *Candidate
+	for index := range record.Candidates {
+		if record.Candidates[index].ID == candidate.Derivation.ParentCandidateID {
+			parent = &record.Candidates[index]
+		}
+	}
+	if parent == nil || len(parent.Acceptance) != len(evidence.AcceptanceMatrix) {
+		return errors.New("derived acceptance lacks exact parent semantic proof")
+	}
+	covered := make(map[deliveryevidence.EvidenceObligationIdentity]bool, len(specReceipt.Obligations))
+	for _, obligation := range specReceipt.Obligations {
+		covered[obligation] = true
+	}
+	for _, row := range evidence.AcceptanceMatrix {
+		for _, obligation := range row.Obligations {
+			if obligation.Phase != deliveryevidence.AssuranceCandidateReview {
+				continue
+			}
+			identity := deliveryevidence.EvidenceObligationIdentity{
+				CriterionID: row.Identity, Kind: obligation.Kind, Phase: obligation.Phase,
+			}
+			if !covered[identity] {
+				return fmt.Errorf("derived acceptance omits retained obligation for %s", row.Identity)
+			}
+		}
+	}
+	parentEvidence := *evidence
+	parentEvidence.AcceptanceMatrix = append([]deliveryevidence.AcceptanceRow(nil), evidence.AcceptanceMatrix...)
+	if err := admitAcceptanceProofs(&parentEvidence, parent, parent.Acceptance); err != nil {
+		return fmt.Errorf("validate parent semantic proof: %w", err)
+	}
+	evidence.AcceptanceMatrix = parentEvidence.AcceptanceMatrix
+	return nil
+}
+
 func phaseOwnedAcceptance(rows []deliveryevidence.AcceptanceRow) bool {
 	for _, row := range rows {
 		if len(row.Obligations) > 0 {
@@ -1128,6 +1199,9 @@ func latestCandidate(record *runRecord) *Candidate {
 
 func missingReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
 	have := map[deliveryevidence.ReviewAxis]bool{}
+	for _, axis := range retainedReviewAxes(candidate) {
+		have[axis] = true
+	}
 	iteration := currentReviewIteration(candidate)
 	for _, review := range candidate.Reviews {
 		if review.Completed && review.Iteration == iteration {

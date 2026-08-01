@@ -109,13 +109,17 @@ type CompactAssuranceProgress struct {
 }
 
 type CompactReviewProgress struct {
-	Completed []deliveryevidence.ReviewAxis `json:"completed"`
-	Pending   []deliveryevidence.ReviewAxis `json:"pending"`
+	Retained       []deliveryevidence.ReviewAxis `json:"retained,omitempty"`
+	CompletedDelta []deliveryevidence.ReviewAxis `json:"completed_delta,omitempty"`
+	Completed      []deliveryevidence.ReviewAxis `json:"completed"`
+	Pending        []deliveryevidence.ReviewAxis `json:"pending"`
 }
 
 type CompactSpecialistProgress struct {
-	Completed []CompactSpecialistBoundary `json:"completed"`
-	Pending   []CompactSpecialistBoundary `json:"pending"`
+	Retained       []CompactSpecialistBoundary `json:"retained,omitempty"`
+	CompletedDelta []CompactSpecialistBoundary `json:"completed_delta,omitempty"`
+	Completed      []CompactSpecialistBoundary `json:"completed"`
+	Pending        []CompactSpecialistBoundary `json:"pending"`
 }
 
 type CompactSpecialistBoundary struct {
@@ -124,8 +128,11 @@ type CompactSpecialistBoundary struct {
 }
 
 type RetainedReviewReceipt struct {
-	Identity  string `json:"identity"`
-	Iteration int    `json:"iteration"`
+	Identity   string                      `json:"identity"`
+	Iteration  int                         `json:"iteration"`
+	Axis       deliveryevidence.ReviewAxis `json:"axis,omitempty"`
+	Boundary   SensitiveBoundary           `json:"boundary,omitempty"`
+	Specialist string                      `json:"specialist,omitempty"`
 }
 
 type ReusedValidationArtifact struct {
@@ -264,14 +271,21 @@ func compactAssuranceProjection(outcome Outcome) CompactAssuranceProjection {
 func compactAssuranceProgress(candidate Candidate) *CompactAssuranceProgress {
 	progress := &CompactAssuranceProgress{
 		CandidateReviewAxes: CompactReviewProgress{
-			Completed: []deliveryevidence.ReviewAxis{},
-			Pending:   []deliveryevidence.ReviewAxis{},
+			Completed: []deliveryevidence.ReviewAxis{}, Pending: []deliveryevidence.ReviewAxis{},
 		},
+	}
+	if candidate.Derivation != nil {
+		progress.CandidateReviewAxes.Retained = []deliveryevidence.ReviewAxis{}
+		progress.CandidateReviewAxes.CompletedDelta = []deliveryevidence.ReviewAxis{}
 	}
 	if len(candidate.RequiredSpecialists) != 0 {
 		progress.SpecialistBoundaries = &CompactSpecialistProgress{
 			Completed: []CompactSpecialistBoundary{},
 			Pending:   []CompactSpecialistBoundary{},
+		}
+		if candidate.Derivation != nil {
+			progress.SpecialistBoundaries.Retained = []CompactSpecialistBoundary{}
+			progress.SpecialistBoundaries.CompletedDelta = []CompactSpecialistBoundary{}
 		}
 	}
 
@@ -290,6 +304,14 @@ func compactAssuranceProgress(candidate Candidate) *CompactAssuranceProgress {
 		if containsAxis(pendingAxes, axis) {
 			progress.CandidateReviewAxes.Pending = append(
 				progress.CandidateReviewAxes.Pending, axis,
+			)
+		} else if containsAxis(retainedReviewAxes(&candidate), axis) {
+			progress.CandidateReviewAxes.Retained = append(
+				progress.CandidateReviewAxes.Retained, axis,
+			)
+		} else if candidate.Derivation != nil && containsAxis(candidate.Derivation.Decision.DeltaReviewAxes, axis) {
+			progress.CandidateReviewAxes.CompletedDelta = append(
+				progress.CandidateReviewAxes.CompletedDelta, axis,
 			)
 		} else {
 			progress.CandidateReviewAxes.Completed = append(
@@ -312,6 +334,14 @@ func compactAssuranceProgress(candidate Candidate) *CompactAssuranceProgress {
 			progress.SpecialistBoundaries.Pending = append(
 				progress.SpecialistBoundaries.Pending, entry,
 			)
+		} else if containsBoundary(retainedSpecialistBoundaries(&candidate), boundary) {
+			progress.SpecialistBoundaries.Retained = append(
+				progress.SpecialistBoundaries.Retained, entry,
+			)
+		} else if candidate.Derivation != nil {
+			progress.SpecialistBoundaries.CompletedDelta = append(
+				progress.SpecialistBoundaries.CompletedDelta, entry,
+			)
 		} else {
 			progress.SpecialistBoundaries.Completed = append(
 				progress.SpecialistBoundaries.Completed, entry,
@@ -325,6 +355,17 @@ func retainedReviewReceipts(
 	evidence *deliveryevidence.Bundle,
 	candidate Candidate,
 ) []RetainedReviewReceipt {
+	if candidate.Derivation != nil && len(candidate.Derivation.RetainedReviewReceipts) != 0 {
+		result := make([]RetainedReviewReceipt, 0, len(candidate.Derivation.RetainedReviewReceipts))
+		for _, receipt := range candidate.Derivation.RetainedReviewReceipts {
+			boundary := SensitiveBoundary(receipt.Boundary)
+			result = append(result, RetainedReviewReceipt{
+				Identity: receipt.Identity, Axis: receipt.Axis, Boundary: boundary,
+				Specialist: specialistForBoundary(boundary),
+			})
+		}
+		return result
+	}
 	if evidence == nil {
 		return nil
 	}

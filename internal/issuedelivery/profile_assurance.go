@@ -279,6 +279,9 @@ func reconcileSpecialistPacketResponses(record *runRecord, candidate *Candidate,
 
 func missingSpecialistBoundaries(candidate *Candidate) []SensitiveBoundary {
 	have := map[SensitiveBoundary]bool{}
+	for _, boundary := range retainedSpecialistBoundaries(candidate) {
+		have[boundary] = true
+	}
 	for _, review := range candidate.SpecialistReviews {
 		if review.Completed {
 			have[review.Boundary] = true

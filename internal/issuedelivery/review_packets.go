@@ -77,6 +77,17 @@ type ReviewPacket struct {
 	PriorAssuranceAdjudications []deliveryevidence.AssuranceAdjudicationReceipt `json:"prior_assurance_adjudications"`
 	RequiredBoundaryProof       *ReviewPacketBoundaryProofObligation            `json:"required_boundary_proof,omitempty"`
 	Response                    ReviewPacketResponseTemplate                    `json:"response"`
+	Derivation                  *ReviewPacketDerivation                         `json:"derivation,omitempty"`
+}
+
+type ReviewPacketDerivation struct {
+	ParentCandidateID      string                                        `json:"parent_candidate_id"`
+	AssessmentID           string                                        `json:"assessment_id"`
+	ConfirmationID         string                                        `json:"confirmation_id"`
+	ParentEvidenceReceipts []string                                      `json:"parent_evidence_receipts"`
+	RetainedObligations    []deliveryevidence.EvidenceObligationIdentity `json:"retained_obligations"`
+	ChangedObligations     []deliveryevidence.AcceptanceObligationImpact `json:"changed_obligations"`
+	ExactDelta             []deliveryevidence.EvidenceChange             `json:"exact_delta"`
 }
 
 type ReviewPacketBoundaryProofObligation struct {
@@ -215,6 +226,7 @@ func reviewPacketsFromRecord(record runRecord, git GitObservation, request Revie
 			packet := base
 			packet.Axis, packet.Generation, packet.Iteration = axis, generation, currentReviewIteration(candidate)
 			bindPacketCandidate(&packet, *candidate)
+			packet.Derivation = reviewPacketDerivation(record, *candidate, axis)
 			for _, review := range candidate.Reviews {
 				if review.Axis == axis {
 					packet.PriorFindings = append(packet.PriorFindings, review.Findings...)
@@ -244,6 +256,7 @@ func reviewPacketsFromRecord(record runRecord, git GitObservation, request Revie
 			packet := base
 			packet.Boundary, packet.Specialist, packet.Generation = boundary, specialistForBoundary(boundary), generation
 			bindPacketCandidate(&packet, *candidate)
+			packet.Derivation = reviewPacketDerivation(record, *candidate, "")
 			packet.RequiredBoundaryProof = boundaryProofObligation(record, *candidate, boundary)
 			for _, review := range candidate.SpecialistReviews {
 				if review.Boundary == boundary {
