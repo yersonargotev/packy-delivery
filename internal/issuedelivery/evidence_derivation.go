@@ -88,10 +88,10 @@ func (m *Module) admitImpactAssessment(
 	assessment deliveryevidence.EvidenceImpactAssessment,
 ) (Outcome, error) {
 	if record.Schema == legacyRunSchema {
-		return Outcome{}, errors.New("schema v1 cannot admit evidence derivation")
+		return m.persistImpactFallback(store, record, candidate, "schema v1 cannot admit evidence derivation")
 	}
 	if len(record.Candidates) < 2 || candidate != &record.Candidates[len(record.Candidates)-1] {
-		return Outcome{}, errors.New("impact assessment requires an exact derived candidate")
+		return m.persistImpactFallback(store, record, candidate, "impact assessment lacks an exact derived candidate")
 	}
 	if candidate.Derivation != nil {
 		if reflect.DeepEqual(candidate.Derivation.Assessment, assessment) {
@@ -109,32 +109,36 @@ func (m *Module) admitImpactAssessment(
 		RunID:     record.ID, SHA256: record.AuthoritySHA256,
 	}
 	if assessment.ParentAuthority != authority || assessment.DerivedAuthority != authority {
-		return Outcome{}, errors.New("impact assessment authority does not match the exact run")
+		return m.persistImpactFallback(store, record, candidate, "impact assessment authority is stale or mismatched")
 	}
 	if !reflect.DeepEqual(assessment.ParentCandidate, evidenceCandidateIdentity(parent)) {
-		return Outcome{}, errors.New("impact assessment parent candidate is stale")
+		return m.persistImpactFallback(store, record, candidate, "impact assessment parent candidate is stale")
 	}
 	if !reflect.DeepEqual(assessment.DerivedCandidate, evidenceCandidateIdentity(*candidate)) {
-		return Outcome{}, errors.New("impact assessment derived candidate is stale")
+		return m.persistImpactFallback(store, record, candidate, "impact assessment derived candidate is stale")
 	}
 	if assessment.ParentAcceptanceSHA256 != digest || assessment.DerivedAcceptanceSHA256 != digest {
-		return Outcome{}, errors.New("impact assessment acceptance identity is stale")
+		return m.persistImpactFallback(store, record, candidate, "impact assessment acceptance identity is stale")
 	}
 	expectedObligations := impactObligations(record.Evidence.AcceptanceMatrix)
 	if assessment.ParentObligationCount != len(expectedObligations) ||
 		assessment.DerivedObligationCount != len(expectedObligations) ||
 		len(assessment.Obligations) != len(expectedObligations) {
-		return Outcome{}, errors.New("impact assessment does not cover the exact acceptance obligations")
+		return m.persistImpactFallback(store, record, candidate, "impact assessment obligation coverage is incomplete")
 	}
 	for index, obligation := range assessment.Obligations {
 		if obligation.Parent != expectedObligations[index].Parent ||
 			obligation.Derived != expectedObligations[index].Derived {
-			return Outcome{}, errors.New("impact assessment acceptance obligations are stale")
+			return m.persistImpactFallback(store, record, candidate, "impact assessment acceptance obligations are stale")
 		}
+	}
+	authenticated, ok := m.impactAuthority.(AuthenticatedImpactAuthority)
+	if !ok || authenticated.AuthenticatedImpactPrincipal() != assessment.Author {
+		return m.persistImpactFallback(store, record, candidate, "impact assessment author is not the authenticated principal")
 	}
 	decision, err := deliveryevidence.EvaluateEvidenceImpactAssessment(m.impactAuthority, assessment)
 	if err != nil {
-		return Outcome{}, fmt.Errorf("evaluate impact assessment: %w", err)
+		return m.persistImpactFallback(store, record, candidate, "impact assessment is invalid or unauthorized")
 	}
 	derivation := &CandidateDerivation{
 		ParentCandidateID: parent.ID, Assessment: assessment, Decision: decision,
@@ -178,7 +182,7 @@ func (m *Module) admitImpactConfirmation(
 	if err := deliveryevidence.AdmitImpactConfirmation(
 		m.impactAuthority, derivation.Assessment, confirmation,
 	); err != nil {
-		return Outcome{}, fmt.Errorf("admit impact confirmation: %w", err)
+		return m.persistImpactFallback(store, record, candidate, "impact confirmation is rejected, incomplete, stale, mismatched, or not independent")
 	}
 	parent := record.Candidates[len(record.Candidates)-2]
 	receipts, err := reviewDerivationReceipts(record, parent, *candidate, *derivation, confirmation)
@@ -190,6 +194,25 @@ func (m *Module) admitImpactConfirmation(
 	derivation.RetainedReviewReceipts = receipts
 	return m.persistAssuranceTransition(
 		store, record, StateNeedsReview, "independent impact confirmation admitted; delta review is pending", "impact-confirmation",
+	)
+}
+
+func (m *Module) persistImpactFallback(
+	store lockedIssueStore,
+	record runRecord,
+	candidate *Candidate,
+	reason string,
+) (Outcome, error) {
+	if candidate != nil && candidate.Derivation != nil {
+		candidate.Derivation.PendingConfirmation = nil
+		candidate.Derivation.Confirmation = nil
+		candidate.Derivation.RetainedReviewReceipts = []deliveryevidence.ReviewDerivationReceipt{}
+		candidate.Derivation.FallbackReason = reason
+	}
+	return m.persistAssuranceTransition(
+		store, record, StateNeedsReview,
+		"impact evidence failed closed; complete fresh review evidence is required",
+		"impact-confirmation",
 	)
 }
 
@@ -206,7 +229,8 @@ func reviewDerivationReceipts(
 	}
 	obligations := make([]deliveryevidence.EvidenceObligationIdentity, 0)
 	for _, impact := range derivation.Assessment.Obligations {
-		if impact.Disposition == deliveryevidence.ImpactUnaffected {
+		if impact.Disposition == deliveryevidence.ImpactUnaffected &&
+			impact.Derived.Phase == deliveryevidence.AssuranceCandidateReview {
 			obligations = append(obligations, impact.Derived)
 		}
 	}
@@ -298,6 +322,23 @@ func retainedReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
 	return result
 }
 
+func freshReviewAxes(candidate *Candidate) []deliveryevidence.ReviewAxis {
+	if candidate == nil {
+		return nil
+	}
+	if candidate.Derivation == nil || candidate.Derivation.FallbackReason != "" {
+		return append([]deliveryevidence.ReviewAxis(nil), candidate.RequiredReviews...)
+	}
+	result := append([]deliveryevidence.ReviewAxis(nil), candidate.Derivation.Decision.FullReviewAxes...)
+	for _, axis := range candidate.Derivation.Decision.DeltaReviewAxes {
+		if !containsAxis(result, axis) {
+			result = append(result, axis)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
 func retainedSpecialistBoundaries(candidate *Candidate) []SensitiveBoundary {
 	if candidate == nil || candidate.Derivation == nil || candidate.Derivation.Confirmation == nil {
 		return nil
@@ -355,6 +396,9 @@ func reviewPacketDerivation(
 		}
 	}
 	for _, obligation := range derivation.Assessment.Obligations {
+		if obligation.Derived.Phase != deliveryevidence.AssuranceCandidateReview {
+			continue
+		}
 		if obligation.Disposition == deliveryevidence.ImpactUnaffected {
 			packet.RetainedObligations = append(packet.RetainedObligations, obligation.Derived)
 		} else {
@@ -422,6 +466,13 @@ func validateCandidateDerivation(record runRecord, candidateIndex int) error {
 			packet.AssessmentID != derivation.Assessment.ID || packet.ParentCandidateID != parent.ID ||
 			packet.DerivedCandidateID != candidate.ID || len(derivation.RetainedReviewReceipts) != 0 {
 			return errors.New("issue delivery candidate impact confirmation packet is invalid")
+		}
+		return nil
+	}
+	if derivation.FallbackReason != "" {
+		if derivation.PendingConfirmation != nil || derivation.Confirmation != nil ||
+			len(derivation.RetainedReviewReceipts) != 0 {
+			return errors.New("issue delivery candidate impact fallback retained derivation authority")
 		}
 		return nil
 	}

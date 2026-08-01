@@ -47,6 +47,10 @@ func (m *Module) advanceAssurance(
 	}
 
 	candidate := latestCandidate(&record)
+	if (request.ImpactAssessment != nil || request.ImpactConfirmationResponse != nil) &&
+		(candidate == nil || candidate.CommitSHA != git.HeadSHA || candidate.TreeSHA != git.TreeSHA) {
+		return Outcome{}, errors.New("impact evidence requires the exact current derived candidate")
+	}
 	if len(request.CandidateReviews) != 0 && len(request.SpecialistReviews) != 0 {
 		return Outcome{}, errors.New("one Advance call cannot supply candidate and specialist packet responses")
 	}
@@ -54,6 +58,10 @@ func (m *Module) advanceAssurance(
 		if candidate == nil || candidate.CommitSHA != git.HeadSHA || candidate.TreeSHA != git.TreeSHA {
 			return Outcome{}, errors.New("review packet response does not match the exact current candidate")
 		}
+	}
+	if (request.ImpactAssessment != nil || request.ImpactConfirmationResponse != nil) &&
+		(len(request.CandidateReviews) != 0 || len(request.SpecialistReviews) != 0) {
+		return Outcome{}, errors.New("one Advance call cannot supply impact evidence and review responses")
 	}
 	if record.Schema != legacyRunSchema && candidate == nil &&
 		git.HeadSHA == record.Evidence.StartingBaseSHA {

@@ -338,7 +338,8 @@ func compactAssuranceProgress(candidate Candidate) *CompactAssuranceProgress {
 			progress.SpecialistBoundaries.Retained = append(
 				progress.SpecialistBoundaries.Retained, entry,
 			)
-		} else if candidate.Derivation != nil {
+		} else if candidate.Derivation != nil &&
+			!containsEvidenceBoundary(candidate.Derivation.Decision.FullSpecialistBoundaries, boundary) {
 			progress.SpecialistBoundaries.CompletedDelta = append(
 				progress.SpecialistBoundaries.CompletedDelta, entry,
 			)
@@ -349,6 +350,15 @@ func compactAssuranceProgress(candidate Candidate) *CompactAssuranceProgress {
 		}
 	}
 	return progress
+}
+
+func containsEvidenceBoundary(values []deliveryevidence.SensitiveBoundary, want SensitiveBoundary) bool {
+	for _, value := range values {
+		if value == deliveryevidence.SensitiveBoundary(want) {
+			return true
+		}
+	}
+	return false
 }
 
 func retainedReviewReceipts(

@@ -321,7 +321,7 @@ func validateCandidates(record runRecord) error {
 				return fmt.Errorf("issue delivery candidate review batch history is invalid")
 			}
 			if batch.Iteration == currentBatchIteration &&
-				!reflect.DeepEqual(batch.RequiredAxes, candidate.RequiredReviews) {
+				!reflect.DeepEqual(batch.RequiredAxes, freshReviewAxes(&candidate)) {
 				return fmt.Errorf("issue delivery candidate current review batch requirements are invalid")
 			}
 			previousBatchIteration, previousTimingSequence = batch.Iteration, batch.TimingSequence

@@ -108,7 +108,8 @@ func newProductionAdvancer(options advanceOptions) (issueDeliveryAdvancer, error
 }
 
 type productionImpactAuthority struct {
-	authorized map[string]bool
+	authorized    map[string]bool
+	authenticated string
 }
 
 func (a productionImpactAuthority) AuthorizedImpactAuthor(author deliveryevidence.ImpactAuthor) bool {
@@ -116,7 +117,14 @@ func (a productionImpactAuthority) AuthorizedImpactAuthor(author deliveryevidenc
 }
 
 func (a productionImpactAuthority) IndependentImpactConfirmer(author, confirmer deliveryevidence.ImpactAuthor) bool {
-	return a.AuthorizedImpactAuthor(author) && a.AuthorizedImpactAuthor(confirmer) && author.Identity != confirmer.Identity
+	return a.AuthorizedImpactAuthor(author) && a.AuthorizedImpactAuthor(confirmer) &&
+		confirmer.Identity == a.authenticated && author.Identity != confirmer.Identity
+}
+
+func (a productionImpactAuthority) AuthenticatedImpactPrincipal() deliveryevidence.ImpactAuthor {
+	return deliveryevidence.ImpactAuthor{
+		Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: a.authenticated,
+	}
 }
 
 func newProductionImpactAuthority(options advanceOptions, runner Runner) (deliveryevidence.ImpactAuthority, error) {
@@ -130,6 +138,14 @@ func newProductionImpactAuthority(options advanceOptions, runner Runner) (delive
 	slug, err := githubSlug(origin)
 	if err != nil {
 		return nil, err
+	}
+	loginRaw, err := runner.Output(options.Context, "gh", "api", "user", "--jq", ".login")
+	if err != nil {
+		return nil, fmt.Errorf("resolve authenticated impact principal: %w", err)
+	}
+	authenticated := strings.TrimSpace(string(loginRaw))
+	if authenticated == "" {
+		return nil, errors.New("authenticated impact principal is empty")
 	}
 	raw, err := runner.Output(
 		options.Context, "gh", "api", "repos/"+slug+"/collaborators?affiliation=all&per_page=100",
@@ -155,7 +171,7 @@ func newProductionImpactAuthority(options advanceOptions, runner Runner) (delive
 			authorized[collaborator.Login] = true
 		}
 	}
-	return productionImpactAuthority{authorized: authorized}, nil
+	return productionImpactAuthority{authorized: authorized, authenticated: authenticated}, nil
 }
 
 func (e productionValidationSessionExecutor) ObserveValidationSession(

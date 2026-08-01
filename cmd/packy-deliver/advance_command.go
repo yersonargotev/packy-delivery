@@ -553,6 +553,12 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 			objective.EndToEnd.MaximumNanoseconds, objective.EndToEnd.Comparison)
 	}
 	if progress := report.Assurance.Progress; progress != nil {
+		for _, axis := range progress.CandidateReviewAxes.Retained {
+			fmt.Fprintf(&out, "candidate review retained: %s\n", axis)
+		}
+		for _, axis := range progress.CandidateReviewAxes.CompletedDelta {
+			fmt.Fprintf(&out, "candidate delta review completed: %s\n", axis)
+		}
 		for _, axis := range progress.CandidateReviewAxes.Completed {
 			fmt.Fprintf(&out, "candidate review completed: %s\n", axis)
 		}
@@ -560,6 +566,14 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 			fmt.Fprintf(&out, "candidate review pending: %s\n", axis)
 		}
 		if boundaries := progress.SpecialistBoundaries; boundaries != nil {
+			for _, boundary := range boundaries.Retained {
+				fmt.Fprintf(&out, "specialist review retained: %s specialist=%s\n",
+					boundary.Boundary, boundary.Specialist)
+			}
+			for _, boundary := range boundaries.CompletedDelta {
+				fmt.Fprintf(&out, "specialist delta review completed: %s specialist=%s\n",
+					boundary.Boundary, boundary.Specialist)
+			}
 			for _, boundary := range boundaries.Completed {
 				fmt.Fprintf(&out, "specialist review completed: %s specialist=%s\n",
 					boundary.Boundary, boundary.Specialist)
@@ -570,9 +584,19 @@ func renderCompactAdvanceReport(report compactAdvanceReport) string {
 			}
 		}
 	}
+	if packet := report.ImpactConfirmation; packet != nil {
+		fmt.Fprintf(&out, "impact confirmation: %s assessment=%s parent=%s derived=%s\n",
+			packet.PacketID, packet.AssessmentID, packet.ParentCandidateID, packet.DerivedCandidateID)
+	}
 	for _, receipt := range report.Assurance.RetainedReviewReceipts {
-		fmt.Fprintf(&out, "retained review receipt: %s iteration=%d\n",
-			receipt.Identity, receipt.Iteration)
+		fmt.Fprintf(&out, "retained review receipt: %s iteration=%d", receipt.Identity, receipt.Iteration)
+		if receipt.Axis != "" {
+			fmt.Fprintf(&out, " axis=%s", receipt.Axis)
+		}
+		if receipt.Boundary != "" {
+			fmt.Fprintf(&out, " boundary=%s specialist=%s", receipt.Boundary, receipt.Specialist)
+		}
+		out.WriteByte('\n')
 	}
 	for _, artifact := range report.Assurance.ReusedValidationArtifacts {
 		fmt.Fprintf(&out, "reused validation artifact: %s identity=%s session=%s completion=%s",

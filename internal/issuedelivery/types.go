@@ -635,6 +635,12 @@ type CandidateDerivation struct {
 	PendingConfirmation    *ImpactConfirmationPacket                   `json:"pending_confirmation,omitempty"`
 	Confirmation           *deliveryevidence.ImpactConfirmation        `json:"confirmation,omitempty"`
 	RetainedReviewReceipts []deliveryevidence.ReviewDerivationReceipt  `json:"retained_review_receipts"`
+	FallbackReason         string                                      `json:"fallback_reason,omitempty"`
+}
+
+type AuthenticatedImpactAuthority interface {
+	deliveryevidence.ImpactAuthority
+	AuthenticatedImpactPrincipal() deliveryevidence.ImpactAuthor
 }
 
 type ProfileTransition struct {

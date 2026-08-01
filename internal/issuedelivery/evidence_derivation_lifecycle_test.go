@@ -11,6 +11,12 @@ import (
 
 type lifecycleImpactAuthority struct{}
 
+func (lifecycleImpactAuthority) AuthenticatedImpactPrincipal() deliveryevidence.ImpactAuthor {
+	return deliveryevidence.ImpactAuthor{
+		Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "maintainer",
+	}
+}
+
 func (lifecycleImpactAuthority) AuthorizedImpactAuthor(author deliveryevidence.ImpactAuthor) bool {
 	return author.Kind == deliveryevidence.ImpactAuthorAuthorizedHuman &&
 		(author.Identity == "maintainer" || author.Identity == "independent-reviewer")
@@ -76,6 +82,11 @@ func TestAdvanceAdmitsImpactConfirmedDeltaReviewWithoutCopyingParentEvidence(t *
 		got[0].AssessmentID != assessment.ID || got[0].ConfirmationID != confirmation.ID {
 		t.Fatalf("retained review receipts = %#v", got)
 	}
+	for _, obligation := range accepted.Candidate.Derivation.RetainedReviewReceipts[0].Obligations {
+		if obligation.Phase != deliveryevidence.AssuranceCandidateReview {
+			t.Fatalf("Spec derivation receipt claimed non-review obligation: %#v", obligation)
+		}
+	}
 	if len(accepted.Candidate.Reviews) != 0 {
 		t.Fatalf("parent review content was copied onto derived candidate: %#v", accepted.Candidate.Reviews)
 	}
@@ -98,6 +109,16 @@ func TestAdvanceAdmitsImpactConfirmedDeltaReviewWithoutCopyingParentEvidence(t *
 	if reviewer.calls[deliveryevidence.ReviewStandards] != parentReviewCalls[deliveryevidence.ReviewStandards]+1 ||
 		reviewer.calls[deliveryevidence.ReviewSpec] != parentReviewCalls[deliveryevidence.ReviewSpec] {
 		t.Fatalf("review calls after delta = %#v parent=%#v", reviewer.calls, parentReviewCalls)
+	}
+	foundDeltaReceipt := false
+	for _, receipt := range completedDelta.Evidence.CandidateReviewReceipts {
+		if receipt.CandidateID == derived.ID &&
+			reflect.DeepEqual(receipt.Axes, []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards}) {
+			foundDeltaReceipt = true
+		}
+	}
+	if !foundDeltaReceipt {
+		t.Fatal("completed Standards delta lacks a canonical current-candidate receipt")
 	}
 	progress, err := BuildCompactRunProjection(completedDelta, module.clock.Now())
 	if err != nil {
@@ -238,6 +259,143 @@ func TestAdvanceChangedAcceptanceMeaningRequiresFreshSpecProof(t *testing.T) {
 		reviewer.calls[deliveryevidence.ReviewSpec] != before[deliveryevidence.ReviewSpec]+1 ||
 		len(reviewed.Candidate.Acceptance) != len(reviewed.Evidence.AcceptanceMatrix) {
 		t.Fatalf("fresh acceptance review calls=%#v candidate=%#v", reviewer.calls, reviewed.Candidate)
+	}
+}
+
+func TestAdvanceInvalidImpactAssessmentClassesTakeFreshReviewPath(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*deliveryevidence.EvidenceImpactAssessmentInput)
+	}{
+		{name: "incomplete", mutate: func(input *deliveryevidence.EvidenceImpactAssessmentInput) {
+			input.Complete = false
+		}},
+		{name: "authority mismatch", mutate: func(input *deliveryevidence.EvidenceImpactAssessmentInput) {
+			input.ParentAuthority.SHA256 = strings.Repeat("f", 64)
+		}},
+		{name: "caller spoofs another authorized principal", mutate: func(input *deliveryevidence.EvidenceImpactAssessmentInput) {
+			input.Author.Identity = "independent-reviewer"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			module, git, _, reviewer, _ := assuranceFixture(t)
+			module.impactAuthority = lifecycleImpactAuthority{}
+			request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+			for range 4 {
+				mustAdvance(t, module, request)
+			}
+			parent := *mustAdvance(t, module, request).Candidate
+			before := map[deliveryevidence.ReviewAxis]int{
+				deliveryevidence.ReviewStandards: reviewer.calls[deliveryevidence.ReviewStandards],
+				deliveryevidence.ReviewSpec:      reviewer.calls[deliveryevidence.ReviewSpec],
+			}
+			git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+			derived := mustAdvance(t, module, request)
+			assessment := lifecycleImpactAssessment(t, derived, parent, *derived.Candidate,
+				[]deliveryevidence.EvidenceChange{{Class: deliveryevidence.ChangeNonBehavioral, Rationale: "claimed safe delta"}})
+			input := assessment.EvidenceImpactAssessmentInput
+			test.mutate(&input)
+			assessment, err := deliveryevidence.NewEvidenceImpactAssessment(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			admitted := mustAdvance(t, module, Request{
+				RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment,
+			})
+			if admitted.ImpactConfirmation != nil || len(retainedReviewAxes(admitted.Candidate)) != 0 {
+				t.Fatalf("invalid assessment retained authority: %#v", admitted.Candidate.Derivation)
+			}
+			mustAdvance(t, module, request)
+			if reviewer.calls[deliveryevidence.ReviewStandards] != before[deliveryevidence.ReviewStandards]+1 ||
+				reviewer.calls[deliveryevidence.ReviewSpec] != before[deliveryevidence.ReviewSpec]+1 {
+				t.Fatalf("invalid assessment did not take full review path: %#v", reviewer.calls)
+			}
+		})
+	}
+}
+
+func TestAdvanceRejectedImpactConfirmationClearsPauseAndFallsBack(t *testing.T) {
+	module, git, _, reviewer, _ := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	parent := *mustAdvance(t, module, request).Candidate
+	before := map[deliveryevidence.ReviewAxis]int{
+		deliveryevidence.ReviewStandards: reviewer.calls[deliveryevidence.ReviewStandards],
+		deliveryevidence.ReviewSpec:      reviewer.calls[deliveryevidence.ReviewSpec],
+	}
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+	derived := mustAdvance(t, module, request)
+	assessment := lifecycleImpactAssessment(t, derived, parent, *derived.Candidate,
+		[]deliveryevidence.EvidenceChange{{Class: deliveryevidence.ChangeNonBehavioral, Rationale: "format-only"}})
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment})
+	rejected, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
+		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.Candidate.ID,
+		Confirmer: deliveryevidence.ImpactAuthor{Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "independent-reviewer"},
+		Decision:  deliveryevidence.ImpactConfirmationRejected,
+		Rationale: "impact is not safely bounded", Completed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, ImpactConfirmationResponse: &rejected,
+	})
+	if fallback.ImpactConfirmation != nil || fallback.Candidate.Derivation.FallbackReason == "" ||
+		len(fallback.Candidate.Derivation.RetainedReviewReceipts) != 0 {
+		t.Fatalf("rejected confirmation did not fail closed: %#v", fallback.Candidate.Derivation)
+	}
+	mustAdvance(t, module, request)
+	if reviewer.calls[deliveryevidence.ReviewStandards] != before[deliveryevidence.ReviewStandards]+1 ||
+		reviewer.calls[deliveryevidence.ReviewSpec] != before[deliveryevidence.ReviewSpec]+1 {
+		t.Fatalf("rejected confirmation did not take full reviews: %#v", reviewer.calls)
+	}
+}
+
+func TestAdvanceSafeDeltaRetainsExactSpecialistButRefreshesBoundaryProof(t *testing.T) {
+	module, git, _, _, _ := assuranceFixture(t)
+	module.impactAuthority = lifecycleImpactAuthority{}
+	module.risk.(*fakeCandidateRiskObserver).effects = []EffectObservation{{
+		Effect: EffectSecurity, Evidence: "security boundary remains unchanged", Complete: true,
+	}}
+	specialist := &fakeSpecialistReviewExecutor{}
+	boundary := &fakeBoundaryValidationExecutor{}
+	module.specialist, module.boundary = specialist, boundary
+	request := Request{RepositoryPath: "/repo", IssueNumber: 357}
+	for range 6 {
+		mustAdvance(t, module, request)
+	}
+	parent := *mustAdvance(t, module, request).Candidate
+	if len(specialist.calls) != 1 || len(boundary.calls) != 1 {
+		t.Fatalf("parent specialist assurance calls=%v boundary=%v", specialist.calls, boundary.calls)
+	}
+	git.value.HeadSHA, git.value.TreeSHA = strings.Repeat("d", 40), strings.Repeat("e", 40)
+	derived := mustAdvance(t, module, request)
+	assessment := lifecycleImpactAssessment(t, derived, parent, *derived.Candidate,
+		[]deliveryevidence.EvidenceChange{{Class: deliveryevidence.ChangeNonBehavioral, Rationale: "format-only"}})
+	mustAdvance(t, module, Request{RepositoryPath: "/repo", IssueNumber: 357, ImpactAssessment: &assessment})
+	confirmation, err := deliveryevidence.NewImpactConfirmation(deliveryevidence.ImpactConfirmationInput{
+		AssessmentID: assessment.ID, ParentCandidateID: parent.ID, DerivedCandidateID: derived.Candidate.ID,
+		Confirmer: deliveryevidence.ImpactAuthor{Kind: deliveryevidence.ImpactAuthorAuthorizedHuman, Identity: "independent-reviewer"},
+		Decision:  deliveryevidence.ImpactConfirmationAccepted, Rationale: "boundary is unaffected", Completed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := mustAdvance(t, module, Request{
+		RepositoryPath: "/repo", IssueNumber: 357, ImpactConfirmationResponse: &confirmation,
+	})
+	if !containsBoundary(retainedSpecialistBoundaries(confirmed.Candidate), BoundarySecurity) {
+		t.Fatalf("specialist derivation receipts=%#v", confirmed.Candidate.Derivation.RetainedReviewReceipts)
+	}
+	for range 4 {
+		mustAdvance(t, module, request)
+	}
+	if len(specialist.calls) != 1 || len(boundary.calls) != 2 {
+		t.Fatalf("derived specialist assurance calls=%v boundary=%v", specialist.calls, boundary.calls)
 	}
 }
 

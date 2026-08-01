@@ -51,7 +51,7 @@ func projectAutomaticAssurance(record *runRecord) error {
 					break
 				}
 			}
-			requiredAxes := candidate.RequiredReviews
+			requiredAxes := freshReviewAxes(candidate)
 			if batch != nil {
 				requiredAxes = batch.RequiredAxes
 			} else if iteration < currentReviewIteration(candidate) {
