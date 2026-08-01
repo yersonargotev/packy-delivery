@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -27,6 +29,7 @@ const (
 	advanceProcessRepositoryEnv     = "PACKY_ADVANCE_PROCESS_REPOSITORY"
 	advanceProcessSignalsEnv        = "PACKY_ADVANCE_PROCESS_SIGNALS"
 	advanceProcessContenderEnv      = "PACKY_ADVANCE_PROCESS_CONTENDER"
+	advanceProcessAssuranceEnv      = "PACKY_ADVANCE_PROCESS_ASSURANCE"
 )
 
 func TestAdvanceProcessLifecycle(t *testing.T) {
@@ -122,6 +125,120 @@ func TestAdvanceProcessLifecycle(t *testing.T) {
 	})
 }
 
+func TestAdvanceProcessAssuranceProgress(t *testing.T) {
+	fixture := newAdvanceProcessFixture(t, "")
+	command := exec.Command(os.Args[0], "-test.run=^TestAdvanceProcessHelper$")
+	command.Env = replacedEnvironment(fixture.environment, map[string]string{
+		advanceProcessHelperEnvironment: "1",
+		advanceProcessAssuranceEnv:      "1",
+		advanceProcessRepositoryEnv:     fixture.repository,
+		advanceProcessSignalsEnv:        fixture.signals,
+	})
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("assurance progress subprocess: %v\n%s", err, output)
+	}
+	var snapshots []processAssuranceSnapshot
+	if err := json.NewDecoder(bytes.NewReader(output)).Decode(&snapshots); err != nil {
+		t.Fatalf("decode assurance progress subprocess output: %v\n%s", err, output)
+	}
+	expected := []struct {
+		name                string
+		completedAxes       []deliveryevidence.ReviewAxis
+		pendingAxes         []deliveryevidence.ReviewAxis
+		completedBoundaries []issuedelivery.CompactSpecialistBoundary
+		pendingBoundaries   []issuedelivery.CompactSpecialistBoundary
+	}{
+		{name: "no candidate"},
+		{
+			name:          "initial candidate",
+			completedAxes: []deliveryevidence.ReviewAxis{},
+			pendingAxes: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryRealConfiguration, Specialist: "configuration-specialist"},
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+		},
+		{
+			name:                "partial candidate reviews",
+			completedAxes:       []deliveryevidence.ReviewAxis{deliveryevidence.ReviewStandards},
+			pendingAxes:         []deliveryevidence.ReviewAxis{deliveryevidence.ReviewSpec},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryRealConfiguration, Specialist: "configuration-specialist"},
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+		},
+		{
+			name: "partial specialist reviews",
+			completedAxes: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			pendingAxes: []deliveryevidence.ReviewAxis{},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryRealConfiguration, Specialist: "configuration-specialist"},
+			},
+		},
+		{
+			name: "completed assurance",
+			completedAxes: []deliveryevidence.ReviewAxis{
+				deliveryevidence.ReviewStandards, deliveryevidence.ReviewSpec,
+			},
+			pendingAxes: []deliveryevidence.ReviewAxis{},
+			completedBoundaries: []issuedelivery.CompactSpecialistBoundary{
+				{Boundary: issuedelivery.BoundaryRealConfiguration, Specialist: "configuration-specialist"},
+				{Boundary: issuedelivery.BoundarySecurity, Specialist: "security-specialist"},
+			},
+			pendingBoundaries: []issuedelivery.CompactSpecialistBoundary{},
+		},
+	}
+	if len(snapshots) != len(expected) {
+		t.Fatalf("assurance progress snapshots = %d, want %d\n%s", len(snapshots), len(expected), output)
+	}
+	for index, want := range expected {
+		snapshot := snapshots[index]
+		if snapshot.Name != want.name {
+			t.Fatalf("snapshot %d name = %q, want %q", index, snapshot.Name, want.name)
+		}
+		var report compactAdvanceReport
+		if err := json.Unmarshal(snapshot.JSON, &report); err != nil {
+			t.Fatalf("decode %s compact JSON: %v", want.name, err)
+		}
+		if want.name == "no candidate" {
+			if report.Assurance.Progress != nil ||
+				strings.Contains(snapshot.Text, "candidate review") ||
+				strings.Contains(snapshot.Text, "specialist review") {
+				t.Fatalf("no-candidate process report invented assurance progress:\nJSON=%s\ntext=%s", snapshot.JSON, snapshot.Text)
+			}
+			continue
+		}
+		progress := report.Assurance.Progress
+		if progress == nil ||
+			!reflect.DeepEqual(progress.CandidateReviewAxes.Completed, want.completedAxes) ||
+			!reflect.DeepEqual(progress.CandidateReviewAxes.Pending, want.pendingAxes) ||
+			progress.SpecialistBoundaries == nil ||
+			!reflect.DeepEqual(progress.SpecialistBoundaries.Completed, want.completedBoundaries) ||
+			!reflect.DeepEqual(progress.SpecialistBoundaries.Pending, want.pendingBoundaries) {
+			t.Fatalf("%s process progress = %#v", want.name, progress)
+		}
+		entries := append(
+			compactProgressTextEntries(want.completedAxes, want.pendingAxes),
+			compactSpecialistProgressTextEntries(want.completedBoundaries, want.pendingBoundaries)...,
+		)
+		for _, entry := range entries {
+			if !strings.Contains(snapshot.Text, entry) {
+				t.Errorf("%s text output missing %q:\n%s", want.name, entry, snapshot.Text)
+			}
+		}
+	}
+}
+
 // TestAdvanceProcessHelper is a test-only process host. It exercises the public
 // command parser with a cancellable context while the harness below reproduces
 // Advance's real issue flock and production validator adapter.
@@ -131,6 +248,10 @@ func TestAdvanceProcessHelper(t *testing.T) {
 	}
 	repository := os.Getenv(advanceProcessRepositoryEnv)
 	signals := os.Getenv(advanceProcessSignalsEnv)
+	if os.Getenv(advanceProcessAssuranceEnv) != "" {
+		runProcessAssuranceProgressHelper(t, repository, signals)
+		return
+	}
 	ctx, cancel := commandContext([]string{"advance"})
 	defer cancel()
 	contender := os.Getenv(advanceProcessContenderEnv) != ""
@@ -165,6 +286,111 @@ func TestAdvanceProcessHelper(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+type processAssuranceSnapshot struct {
+	Name string          `json:"name"`
+	JSON json.RawMessage `json:"json"`
+	Text string          `json:"text"`
+}
+
+type processStagedReviewExecutor struct {
+	completeSpec atomic.Bool
+}
+
+func (executor *processStagedReviewExecutor) Review(
+	ctx context.Context,
+	request issuedelivery.ReviewRequest,
+) (issuedelivery.CandidateReview, error) {
+	review, err := (productionPathReviewExecutor{}).Review(ctx, request)
+	if request.Axis == deliveryevidence.ReviewSpec && !executor.completeSpec.Load() {
+		review.Acceptance = nil
+		review.Completed = false
+	}
+	return review, err
+}
+
+type processStagedSpecialistExecutor struct {
+	completeConfiguration atomic.Bool
+}
+
+func (executor *processStagedSpecialistExecutor) ReviewSpecialist(
+	ctx context.Context,
+	request issuedelivery.SpecialistReviewRequest,
+) (issuedelivery.SpecialistReview, error) {
+	review, err := (productionPathSpecialistExecutor{}).ReviewSpecialist(ctx, request)
+	if request.Boundary == issuedelivery.BoundaryRealConfiguration &&
+		!executor.completeConfiguration.Load() {
+		review.Completed = false
+	}
+	return review, err
+}
+
+func runProcessAssuranceProgressHelper(t *testing.T, repository, signals string) {
+	t.Helper()
+	reviews := &processStagedReviewExecutor{}
+	specialists := &processStagedSpecialistExecutor{}
+	module := newProcessLifecycleModuleWithExecutors(
+		t,
+		repository,
+		signals,
+		reviews,
+		productionPathHighRiskObserver{},
+		specialists,
+		false,
+	)
+	qualifyProcessLifecycleModule(t, module, repository)
+	snapshots := []processAssuranceSnapshot{
+		captureProcessAssuranceSnapshot(t, "no candidate", module, repository),
+	}
+	request := issuedelivery.Request{RepositoryPath: repository, IssueNumber: 44}
+	advance := func() {
+		t.Helper()
+		if _, err := module.Advance(context.Background(), request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advance()
+	snapshots = append(snapshots, captureProcessAssuranceSnapshot(t, "initial candidate", module, repository))
+	advance()
+	snapshots = append(snapshots, captureProcessAssuranceSnapshot(t, "partial candidate reviews", module, repository))
+	reviews.completeSpec.Store(true)
+	advance()
+	advance()
+	snapshots = append(snapshots, captureProcessAssuranceSnapshot(t, "partial specialist reviews", module, repository))
+	specialists.completeConfiguration.Store(true)
+	advance()
+	snapshots = append(snapshots, captureProcessAssuranceSnapshot(t, "completed assurance", module, repository))
+	if err := json.NewEncoder(os.Stdout).Encode(snapshots); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func captureProcessAssuranceSnapshot(
+	t *testing.T,
+	name string,
+	module *issuedelivery.Module,
+	repository string,
+) processAssuranceSnapshot {
+	t.Helper()
+	cmd := command{StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
+		return module, nil
+	}}
+	run := func(extra ...string) string {
+		t.Helper()
+		args := []string{"status", "--repository", repository, "--issue", "44"}
+		args = append(args, extra...)
+		var output bytes.Buffer
+		if err := cmd.run(context.Background(), args, &output); err != nil {
+			t.Fatal(err)
+		}
+		return output.String()
+	}
+	return processAssuranceSnapshot{
+		Name: name,
+		JSON: json.RawMessage(run()),
+		Text: run("--output", "text"),
 	}
 }
 
@@ -215,6 +441,26 @@ func (r *processValidationRunner) arm() {
 }
 
 func newProcessLifecycleModule(t *testing.T, repository, signals string) *issuedelivery.Module {
+	return newProcessLifecycleModuleWithExecutors(
+		t,
+		repository,
+		signals,
+		productionPathReviewExecutor{},
+		productionPathRiskObserver{},
+		productionPathSpecialistExecutor{},
+		true,
+	)
+}
+
+func newProcessLifecycleModuleWithExecutors(
+	t *testing.T,
+	repository string,
+	signals string,
+	review issuedelivery.ReviewExecutor,
+	risk issuedelivery.CandidateRiskObserver,
+	specialist issuedelivery.SpecialistReviewExecutor,
+	advanceToValidation bool,
+) *issuedelivery.Module {
 	t.Helper()
 	gitOutput := func(args ...string) string {
 		t.Helper()
@@ -264,9 +510,9 @@ func newProcessLifecycleModule(t *testing.T, repository, signals string) *issued
 		repository: repository, runner: observation, validation: longRunning, mu: &sync.Mutex{},
 	}
 	module, err := issuedelivery.New(issuedelivery.Config{
-		Git: git, GitHub: tracker, Review: productionPathReviewExecutor{},
-		Validation: validation, Risk: productionPathRiskObserver{},
-		Specialist: productionPathSpecialistExecutor{}, Boundary: boundary,
+		Git: git, GitHub: tracker, Review: review,
+		Validation: validation, Risk: risk,
+		Specialist: specialist, Boundary: boundary,
 		ValidationSession: productionValidationSessionExecutor{
 			repository: repository, runner: observation, validation: longRunning, boundary: boundary,
 		},
@@ -275,8 +521,10 @@ func newProcessLifecycleModule(t *testing.T, repository, signals string) *issued
 	if err != nil {
 		t.Fatal(err)
 	}
-	qualifyProcessLifecycleModule(t, module, repository)
-	advanceProcessLifecycleModuleToValidation(t, module, repository, longRunning)
+	if advanceToValidation {
+		qualifyProcessLifecycleModule(t, module, repository)
+		advanceProcessLifecycleModuleToValidation(t, module, repository, longRunning)
+	}
 	return module
 }
 
