@@ -381,7 +381,11 @@ Options:
 
 Watch emits one initial event and then only semantic changes. It polls only
 external-result and lock-contention pauses, performs observation-only reads,
-and never invokes Advance or persists delivery state. Timeout exits with code 2.
+and never invokes Advance or persists delivery state. A no-change timeout emits
+the terminal outcome "timeout-no-change" (JSONL field "terminal_outcome", text
+field "terminal") and retains the compatible exit code 2. An actionable change
+still exits 0; cancellation and observer failures retain their existing
+non-timeout error behavior, and process signals retain native signal termination.
 `
 
 const inputTemplateUsage = `Usage: packy-deliver input-template [options]

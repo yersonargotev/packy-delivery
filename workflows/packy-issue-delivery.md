@@ -272,7 +272,17 @@ private state path:
    `watch --interval ... --timeout ...`. Watch emits observation changes and
    stops at the next actionable pause; it never calls `Advance`, replays input,
    adopts external results, or writes delivery state. Invoke `advance` after
-   the observation changes so the engine can adopt the result.
+   the observation changes so the engine can adopt the result. If the bound
+   expires without an actionable change, watch emits a terminal
+   `packy.watch-event/v1` event with typed `terminal_outcome` equal to
+   `timeout-no-change`, preserving the last successful run, pause, next action,
+   relevant identity, and operation projection when available. That outcome
+   retains the existing exit code `2` for compatibility; actionable changes
+   continue to exit `0`. Context cancellation, process signal interruption,
+   transient observation errors, and permanent observer failures remain
+   distinct outcomes with their existing non-timeout error behavior.
+   The optional terminal field is additive to watch-event/v1, so readers that
+   ignore unknown fields remain compatible.
 6. Use compact JSON or text for routine operation. Request `--full-report` only
    when genuine judgment needs the complete evidence record or for an explicit
    audit.

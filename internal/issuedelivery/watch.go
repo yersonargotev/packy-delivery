@@ -23,11 +23,18 @@ type WatchRequest struct {
 	Timeout        time.Duration
 }
 
+type WatchTerminalOutcome string
+
+const (
+	WatchTerminalTimeoutNoChange WatchTerminalOutcome = "timeout-no-change"
+)
+
 type WatchEvent struct {
-	Sequence   int
-	ObservedAt time.Time
-	Outcome    Outcome
-	ErrorClass StatusErrorClass
+	Sequence        int
+	ObservedAt      time.Time
+	Outcome         Outcome
+	ErrorClass      StatusErrorClass
+	TerminalOutcome WatchTerminalOutcome
 }
 
 type WatchEmitter func(WatchEvent) error
@@ -102,31 +109,60 @@ func (m *Module) Watch(ctx context.Context, request WatchRequest, emit WatchEmit
 		}
 	}()
 
-	err := m.watchLoop(watchCtx, request, emit)
+	var progress watchProgress
+	err := m.watchLoop(watchCtx, request, emit, &progress)
 	cancel()
 	<-timeoutDone
-	if timedOut.Load() {
+	if timedOut.Load() &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		terminal := WatchEvent{
+			ObservedAt:      m.clock.Now(),
+			TerminalOutcome: WatchTerminalTimeoutNoChange,
+		}
+		if progress.lastSuccessful != nil {
+			terminal.Outcome = *progress.lastSuccessful
+		}
+		if err := emitWatchEvent(&progress, emit, terminal); err != nil {
+			return err
+		}
 		return &WatchTimeoutError{Timeout: request.Timeout}
 	}
 	return err
 }
 
-func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit WatchEmitter) error {
+type watchProgress struct {
+	sequence       int
+	lastEmitted    *WatchEvent
+	lastSuccessful *Outcome
+}
+
+func emitWatchEvent(progress *watchProgress, emit WatchEmitter, event WatchEvent) error {
+	progress.sequence++
+	event.Sequence = progress.sequence
+	if err := emit(event); err != nil {
+		return err
+	}
+	copy := event
+	progress.lastEmitted = &copy
+	return nil
+}
+
+func (m *Module) watchLoop(
+	ctx context.Context,
+	request WatchRequest,
+	emit WatchEmitter,
+	progress *watchProgress,
+) error {
 	statusRequest := StatusRequest{
 		RepositoryPath: request.RepositoryPath,
 		IssueNumber:    request.IssueNumber,
 	}
-	var (
-		sequence       int
-		lastEmitted    *WatchEvent
-		lastSuccessful *Outcome
-	)
 	for {
 		var (
 			outcome    Outcome
 			observeErr error
 		)
-		if lastSuccessful != nil && lastSuccessful.IssueLockContended {
+		if progress.lastSuccessful != nil && progress.lastSuccessful.IssueLockContended {
 			git, err := m.git.ObserveGit(ctx, request.RepositoryPath)
 			if err != nil {
 				observeErr = statusObserverError(ctx, StatusErrorGitRead, "observe Git", err)
@@ -147,7 +183,7 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 						observeErr = NewStatusError(class, false, observeErr)
 					}
 				} else if available {
-					outcome = *lastSuccessful
+					outcome = *progress.lastSuccessful
 					operation, err := m.store.loadOperation(git.CommonDir, request.IssueNumber)
 					if err != nil {
 						return statusObserverError(ctx, StatusErrorRunState, "load Advance operation", err)
@@ -165,7 +201,7 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 						Changed: true,
 					}
 				} else {
-					outcome = *lastSuccessful
+					outcome = *progress.lastSuccessful
 					operation, err := m.store.loadOperation(git.CommonDir, request.IssueNumber)
 					if err != nil {
 						observeErr = statusObserverError(ctx, StatusErrorRunState, "load Advance operation", err)
@@ -188,21 +224,16 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 				class = StatusErrorRunState
 			}
 			eventOutcome := Outcome{}
-			if lastSuccessful != nil {
-				eventOutcome = *lastSuccessful
+			if progress.lastSuccessful != nil {
+				eventOutcome = *progress.lastSuccessful
 			}
 			event := WatchEvent{
-				Sequence: sequence + 1, ObservedAt: observedAt,
-				Outcome: eventOutcome, ErrorClass: class,
+				ObservedAt: observedAt, Outcome: eventOutcome, ErrorClass: class,
 			}
-			if lastEmitted == nil || !sameWatchEvent(*lastEmitted, event) {
-				sequence++
-				event.Sequence = sequence
-				if err := emit(event); err != nil {
+			if progress.lastEmitted == nil || !sameWatchEvent(*progress.lastEmitted, event) {
+				if err := emitWatchEvent(progress, emit, event); err != nil {
 					return err
 				}
-				copy := event
-				lastEmitted = &copy
 			}
 			if !typed || !transient {
 				return fmt.Errorf("watch observation failed (%s): %w", class, observeErr)
@@ -213,8 +244,8 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 			continue
 		}
 
-		lockAvailable := lastSuccessful != nil &&
-			lastSuccessful.IssueLockContended &&
+		lockAvailable := progress.lastSuccessful != nil &&
+			progress.lastSuccessful.IssueLockContended &&
 			!outcome.IssueLockContended
 		externalChanged := outcome.PauseCause == PauseExternalResult &&
 			outcome.StatusObservation != nil &&
@@ -226,18 +257,14 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 			outcome.NextAction = ActionRetryAdvance
 		}
 		event := WatchEvent{
-			Sequence: sequence + 1, ObservedAt: observedAt, Outcome: outcome,
+			ObservedAt: observedAt, Outcome: outcome,
 		}
-		recovered := lastEmitted != nil && lastEmitted.ErrorClass != ""
-		meaningfulChange := lastEmitted == nil || !sameWatchEvent(*lastEmitted, event)
+		recovered := progress.lastEmitted != nil && progress.lastEmitted.ErrorClass != ""
+		meaningfulChange := progress.lastEmitted == nil || !sameWatchEvent(*progress.lastEmitted, event)
 		if meaningfulChange {
-			sequence++
-			event.Sequence = sequence
-			if err := emit(event); err != nil {
+			if err := emitWatchEvent(progress, emit, event); err != nil {
 				return err
 			}
-			copy := event
-			lastEmitted = &copy
 		}
 		if lockAvailable || externalChanged {
 			return nil
@@ -245,12 +272,12 @@ func (m *Module) watchLoop(ctx context.Context, request WatchRequest, emit Watch
 		if !watchPollable(outcome) {
 			return nil
 		}
-		if lastSuccessful != nil && meaningfulChange && !recovered &&
-			!lastSuccessful.IssueLockContended {
+		if progress.lastSuccessful != nil && meaningfulChange && !recovered &&
+			!progress.lastSuccessful.IssueLockContended {
 			return nil
 		}
 		copy := outcome
-		lastSuccessful = &copy
+		progress.lastSuccessful = &copy
 		if err := m.waiter.Wait(ctx, request.Interval); err != nil {
 			return err
 		}
@@ -282,6 +309,7 @@ func watchPollable(outcome Outcome) bool {
 
 func sameWatchEvent(left, right WatchEvent) bool {
 	if left.ErrorClass != right.ErrorClass ||
+		left.TerminalOutcome != right.TerminalOutcome ||
 		left.Outcome.RunID != right.Outcome.RunID ||
 		left.Outcome.State != right.Outcome.State ||
 		left.Outcome.PauseCause != right.Outcome.PauseCause ||
