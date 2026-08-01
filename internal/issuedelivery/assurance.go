@@ -66,6 +66,17 @@ func (m *Module) advanceAssurance(
 			"candidate-development",
 		)
 	}
+	candidateDevelopmentObserved := candidate != nil
+	if !candidateDevelopmentObserved && record.Evidence != nil {
+		candidateDevelopmentObserved = git.HeadSHA != record.Evidence.StartingBaseSHA
+	}
+	if candidateDevelopmentObserved && !deliveryBranch(git.Branch, tracker.Issue.Number) {
+		return m.persistAssuranceTransition(
+			store, record, StateBlocked,
+			localReadinessBlockReason(tracker.Issue.Number),
+			"local-readiness",
+		)
+	}
 	if candidate == nil || candidate.CommitSHA != git.HeadSHA || candidate.TreeSHA != git.TreeSHA {
 		if candidate != nil && hasAcceptedFindings(candidate.RepairDecision) {
 			// The changed tree is the declared repair batch.
