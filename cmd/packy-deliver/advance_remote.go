@@ -142,17 +142,34 @@ type commitStatus struct {
 }
 
 type workflowRun struct {
-	ID      int64  `json:"id"`
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	HeadSHA string `json:"head_sha"`
-	HTMLURL string `json:"html_url"`
-	Actor   struct {
+	ID           int64                 `json:"id"`
+	Name         string                `json:"name"`
+	Path         string                `json:"path"`
+	Event        string                `json:"event"`
+	HeadSHA      string                `json:"head_sha"`
+	HTMLURL      string                `json:"html_url"`
+	Repository   workflowRunRepository `json:"repository"`
+	PullRequests []struct {
+		Number int                       `json:"number"`
+		Head   workflowRunPullRequestRef `json:"head"`
+		Base   workflowRunPullRequestRef `json:"base"`
+	} `json:"pull_requests"`
+	Actor struct {
 		Login   string `json:"login"`
 		ID      int64  `json:"id"`
 		Type    string `json:"type"`
 		HTMLURL string `json:"html_url"`
 	} `json:"actor"`
+}
+
+type workflowRunRepository struct {
+	NodeID   string `json:"node_id"`
+	FullName string `json:"full_name"`
+}
+
+type workflowRunPullRequestRef struct {
+	SHA        string                `json:"sha"`
+	Repository workflowRunRepository `json:"repo"`
 }
 
 type remoteRefResponse struct {
@@ -166,7 +183,7 @@ type remoteRefResponse struct {
 const (
 	checkRunsProjection    = `{check_runs:[.check_runs[]|{name,head_sha,status,conclusion,details_url,app:{id:.app.id,slug:.app.slug}}]}`
 	statusesProjection     = `[.[]|{id,context,state,target_url,creator:{login:.creator.login,id:.creator.id,type:.creator.type,html_url:.creator.html_url}}]`
-	workflowRunProjection  = `{id,name,path,head_sha,html_url,actor:{login:.actor.login,id:.actor.id,type:.actor.type,html_url:.actor.html_url}}`
+	workflowRunProjection  = `{id,name,path,event,head_sha,html_url,repository:{node_id:.repository.node_id,full_name:.repository.full_name},pull_requests:[.pull_requests[]|{number,head:{sha:.head.sha,repo:{node_id:.head.repo.node_id,full_name:.head.repo.full_name}},base:{sha:.base.sha,repo:{node_id:.base.repo.node_id,full_name:.base.repo.full_name}}}],actor:{login:.actor.login,id:.actor.id,type:.actor.type,html_url:.actor.html_url}}`
 	pullRequestsProjection = `[.[]|{number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository:{id:.headRepository.id},closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt,mergeCommit:(if .mergeCommit==null then null else {oid:.mergeCommit.oid} end)}]`
 	pullRequestProjection  = `{number,state,baseRefOid,headRefOid,closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt}`
 	remoteRefsProjection   = `[.[]|{ref,object:{type:.object.type,sha:.object.sha}}]`
@@ -257,7 +274,14 @@ func (gateway productionNonLocalGateway) observeNonLocal(
 		return observation.PullRequests[i].Number < observation.PullRequests[j].Number
 	})
 	if len(observation.PullRequests) > 0 {
-		checks, err := gateway.observeChecksWithRefresh(ctx, request, baseHead, refreshTracking)
+		definitionBase := baseHead
+		pullRequest := exactDeliveryPullRequest(request, observation.PullRequests)
+		if pullRequest != nil {
+			definitionBase = pullRequest.BaseSHA
+		}
+		checks, err := gateway.observeChecksWithRefresh(
+			ctx, request, definitionBase, pullRequest, refreshTracking,
+		)
 		if err != nil {
 			return issuedelivery.NonLocalObservation{}, err
 		}
@@ -433,13 +457,14 @@ func (gateway productionNonLocalGateway) observeChecks(
 	request issuedelivery.NonLocalObserveRequest,
 	baseSHA string,
 ) ([]issuedelivery.CICheckObservation, error) {
-	return gateway.observeChecksWithRefresh(ctx, request, baseSHA, true)
+	return gateway.observeChecksWithRefresh(ctx, request, baseSHA, nil, true)
 }
 
 func (gateway productionNonLocalGateway) observeChecksWithRefresh(
 	ctx context.Context,
 	request issuedelivery.NonLocalObserveRequest,
 	baseSHA string,
+	pullRequest *issuedelivery.RemotePullRequestObservation,
 	allowDefinitionRefRefresh bool,
 ) ([]issuedelivery.CICheckObservation, error) {
 	repo := repositoryName(request.Repository)
@@ -478,7 +503,7 @@ func (gateway productionNonLocalGateway) observeChecksWithRefresh(
 		}
 		if err := validateObservedWorkflow(
 			request.Repository, request.HeadSHA, workflow, run.Name, run.HeadSHA,
-			workflowDefinitionSourceCheckRun,
+			workflowDefinitionSourceCheckRun, nil,
 		); err != nil {
 			return nil, err
 		}
@@ -517,7 +542,7 @@ func (gateway productionNonLocalGateway) observeChecksWithRefresh(
 		}
 		if err := validateObservedWorkflow(
 			request.Repository, baseSHA, workflow, status.Context, workflow.HeadSHA,
-			workflowDefinitionSourceCommitStatus,
+			workflowDefinitionSourceCommitStatus, pullRequest,
 		); err != nil {
 			return nil, err
 		}
@@ -819,23 +844,83 @@ func validateWorkflowDefinitionBlob(
 
 func validateObservedWorkflow(
 	repository deliveryevidence.RepositoryIdentity,
-	ref string,
+	definitionRef string,
 	workflow workflowRun,
 	identity string,
 	observedHead string,
 	source issuedelivery.WorkflowDefinitionObservationSource,
+	pullRequest *issuedelivery.RemotePullRequestObservation,
 ) error {
-	if trustedCheckIdentity(identity, workflow.Name, workflow.Path) &&
-		validSHA(observedHead) && observedHead == ref &&
-		validSHA(workflow.HeadSHA) && workflow.HeadSHA == ref {
+	if source == workflowDefinitionSourceCheckRun &&
+		trustedCheckIdentity(identity, workflow.Name, workflow.Path) &&
+		validSHA(observedHead) && observedHead == definitionRef &&
+		validSHA(workflow.HeadSHA) && workflow.HeadSHA == definitionRef {
+		return nil
+	}
+	if trustedPullRequestTargetGovernance(
+		repository, definitionRef, workflow, identity, observedHead, source, pullRequest,
+	) {
 		return nil
 	}
 	return newWorkflowDefinitionDiagnostic(
-		repositoryName(repository), ref, workflow.Path, source, 0,
+		repositoryName(repository), definitionRef, workflow.Path, source, 0,
 		workflowDefinitionFailureIncompatible,
 		"observed workflow or check-run identity is incompatible with the required check",
 		nil,
 	)
+}
+
+func exactDeliveryPullRequest(
+	request issuedelivery.NonLocalObserveRequest,
+	pullRequests []issuedelivery.RemotePullRequestObservation,
+) *issuedelivery.RemotePullRequestObservation {
+	var exact *issuedelivery.RemotePullRequestObservation
+	for index := range pullRequests {
+		pullRequest := &pullRequests[index]
+		if (pullRequest.State != "OPEN" && pullRequest.State != "MERGED") ||
+			pullRequest.HeadBranch != request.Branch || pullRequest.BaseRef != request.BaseRef ||
+			pullRequest.HeadSHA != request.HeadSHA || !validSHA(pullRequest.BaseSHA) ||
+			pullRequest.ClosingIssue != request.Issue.Number ||
+			pullRequest.HeadRepositoryNodeID != request.Repository.NodeID {
+			continue
+		}
+		if exact != nil {
+			return nil
+		}
+		exact = pullRequest
+	}
+	return exact
+}
+
+func trustedPullRequestTargetGovernance(
+	repository deliveryevidence.RepositoryIdentity,
+	definitionRef string,
+	workflow workflowRun,
+	identity string,
+	observedHead string,
+	source issuedelivery.WorkflowDefinitionObservationSource,
+	pullRequest *issuedelivery.RemotePullRequestObservation,
+) bool {
+	if source != workflowDefinitionSourceCommitStatus ||
+		identity != "Governance / Validate authorization" ||
+		workflow.Name != "Governance" || workflow.Path != ".github/workflows/governance.yml" ||
+		workflow.Event != "pull_request_target" || pullRequest == nil ||
+		workflow.Repository.NodeID != repository.NodeID ||
+		workflow.Repository.FullName != repositoryName(repository) ||
+		len(workflow.PullRequests) != 1 ||
+		!validSHA(observedHead) || observedHead != pullRequest.HeadSHA ||
+		!validSHA(workflow.HeadSHA) || workflow.HeadSHA != pullRequest.HeadSHA {
+		return false
+	}
+	association := workflow.PullRequests[0]
+	return association.Number == pullRequest.Number &&
+		association.Head.SHA == pullRequest.HeadSHA &&
+		association.Base.SHA == pullRequest.BaseSHA &&
+		definitionRef == pullRequest.BaseSHA &&
+		association.Head.Repository.NodeID == repository.NodeID &&
+		association.Head.Repository.FullName == repositoryName(repository) &&
+		association.Base.Repository.NodeID == repository.NodeID &&
+		association.Base.Repository.FullName == repositoryName(repository)
 }
 
 func workflowDefinitionCommandFailure(

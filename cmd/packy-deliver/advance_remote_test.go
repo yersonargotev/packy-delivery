@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -98,6 +100,149 @@ func TestProductionNonLocalObservationRefreshesAndBindsOriginMain(t *testing.T) 
 	}) {
 		t.Fatalf("pull-request observation command = %#v", got)
 	}
+}
+
+func TestProductionNonLocalObservationAcceptsCandidateHeadedPullRequestTargetGovernance(t *testing.T) {
+	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
+	runner := candidateHeadedGovernanceRunner(head, base, definition, nil)
+	gateway := productionNonLocalGateway{runner: runner}
+
+	observation, err := gateway.ObserveNonLocal(context.Background(), issuedelivery.NonLocalObserveRequest{
+		Repository: packyRemoteRepository(),
+		Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+		Branch:     "chore/issue-361-remote-adapter", BaseRef: "main", HeadSHA: head,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observation.Checks) != 1 ||
+		observation.Checks[0].Identity != "Governance / Validate authorization" ||
+		observation.Checks[0].HeadSHA != head ||
+		observation.Checks[0].Workflow.DefinitionRef != base ||
+		observation.Checks[0].Workflow.DefinitionSHA != definition {
+		t.Fatalf("Governance observation = %#v", observation.Checks)
+	}
+}
+
+func TestProductionNonLocalObservationReauthenticatesPullRequestTargetGovernanceAfterMerge(t *testing.T) {
+	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
+	mergedMain := strings.Repeat("f", 40)
+	runner := candidateHeadedGovernanceRunner(head, base, definition, nil)
+	runner.outputs[3] = remoteRefFixture("main", mergedMain)
+	runner.outputs[4] = []byte(mergedMain + "\n")
+	runner.outputs[5] = bytes.Replace(runner.outputs[5], []byte(`"state":"OPEN"`), []byte(`"state":"MERGED"`), 1)
+
+	observation, err := (productionNonLocalGateway{runner: runner}).ObserveNonLocal(
+		context.Background(), candidateHeadedGovernanceRequest(head),
+	)
+	if err != nil || len(observation.Checks) != 1 ||
+		observation.Checks[0].Workflow.DefinitionRef != base {
+		t.Fatalf("post-merge Governance observation = %#v, err=%v", observation.Checks, err)
+	}
+}
+
+func TestProductionNonLocalObservationRejectsIncompatiblePullRequestTargetGovernance(t *testing.T) {
+	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
+	foreignHead, foreignBase := strings.Repeat("c", 40), strings.Repeat("e", 40)
+	tests := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{name: "wrong event", mutate: func(raw string) string {
+			return strings.Replace(raw, `"event":"pull_request_target"`, `"event":"push"`, 1)
+		}},
+		{name: "unrelated pull request", mutate: func(raw string) string {
+			return strings.Replace(raw, `"pull_requests":[{"number":17`, `"pull_requests":[{"number":18`, 1)
+		}},
+		{name: "wrong candidate", mutate: func(raw string) string {
+			return strings.Replace(raw, `"head":{"sha":"`+head, `"head":{"sha":"`+foreignHead, 1)
+		}},
+		{name: "wrong base", mutate: func(raw string) string {
+			return strings.Replace(raw, `"base":{"sha":"`+base, `"base":{"sha":"`+foreignBase, 1)
+		}},
+		{name: "foreign workflow repository", mutate: func(raw string) string {
+			return strings.Replace(raw, `"repository":{"node_id":"R1","full_name":"yersonargotev/packy"}`, `"repository":{"node_id":"R2","full_name":"other/packy"}`, 1)
+		}},
+		{name: "foreign pull request repository", mutate: func(raw string) string {
+			return strings.Replace(raw, `"repo":{"node_id":"R1","full_name":"yersonargotev/packy"}`, `"repo":{"node_id":"R2","full_name":"other/packy"}`, 1)
+		}},
+		{name: "missing pull request association", mutate: func(raw string) string {
+			start := strings.Index(raw, `"pull_requests":[`)
+			end := strings.Index(raw[start:], `],"actor"`)
+			return raw[:start] + `"pull_requests":[]` + raw[start+end+1:]
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := candidateHeadedGovernanceRunner(head, base, definition, test.mutate)
+			_, err := (productionNonLocalGateway{runner: runner}).ObserveNonLocal(
+				context.Background(), candidateHeadedGovernanceRequest(head),
+			)
+			var diagnostic *workflowDefinitionDiagnostic
+			if !errors.As(err, &diagnostic) ||
+				diagnostic.FinalFailureClass != workflowDefinitionFailureIncompatible {
+				t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+			}
+			if len(runner.calls) != 9 {
+				t.Fatalf("incompatible workflow triggered definition lookup: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestProductionNonLocalObservationDistinguishesUnavailableGovernanceDefinition(t *testing.T) {
+	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
+	runner := candidateHeadedGovernanceRunner(head, base, definition, nil)
+	runner.outputs = append(runner.outputs, nil)
+	runner.errs = make([]error, len(runner.outputs))
+	runner.errs[9] = errors.New("fatal: path '.github/workflows/governance.yml' does not exist in '" + base + "'")
+
+	_, err := (productionNonLocalGateway{runner: runner}).ObserveNonLocal(
+		context.Background(), candidateHeadedGovernanceRequest(head),
+	)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) ||
+		diagnostic.FinalFailureClass != workflowDefinitionFailurePathAbsent {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+	}
+	if len(runner.calls) != 11 {
+		t.Fatalf("compatible workflow did not reach exact definition lookup: %#v", runner.calls)
+	}
+}
+
+func candidateHeadedGovernanceRequest(head string) issuedelivery.NonLocalObserveRequest {
+	return issuedelivery.NonLocalObserveRequest{
+		Repository: packyRemoteRepository(),
+		Issue:      deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+		Branch:     "chore/issue-361-remote-adapter", BaseRef: "main", HeadSHA: head,
+	}
+}
+
+func candidateHeadedGovernanceRunner(
+	head, base, definition string,
+	mutate func(string) string,
+) *fakeRemoteRunner {
+	workflow := candidateHeadedGovernanceWorkflow(42, head, base)
+	if mutate != nil {
+		workflow = mutate(workflow)
+	}
+	return &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
+		nil,
+		remoteRefFixture("chore/issue-361-remote-adapter", head),
+		remoteRefFixture("main", base),
+		[]byte(base + "\n"),
+		[]byte(`[{"number":17,"url":"https://github.com/yersonargotev/packy/pull/17","state":"OPEN","baseRefName":"main","baseRefOid":"` + base + `","headRefName":"chore/issue-361-remote-adapter","headRefOid":"` + head + `","headRepository":{"id":"R1"},"closingIssuesReferences":[{"number":361,"id":"I361"}],"mergedAt":"","mergeCommit":null}]`),
+		[]byte(`{"check_runs":[]}`),
+		[]byte(`[{"id":7,"context":"Governance / Validate authorization","state":"success","target_url":"https://github.com/yersonargotev/packy/actions/runs/42","creator":{"login":"github-actions[bot]","id":41898282,"type":"Bot","html_url":"https://github.com/apps/github-actions"}}]`),
+		[]byte(workflow),
+		[]byte(definition + "\n"),
+	}}
+}
+
+func candidateHeadedGovernanceWorkflow(runID int64, head, base string) string {
+	run := strconv.FormatInt(runID, 10)
+	return `{"id":` + run + `,"name":"Governance","path":".github/workflows/governance.yml","event":"pull_request_target","head_sha":"` + head + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/` + run + `","repository":{"node_id":"R1","full_name":"yersonargotev/packy"},"pull_requests":[{"number":17,"head":{"sha":"` + head + `","repo":{"node_id":"R1","full_name":"yersonargotev/packy"}},"base":{"sha":"` + base + `","repo":{"node_id":"R1","full_name":"yersonargotev/packy"}}}],"actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`
 }
 
 func TestProductionStatusNonLocalObservationUsesOnlyReadCommands(t *testing.T) {
@@ -527,38 +672,24 @@ func TestWorkflowDefinitionSHADoesNotTreatAuthorizationFailureAsRefSkew(t *testi
 	}
 }
 
-func TestWorkflowDefinitionSHARecoversGovernanceBaseObservedAfterMerge(t *testing.T) {
-	base, blob := strings.Repeat("a", 40), strings.Repeat("b", 40)
-	runner := &fakeRemoteRunner{
-		outputs: [][]byte{
-			[]byte(`{"check_runs":[]}`),
-			[]byte(`[{"id":7,"context":"Governance / Validate authorization","state":"success","target_url":"https://github.com/yersonargotev/packy/actions/runs/42","creator":{"login":"github-actions[bot]","id":41898282,"type":"Bot","html_url":"https://github.com/apps/github-actions"}}]`),
-			[]byte(`{"id":42,"name":"Governance","path":".github/workflows/governance.yml","head_sha":"` + base + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/42","actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`),
-			nil,
-			nil,
-			nil,
-			[]byte(blob + "\n"),
-		},
-		errs: []error{
-			nil, nil, nil,
-			errors.New("fatal: invalid object name '" + base + "'."),
-			errors.New("fatal: Not a valid object name " + base + "^{commit}"),
-		},
-	}
+func TestWorkflowDefinitionSHARejectsOperatorTriggeredGovernanceBase(t *testing.T) {
+	base := strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"check_runs":[]}`),
+		[]byte(`[{"id":7,"context":"Governance / Validate authorization","state":"success","target_url":"https://github.com/yersonargotev/packy/actions/runs/42","creator":{"login":"github-actions[bot]","id":41898282,"type":"Bot","html_url":"https://github.com/apps/github-actions"}}]`),
+		[]byte(`{"id":42,"name":"Governance","path":".github/workflows/governance.yml","event":"issue_comment","head_sha":"` + base + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/42","actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`),
+	}}
 	gateway := productionNonLocalGateway{runner: runner}
-	checks, err := gateway.observeChecks(context.Background(), issuedelivery.NonLocalObserveRequest{
+	_, err := gateway.observeChecks(context.Background(), issuedelivery.NonLocalObserveRequest{
 		Repository: packyRemoteRepository(), HeadSHA: strings.Repeat("c", 40),
 	}, base)
-	if err != nil || len(checks) != 1 {
-		t.Fatalf("checks = %#v, err=%v", checks, err)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) ||
+		diagnostic.FinalFailureClass != workflowDefinitionFailureIncompatible {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
 	}
-	if checks[0].Identity != "Governance / Validate authorization" ||
-		checks[0].Workflow.DefinitionRef != base || checks[0].Workflow.DefinitionSHA != blob {
-		t.Fatalf("governance workflow evidence = %#v", checks[0].Workflow)
-	}
-	if len(runner.calls) != 7 || !reflect.DeepEqual(runner.calls[3], runner.calls[6]) ||
-		!reflect.DeepEqual(runner.calls[5].args, []string{"fetch", "--quiet", "--no-tags", "origin", base}) {
-		t.Fatalf("governance recovery commands = %#v", runner.calls)
+	if len(runner.calls) != 3 {
+		t.Fatalf("operator-triggered Governance resolved a definition: %#v", runner.calls)
 	}
 }
 
