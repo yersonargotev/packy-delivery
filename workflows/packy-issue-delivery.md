@@ -441,6 +441,38 @@ axis confirmation.
 Before the first push, bounded repairs may be incorporated into coherent local
 commits. Once pushed, never rewrite history.
 
+### Immutable evidence derivation contract
+
+ADR 0003 governs any future retention of evidence from a parent Delivery
+Candidate by a distinct derived candidate. The typed assessment binds the exact
+run schema, Delivery Authority, parent and derived candidates, commits, trees,
+review generations, canonical acceptance-set digests and obligation counts,
+acceptance obligations, risk profiles, review axes, and sensitive boundaries.
+Equal trees never establish reuse by themselves.
+
+Only an authorized human or an immutable registered policy may author the
+assessment. Retention additionally requires one completed, accepted,
+independent confirmation bound to the assessment digest and exact candidate
+pair. A trusted Delivery Authority resolver admits both principals and their
+independence; caller-authored identity strings or policy aliases do not.
+Self-confirmation, stale or duplicate identity, partial obligation
+coverage, rejection, and ambiguity fail closed.
+
+A complete non-behavioral delta may identify explicitly unaffected evidence as
+retainable and requires a Standards delta review. Authority, behavior,
+contract, scope, architecture, security, acceptance meaning, profile, or
+required-review changes force the corresponding complete Standards, Spec, and
+profile-required specialist evidence. Boundary changes force the exact
+specialist and boundary proof. Validator, command, sandbox, instrumentation,
+expiry, workspace, failed-execution, or ambiguous-completion changes force
+fresh validation. Incomplete or ambiguous impact forces the complete evidence
+set for the resulting profile.
+
+These standalone contracts do not yet change `Advance`, persist derivation
+receipts, or enable evidence reuse. Until the follow-up review and validation
+admission tickets are implemented, every derived candidate follows the existing
+fresh-review and fresh-validation path.
+
 ## Exact final validation
 
 After the final candidate is stable and its required reviews are satisfied,
@@ -452,14 +484,29 @@ authority through one immutable candidate-bound validation session:
 The session runs under the strongest instrumentation required by the candidate.
 Compatible sensitive-boundary proofs and the exhaustive receipt remain distinct
 artifacts, but derive from that one execution. Reuse is permitted only for the
-exact run, candidate, commit, tree, validator digest, sandbox roots, and
-instrumentation set; any mismatch, expiry, failure, dirty workspace, or
-ambiguous crash state invalidates reuse and requires a fresh execution.
+canonical registered session and the exact obligation it originally proves.
+Its compatibility tuple binds the accepted derivation assessment, parent and
+derived candidates, the one admitted independent confirmation, commits and
+trees, validator identity and digest, required command, matching source and
+required expiry, sandbox roots, instrumentation, covered boundaries, clean
+workspace state, successful completion, and one unambiguous completion.
+Arbitrary logs, reviewer command output, and unregistered manual executions are
+never canonical receipts. The evaluator must resolve the exact session and
+completion through the trusted canonical validation-session registry and match
+the complete registered artifact; a claimed kind or schema string is not
+registration. Any mismatch requires a fresh execution.
+
+The current lifecycle admits reuse only for its already-supported exact
+candidate session. Cross-candidate adoption remains disabled until it can
+persist the canonical source, assessment, confirmation, compatibility, and
+derived-receipt identities required by ADR 0003.
 
 Also retain the acceptance evidence and `git diff --check` result required by
-the matrix. Bind every derived artifact to the exact commit and tree. A later
-repository change invalidates it and returns the run to candidate development;
-do not reuse, relabel, or patch the receipt.
+the matrix. Bind every artifact to the exact commit and tree. A later repository
+change returns the run to candidate development. The existing path invalidates
+the receipt; future retention may occur only through ADR 0003 and must create a
+new linked derivation receipt rather than reuse, relabel, or patch the parent
+receipt.
 
 ## Delivery, CI, merge, and cleanup
 
@@ -506,6 +553,12 @@ projection may bootstrap, while a stale, conflicting, or incomplete persisted
 projection fails closed. A green validation receipt never supplies semantic
 acceptance evidence.
 
+When derivation persistence is implemented, replay may adopt only one exact
+canonical derived receipt linked to its parent receipt, impact assessment,
+independent confirmation, and compatibility decision. A stale identity,
+conflicting receipt, partial assessment, or ambiguous crash state blocks or
+falls back to fresh evidence; recovery never reconstructs authority from logs.
+
 For low-risk delivery, the operating objective is approximately 25 minutes from
 qualification to PR readiness and 25–35 minutes end-to-end when CI completes
 within 10 minutes. This is an observable performance objective, not a
@@ -517,7 +570,10 @@ objectives as telemetry derived from canonical persisted facts.
 
 New runs always use evidence schema v2. Schema v1 is readable only under its
 original workflow semantics. Never implicitly convert, resume, or enrich v1
-evidence with v2 behavior.
+evidence with v2 behavior. Schema v1 cannot admit impact assessments,
+confirmations, validation compatibility, or derived receipts. Existing v2 runs
+remain readable; absence of the future additive derivation fields means no
+derivation authority and never synthesizes retained evidence.
 
 Historical sequencing commands are absent from the normal CLI surface. They
 are reachable only as:
