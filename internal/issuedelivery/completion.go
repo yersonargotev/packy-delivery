@@ -38,7 +38,9 @@ func (m *Module) resumeMergedBeforeAuthority(
 		if record.NonLocal.Merge != nil || !strings.EqualFold(tracker.State, "OPEN") {
 			outcome, persistErr := m.persistAssuranceTransition(
 				store, record, StateWaiting,
-				"post-merge observation failed; retry verification without rollback",
+				nonLocalObservationReason(
+					"post-merge observation failed; retry verification without rollback", err,
+				),
 				"post-merge-observation",
 			)
 			return outcome, true, persistErr

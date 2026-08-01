@@ -26,6 +26,20 @@ type fakeNonLocalGateway struct {
 	remoteDeleteErr   error
 }
 
+type nonLocalDiagnosticTestError struct{}
+
+func (nonLocalDiagnosticTestError) Error() string { return "unbounded test detail" }
+func (nonLocalDiagnosticTestError) ObservationDiagnostic() string {
+	return "bounded diagnostic detail"
+}
+
+func TestNonLocalObservationReasonUsesBoundedDiagnostics(t *testing.T) {
+	reason := nonLocalObservationReason("retry observation", nonLocalDiagnosticTestError{})
+	if reason != "retry observation: bounded diagnostic detail" || strings.Contains(reason, "unbounded") {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
 func (f *fakeNonLocalGateway) ObserveNonLocal(
 	_ context.Context,
 	_ NonLocalObserveRequest,
@@ -537,6 +551,21 @@ func TestAdvanceRetriesTransientRemoteFailuresWithoutDuplicatingEffects(t *testi
 	mustAdvance(t, module, request)
 	if gateway.pushCalls != 2 || gateway.createCalls != 1 {
 		t.Fatalf("recovered gateway=%#v", gateway)
+	}
+}
+
+func TestAdvancePersistsBoundedNonLocalObservationDiagnostics(t *testing.T) {
+	module, _, gateway, request, ready := nonLocalFixture(t)
+	authorization := exactNonLocalAuthorization(ready)
+	request.NonLocal = &authorization
+	mustAdvance(t, module, request)
+
+	gateway.observeErr = nonLocalDiagnosticTestError{}
+	waiting := mustAdvance(t, module, request)
+	if waiting.State != StateWaiting ||
+		!strings.Contains(waiting.Reason, "bounded diagnostic detail") ||
+		strings.Contains(waiting.Reason, "unbounded test detail") {
+		t.Fatalf("observation diagnostic was not safely persisted: %#v", waiting)
 	}
 }
 

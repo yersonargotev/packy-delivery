@@ -286,6 +286,272 @@ func TestProductionNonLocalChecksProjectGitHubResponsesBeforeStrictDecode(t *tes
 	}
 }
 
+func TestWorkflowDefinitionSHARefreshesExactRefOnce(t *testing.T) {
+	ref, blob := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	path := ".github/workflows/ci.yml"
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil, nil, nil, []byte(blob + "\n")},
+		errs: []error{
+			errors.New("fatal: invalid object name '" + ref + "'."),
+			errors.New("fatal: Not a valid object name " + ref + "^{commit}"),
+		},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+
+	got, err := gateway.definitionSHAForObservation(
+		context.Background(), "yersonargotev/packy", ref, path,
+		workflowDefinitionSourceCheckRun, true,
+	)
+	if err != nil || got != blob {
+		t.Fatalf("definition SHA = %q, err=%v; want %q", got, err, blob)
+	}
+	want := []remoteRunnerCall{
+		{name: "git", args: []string{"rev-parse", ref + ":" + path}},
+		{name: "git", args: []string{"cat-file", "-e", ref + "^{commit}"}},
+		{name: "git", args: []string{"fetch", "--quiet", "--no-tags", "origin", ref}},
+		{name: "git", args: []string{"rev-parse", ref + ":" + path}},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("workflow-definition recovery commands differ\n got: %#v\nwant: %#v", runner.calls, want)
+	}
+}
+
+func TestWorkflowDefinitionSHAReportsPersistentAbsenceWithoutSecondRefresh(t *testing.T) {
+	ref := strings.Repeat("a", 40)
+	path := ".github/workflows/governance.yml"
+	missing := errors.New("fatal: invalid object name '" + ref + "'.")
+	missingProbe := errors.New("fatal: Not a valid object name " + ref + "^{commit}")
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil, nil, nil, nil, nil},
+		errs:    []error{missing, missingProbe, nil, missing, missingProbe},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+
+	_, err := gateway.definitionSHAForObservation(
+		context.Background(), "yersonargotev/packy", ref, path,
+		workflowDefinitionSourceCommitStatus, true,
+	)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.RetryCount != 1 ||
+		diagnostic.FinalFailureClass != workflowDefinitionFailurePersistent {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+	}
+	for _, expected := range []string{
+		`command purpose="resolve exact workflow definition"`,
+		`repository="yersonargotev/packy"`,
+		`ref="` + ref + `"`,
+		`workflow path="` + path + `"`,
+		`observation source="commit-status"`,
+		`retry count=1`,
+		`final failure class="persistent-ref-absence"`,
+	} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Fatalf("diagnostic %q missing from %v", expected, err)
+		}
+	}
+	if len(runner.calls) != 5 || runner.calls[2].name != "git" ||
+		!reflect.DeepEqual(runner.calls[2].args, []string{"fetch", "--quiet", "--no-tags", "origin", ref}) {
+		t.Fatalf("unexpected bounded recovery commands: %#v", runner.calls)
+	}
+	if !reflect.DeepEqual(runner.calls[0], runner.calls[3]) {
+		t.Fatalf("retry changed the exact lookup: %#v", runner.calls)
+	}
+}
+
+func TestStatusWorkflowDefinitionObservationDoesNotRefreshAbsentRef(t *testing.T) {
+	ref := strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil, nil},
+		errs: []error{
+			errors.New("fatal: invalid object name '" + ref + "'."),
+			errors.New("fatal: Not a valid object name " + ref + "^{commit}"),
+		},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+
+	_, err := gateway.definitionSHAForObservation(
+		context.Background(), "yersonargotev/packy", ref, ".github/workflows/ci.yml",
+		workflowDefinitionSourceCheckRun, false,
+	)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != workflowDefinitionFailureRefAbsent ||
+		diagnostic.RetryCount != 0 || len(runner.calls) != 2 {
+		t.Fatalf("status ref observation refreshed or misclassified absence: diagnostic=%#v err=%v calls=%#v", diagnostic, err, runner.calls)
+	}
+}
+
+func TestWorkflowDefinitionSHARejectsInvalidIdentityWithoutRefresh(t *testing.T) {
+	validRef := strings.Repeat("a", 40)
+	tests := []struct {
+		name string
+		ref  string
+		path string
+		want string
+	}{
+		{name: "malformed SHA", ref: "not-a-sha", path: ".github/workflows/ci.yml", want: workflowDefinitionFailureMalformedRef},
+		{name: "untrusted workflow path", ref: validRef, path: ".github/workflows/foreign.yml", want: workflowDefinitionFailureUntrustedPath},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &fakeRemoteRunner{}
+			gateway := productionNonLocalGateway{runner: runner}
+			_, err := gateway.definitionSHAForObservation(
+				context.Background(), "yersonargotev/packy", tt.ref, tt.path,
+				workflowDefinitionSourceCheckRun, true,
+			)
+			var diagnostic *workflowDefinitionDiagnostic
+			if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != tt.want {
+				t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("invalid identity triggered commands: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestWorkflowDefinitionSHADoesNotRefreshForMissingWorkflowPath(t *testing.T) {
+	ref := strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil, nil},
+		errs:    []error{errors.New("fatal: path '.github/workflows/ci.yml' does not exist in '" + ref + "'")},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+
+	_, err := gateway.definitionSHAForObservation(
+		context.Background(), "yersonargotev/packy", ref, ".github/workflows/ci.yml",
+		workflowDefinitionSourceCheckRun, true,
+	)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != workflowDefinitionFailurePathAbsent ||
+		diagnostic.RetryCount != 0 || len(runner.calls) != 2 {
+		t.Fatalf("missing workflow path was treated as ref skew: diagnostic=%#v err=%v calls=%#v", diagnostic, err, runner.calls)
+	}
+}
+
+func TestWorkflowDefinitionSHARejectsIncompatibleObservedWorkflowWithoutRefresh(t *testing.T) {
+	head := strings.Repeat("b", 40)
+	runner := &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"check_runs":[{"name":"Validate Packy-owned code","head_sha":"` + head + `","status":"completed","conclusion":"success","details_url":"https://github.com/yersonargotev/packy/actions/runs/42/job/7","app":{"id":15368,"slug":"github-actions"}}]}`),
+		[]byte(`[]`),
+		[]byte(`{"id":42,"name":"Security","path":".github/workflows/security-pr.yml","head_sha":"` + head + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/42","actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`),
+	}}
+	gateway := productionNonLocalGateway{runner: runner}
+	_, err := gateway.observeChecks(context.Background(), issuedelivery.NonLocalObserveRequest{
+		Repository: packyRemoteRepository(), HeadSHA: head,
+	}, strings.Repeat("a", 40))
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != workflowDefinitionFailureIncompatible {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("incompatible workflow triggered resolution or refresh: %#v", runner.calls)
+	}
+}
+
+func TestWorkflowDefinitionSHARejectsMismatchedWorkflowHeadWithoutRefresh(t *testing.T) {
+	head, workflowHead := strings.Repeat("b", 40), strings.Repeat("c", 40)
+	runner := &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"check_runs":[{"name":"Validate Packy-owned code","head_sha":"` + workflowHead + `","status":"completed","conclusion":"success","details_url":"https://github.com/yersonargotev/packy/actions/runs/42/job/7","app":{"id":15368,"slug":"github-actions"}}]}`),
+		[]byte(`[]`),
+		[]byte(`{"id":42,"name":"CI","path":".github/workflows/ci.yml","head_sha":"` + workflowHead + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/42","actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`),
+	}}
+	gateway := productionNonLocalGateway{runner: runner}
+	_, err := gateway.observeChecks(context.Background(), issuedelivery.NonLocalObserveRequest{
+		Repository: packyRemoteRepository(), HeadSHA: head,
+	}, strings.Repeat("a", 40))
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != workflowDefinitionFailureIncompatible {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("mismatched workflow HEAD triggered resolution or refresh: %#v", runner.calls)
+	}
+}
+
+func TestWorkflowDefinitionSHADoesNotRefreshAfterCancellation(t *testing.T) {
+	ref := strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil},
+		errs:    []error{context.Canceled},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+
+	_, err := gateway.definitionSHAForObservation(
+		context.Background(), "yersonargotev/packy", ref, ".github/workflows/ci.yml",
+		workflowDefinitionSourceCheckRun, true,
+	)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != workflowDefinitionFailureCancellation ||
+		!errors.Is(err, context.Canceled) {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("cancellation triggered ref refresh: %#v", runner.calls)
+	}
+}
+
+func TestWorkflowDefinitionSHADoesNotTreatAuthorizationFailureAsRefSkew(t *testing.T) {
+	ref := strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{nil, nil, nil},
+		errs: []error{
+			errors.New("fatal: invalid object name '" + ref + "'."),
+			errors.New("fatal: Not a valid object name " + ref + "^{commit}"),
+			errors.New("remote: permission denied for token=secret-value"),
+		},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+
+	_, err := gateway.definitionSHAForObservation(
+		context.Background(), "yersonargotev/packy", ref, ".github/workflows/ci.yml",
+		workflowDefinitionSourceCheckRun, true,
+	)
+	var diagnostic *workflowDefinitionDiagnostic
+	if !errors.As(err, &diagnostic) || diagnostic.FinalFailureClass != workflowDefinitionFailureAuthorization ||
+		diagnostic.RetryCount != 1 {
+		t.Fatalf("diagnostic = %#v, err=%v", diagnostic, err)
+	}
+	if strings.Contains(err.Error(), "secret-value") || len(runner.calls) != 3 {
+		t.Fatalf("authorization failure leaked or retried unexpectedly: err=%v calls=%#v", err, runner.calls)
+	}
+}
+
+func TestWorkflowDefinitionSHARecoversGovernanceBaseObservedAfterMerge(t *testing.T) {
+	base, blob := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	runner := &fakeRemoteRunner{
+		outputs: [][]byte{
+			[]byte(`{"check_runs":[]}`),
+			[]byte(`[{"id":7,"context":"Governance / Validate authorization","state":"success","target_url":"https://github.com/yersonargotev/packy/actions/runs/42","creator":{"login":"github-actions[bot]","id":41898282,"type":"Bot","html_url":"https://github.com/apps/github-actions"}}]`),
+			[]byte(`{"id":42,"name":"Governance","path":".github/workflows/governance.yml","head_sha":"` + base + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/42","actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`),
+			nil,
+			nil,
+			nil,
+			[]byte(blob + "\n"),
+		},
+		errs: []error{
+			nil, nil, nil,
+			errors.New("fatal: invalid object name '" + base + "'."),
+			errors.New("fatal: Not a valid object name " + base + "^{commit}"),
+		},
+	}
+	gateway := productionNonLocalGateway{runner: runner}
+	checks, err := gateway.observeChecks(context.Background(), issuedelivery.NonLocalObserveRequest{
+		Repository: packyRemoteRepository(), HeadSHA: strings.Repeat("c", 40),
+	}, base)
+	if err != nil || len(checks) != 1 {
+		t.Fatalf("checks = %#v, err=%v", checks, err)
+	}
+	if checks[0].Identity != "Governance / Validate authorization" ||
+		checks[0].Workflow.DefinitionRef != base || checks[0].Workflow.DefinitionSHA != blob {
+		t.Fatalf("governance workflow evidence = %#v", checks[0].Workflow)
+	}
+	if len(runner.calls) != 7 || !reflect.DeepEqual(runner.calls[3], runner.calls[6]) ||
+		!reflect.DeepEqual(runner.calls[5].args, []string{"fetch", "--quiet", "--no-tags", "origin", base}) {
+		t.Fatalf("governance recovery commands = %#v", runner.calls)
+	}
+}
+
 func TestProductionNonLocalMergeUsesMatchHeadCommit(t *testing.T) {
 	head, base := strings.Repeat("b", 40), strings.Repeat("a", 40)
 	runner := &fakeRemoteRunner{outputs: [][]byte{
