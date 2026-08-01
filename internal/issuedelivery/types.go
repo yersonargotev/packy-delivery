@@ -73,6 +73,7 @@ const (
 	ActionProvideRepairDecision            NextAction = "provide-repair-decision"
 	ActionProvideQualificationReview       NextAction = "provide-qualification-review"
 	ActionProvideCandidateReview           NextAction = "provide-candidate-review"
+	ActionProvideImpactConfirmation        NextAction = "provide-impact-confirmation"
 	ActionRepairCandidate                  NextAction = "repair-candidate"
 	ActionObserveExternalResult            NextAction = "observe-external-result"
 	ActionAuthorizeNonLocal                NextAction = "authorize-non-local"
@@ -140,15 +141,17 @@ type Decision struct {
 }
 
 type Request struct {
-	RepositoryPath          string
-	IssueNumber             int
-	Decision                *Decision
-	Repair                  *RepairDecision
-	QualificationReview     *QualificationReview
-	QualificationCorrection *QualificationCorrection
-	CandidateReviews        []CandidateReview
-	SpecialistReviews       []SpecialistReview
-	NonLocal                *NonLocalAuthorization
+	RepositoryPath             string
+	IssueNumber                int
+	Decision                   *Decision
+	Repair                     *RepairDecision
+	QualificationReview        *QualificationReview
+	QualificationCorrection    *QualificationCorrection
+	CandidateReviews           []CandidateReview
+	SpecialistReviews          []SpecialistReview
+	ImpactAssessment           *deliveryevidence.EvidenceImpactAssessment
+	ImpactConfirmationResponse *deliveryevidence.ImpactConfirmation
+	NonLocal                   *NonLocalAuthorization
 }
 
 type StatusRequest struct {
@@ -221,6 +224,7 @@ type Outcome struct {
 	Evidence                 *deliveryevidence.Bundle
 	Observations             Observations
 	Candidate                *Candidate
+	ImpactConfirmation       *ImpactConfirmationPacket
 	Repair                   *RepairDecisionRequest
 	QualificationCorrection  *QualificationCorrectionRequest
 	QualificationApproved    bool
@@ -611,6 +615,32 @@ type Candidate struct {
 	RepairDecision      *RepairDecision                      `json:"repair_decision,omitempty"`
 	RepairBatches       []RepairBatchReceipt                 `json:"repair_batches,omitempty"`
 	LastRepairBatch     *RepairBatchReceipt                  `json:"last_repair_batch,omitempty"`
+	Derivation          *CandidateDerivation                 `json:"derivation,omitempty"`
+}
+
+const impactConfirmationPacketSchema = "packy.impact-confirmation-packet/v1"
+
+type ImpactConfirmationPacket struct {
+	Schema             string `json:"schema"`
+	PacketID           string `json:"packet_id"`
+	AssessmentID       string `json:"assessment_id"`
+	ParentCandidateID  string `json:"parent_candidate_id"`
+	DerivedCandidateID string `json:"derived_candidate_id"`
+}
+
+type CandidateDerivation struct {
+	ParentCandidateID      string                                      `json:"parent_candidate_id"`
+	Assessment             deliveryevidence.EvidenceImpactAssessment   `json:"assessment"`
+	Decision               deliveryevidence.EvidenceDerivationDecision `json:"decision"`
+	PendingConfirmation    *ImpactConfirmationPacket                   `json:"pending_confirmation,omitempty"`
+	Confirmation           *deliveryevidence.ImpactConfirmation        `json:"confirmation,omitempty"`
+	RetainedReviewReceipts []deliveryevidence.ReviewDerivationReceipt  `json:"retained_review_receipts"`
+	FallbackReason         string                                      `json:"fallback_reason,omitempty"`
+}
+
+type AuthenticatedImpactAuthority interface {
+	deliveryevidence.ImpactAuthority
+	AuthenticatedImpactPrincipal() deliveryevidence.ImpactAuthor
 }
 
 type ProfileTransition struct {
@@ -903,6 +933,7 @@ type Config struct {
 	Specialist        SpecialistReviewExecutor
 	Boundary          BoundaryValidationExecutor
 	ValidationSession ValidationSessionExecutor
+	ImpactAuthority   deliveryevidence.ImpactAuthority
 	NonLocalObserver  NonLocalObserver
 	NonLocal          NonLocalGateway
 	LocalCompletion   LocalCompletionGateway
@@ -922,6 +953,7 @@ type Module struct {
 	specialist        SpecialistReviewExecutor
 	boundary          BoundaryValidationExecutor
 	validationSession ValidationSessionExecutor
+	impactAuthority   deliveryevidence.ImpactAuthority
 	nonlocalObserver  NonLocalObserver
 	nonlocal          NonLocalGateway
 	localCompletion   LocalCompletionGateway
@@ -982,6 +1014,7 @@ func New(config Config) (*Module, error) {
 		review: config.Review, validation: config.Validation, sandboxRoot: config.SandboxRoot,
 		risk: config.Risk, specialist: config.Specialist, boundary: config.Boundary,
 		validationSession: config.ValidationSession,
+		impactAuthority:   config.ImpactAuthority,
 		nonlocalObserver:  config.NonLocalObserver,
 		nonlocal:          config.NonLocal, localCompletion: config.LocalCompletion,
 		declaredProfile: config.DeclaredProfile, allowLegacyV1: config.AllowLegacyV1,

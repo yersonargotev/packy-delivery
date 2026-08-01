@@ -80,6 +80,8 @@ packy-deliver advance \
   --issue N \
   [--spec S] \
   --risk-profile low-risk|standard|high-risk \
+  [--impact-assessment /sandbox/artifacts/impact-assessment.json] \
+  [--impact-confirmation /sandbox/artifacts/impact-confirmation.json] \
   [--full-report] \
   [--output json|text]
 ```
@@ -87,10 +89,11 @@ packy-deliver advance \
 Use `--spec S` only when qualification selects a distinct governing
 specification; omitting it selects the self-contained authority form. This is a
 semantic scope decision, not phase sequencing. Repeat the same command to
-resume. Add `--decision`, `--repair`, or
-`--review-content` only when the returned state requests that typed semantic
-content. Use `--ci-attribution` only for an exact failed CI run reported by
-`Advance`. Each of these four options takes a path to a file containing exactly
+resume. Add `--decision`, `--repair`, `--review-content`,
+`--impact-assessment`, or `--impact-confirmation` only when the returned state
+and exact current candidate request that typed semantic content. Use
+`--ci-attribution` only for an exact failed CI run reported by `Advance`. Each
+semantic option takes a path to a file containing exactly
 one JSON value of its typed contract; inline JSON and free-form prose are not
 accepted. For example, after `Advance` returns a pending decision request,
 materialize its exact bound draft:
@@ -458,6 +461,13 @@ independence; caller-authored identity strings or policy aliases do not.
 Self-confirmation, stale or duplicate identity, partial obligation
 coverage, rejection, and ambiguity fail closed.
 
+The Packy adapter resolves a registered policy only from its canonical
+repository-relative identity below `.packy/impact-policies/` at trusted
+`origin/main`; the SHA-256 of those exact bytes must equal the assessment's
+registration digest. A later independent human confirmation is bound to the
+current authenticated GitHub principal. Policy paths from the candidate tree,
+unregistered files, and caller-provided aliases have no authority.
+
 A complete non-behavioral delta may identify explicitly unaffected evidence as
 retainable and requires a Standards delta review. Authority, behavior,
 contract, scope, architecture, security, acceptance meaning, profile, or
@@ -468,10 +478,13 @@ expiry, workspace, failed-execution, or ambiguous-completion changes force
 fresh validation. Incomplete or ambiguous impact forces the complete evidence
 set for the resulting profile.
 
-These standalone contracts do not yet change `Advance`, persist derivation
-receipts, or enable evidence reuse. Until the follow-up review and validation
-admission tickets are implemented, every derived candidate follows the existing
-fresh-review and fresh-validation path.
+`Advance` admits review derivation only after the assessment author is bound to
+the authenticated authorized principal and a distinct authenticated principal
+submits the exact accepted confirmation packet. It persists new canonical
+derivation receipts linked to the parent receipts; it never copies or relabels
+parent review content. Invalid, rejected, incomplete, stale, mismatched, or
+ambiguous input clears the confirmation pause and takes the complete fresh
+review path. Cross-candidate validation reuse remains disabled.
 
 ## Exact final validation
 
@@ -496,10 +509,10 @@ completion through the trusted canonical validation-session registry and match
 the complete registered artifact; a claimed kind or schema string is not
 registration. Any mismatch requires a fresh execution.
 
-The current lifecycle admits reuse only for its already-supported exact
-candidate session. Cross-candidate adoption remains disabled until it can
-persist the canonical source, assessment, confirmation, compatibility, and
-derived-receipt identities required by ADR 0003.
+The current lifecycle admits validation reuse only for its already-supported
+exact-candidate session. Cross-candidate validation adoption remains disabled
+until it can persist the canonical source and compatibility identities required
+by ADR 0003; review derivation does not satisfy validation obligations.
 
 Also retain the acceptance evidence and `git diff --check` result required by
 the matrix. Bind every artifact to the exact commit and tree. A later repository
@@ -553,7 +566,7 @@ projection may bootstrap, while a stale, conflicting, or incomplete persisted
 projection fails closed. A green validation receipt never supplies semantic
 acceptance evidence.
 
-When derivation persistence is implemented, replay may adopt only one exact
+Derivation replay may adopt only one exact
 canonical derived receipt linked to its parent receipt, impact assessment,
 independent confirmation, and compatibility decision. A stale identity,
 conflicting receipt, partial assessment, or ambiguous crash state blocks or

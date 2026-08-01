@@ -1135,6 +1135,72 @@ func TestConvergentAdvanceConsumesPacketResponsesOnce(t *testing.T) {
 	}
 }
 
+func TestAdvanceCommandSubmitsTypedImpactEvidenceOnce(t *testing.T) {
+	repository := t.TempDir()
+	write := func(name string, value any) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name+".json")
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	assessment := deliveryevidence.EvidenceImpactAssessment{
+		Schema: deliveryevidence.EvidenceImpactAssessmentSchema, ID: strings.Repeat("a", 64),
+	}
+	confirmation := deliveryevidence.ImpactConfirmation{
+		Schema: deliveryevidence.ImpactConfirmationSchema, ID: strings.Repeat("b", 64),
+	}
+	for _, test := range []struct {
+		name  string
+		flag  string
+		path  string
+		check func(issuedelivery.Request) bool
+	}{
+		{
+			name: "assessment", flag: "--impact-assessment", path: write("assessment", assessment),
+			check: func(request issuedelivery.Request) bool {
+				return request.ImpactAssessment != nil && reflect.DeepEqual(*request.ImpactAssessment, assessment)
+			},
+		},
+		{
+			name: "confirmation", flag: "--impact-confirmation", path: write("confirmation", confirmation),
+			check: func(request issuedelivery.Request) bool {
+				return request.ImpactConfirmationResponse != nil && reflect.DeepEqual(*request.ImpactConfirmationResponse, confirmation)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeIssueDeliveryAdvancer{outcomes: []issuedelivery.Outcome{
+				{
+					RunID: "run-1", State: issuedelivery.StateNeedsReview, Reason: "input persisted",
+					PauseCause: issuedelivery.PauseDeterministicAdvance, NextAction: issuedelivery.ActionAdvance,
+				},
+				{
+					RunID: "run-1", State: issuedelivery.StateWaiting, Reason: "awaiting independent input",
+					PauseCause: issuedelivery.PauseSemanticInput, NextAction: issuedelivery.ActionProvideCandidateReview,
+				},
+			}}
+			cmd := command{AdvanceFactory: func(options advanceOptions) (issueDeliveryAdvancer, error) {
+				return fake, nil
+			}}
+			if err := cmd.run(context.Background(), []string{
+				"advance", "--repository", repository, "--issue", "361", test.flag, test.path,
+			}, &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.requests) != 2 || !test.check(fake.requests[0]) ||
+				fake.requests[1].ImpactAssessment != nil || fake.requests[1].ImpactConfirmationResponse != nil {
+				t.Fatalf("impact requests = %#v", fake.requests)
+			}
+		})
+	}
+}
+
 func TestAdvanceCommandRejectsCallerPhaseSequencingInputs(t *testing.T) {
 	repository := t.TempDir()
 	cmd := command{AdvanceFactory: func(options advanceOptions) (issueDeliveryAdvancer, error) {

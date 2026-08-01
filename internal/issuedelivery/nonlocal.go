@@ -257,7 +257,7 @@ func validateNonLocalFreshness(
 		return errors.New("non-local delivery freshness changed; restore exact local readiness or requalify")
 	}
 	if record.PendingDecision != nil || record.PendingRepair != nil ||
-		candidate.Exhaustive == nil || len(candidate.Acceptance) == 0 ||
+		candidate.Exhaustive == nil || !hasCandidateSemanticAssurance(candidate, len(record.Evidence.AcceptanceMatrix)) ||
 		len(missingReviewAxes(candidate)) != 0 ||
 		len(missingSpecialistBoundaries(candidate)) != 0 ||
 		len(missingBoundaryProofs(candidate)) != 0 {

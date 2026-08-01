@@ -215,7 +215,7 @@ func validateRun(record runRecord) error {
 func validateCandidates(record runRecord) error {
 	if record.Schema == legacyRunSchema {
 		for _, candidate := range record.Candidates {
-			if candidate.RepairDecision != nil &&
+			if candidate.Derivation != nil || candidate.RepairDecision != nil &&
 				candidate.RepairDecision.Class == RepairAdjudicationOnly {
 				return fmt.Errorf("issue delivery candidate contains an invalid repair decision")
 			}
@@ -256,6 +256,9 @@ func validateCandidates(record runRecord) error {
 		}
 		seen[candidate.ID] = true
 		candidateOrder[candidate.ID] = index
+		if err := validateCandidateDerivation(record, index); err != nil {
+			return err
+		}
 		assessment := mechanicalProfileFloor(candidate.Effects)
 		if !assessment.Complete ||
 			assessment.Profile != candidate.ObservedFloor ||
@@ -318,7 +321,7 @@ func validateCandidates(record runRecord) error {
 				return fmt.Errorf("issue delivery candidate review batch history is invalid")
 			}
 			if batch.Iteration == currentBatchIteration &&
-				!reflect.DeepEqual(batch.RequiredAxes, candidate.RequiredReviews) {
+				!reflect.DeepEqual(batch.RequiredAxes, freshReviewAxes(&candidate)) {
 				return fmt.Errorf("issue delivery candidate current review batch requirements are invalid")
 			}
 			previousBatchIteration, previousTimingSequence = batch.Iteration, batch.TimingSequence
@@ -347,6 +350,9 @@ func validateCandidates(record runRecord) error {
 		var reviewedAcceptance []AcceptanceProof
 		specReviewCompleted := false
 		completedReviews := make(map[deliveryevidence.ReviewAxis]int, len(candidate.RequiredReviews))
+		for _, axis := range retainedReviewAxes(&candidate) {
+			completedReviews[axis] = 1
+		}
 		currentIteration := currentReviewIteration(&candidate)
 		if phaseOwnedAcceptance(record.Evidence.AcceptanceMatrix) {
 			lastIteration := 0
@@ -444,10 +450,14 @@ func validateCandidates(record runRecord) error {
 			acceptanceEvidence.AcceptanceMatrix = append(
 				[]deliveryevidence.AcceptanceRow(nil), record.Evidence.AcceptanceMatrix...,
 			)
-			if err := admitAcceptanceProofs(
-				&acceptanceEvidence, &candidate, candidate.Acceptance,
-			); err != nil {
-				return fmt.Errorf("issue delivery exhaustive candidate acceptance is incomplete: %w", err)
+			var acceptanceErr error
+			if len(candidate.Acceptance) == 0 && containsAxis(retainedReviewAxes(&candidate), deliveryevidence.ReviewSpec) {
+				acceptanceErr = admitDerivedAcceptance(&acceptanceEvidence, record, &candidate)
+			} else {
+				acceptanceErr = admitAcceptanceProofs(&acceptanceEvidence, &candidate, candidate.Acceptance)
+			}
+			if acceptanceErr != nil {
+				return fmt.Errorf("issue delivery exhaustive candidate acceptance is incomplete: %w", acceptanceErr)
 			}
 		}
 		validationProofs := []*ValidationProof{candidate.Focused, candidate.Exhaustive}
@@ -621,7 +631,7 @@ func validateCandidates(record runRecord) error {
 		return fmt.Errorf("local readiness does not match the current candidate")
 	}
 	if record.LocalReadiness != nil {
-		if current.Exhaustive == nil || len(current.Acceptance) != len(record.Evidence.AcceptanceMatrix) ||
+		if current.Exhaustive == nil || !hasCandidateSemanticAssurance(&current, len(record.Evidence.AcceptanceMatrix)) ||
 			len(record.Evidence.ValidationReceipts) == 0 ||
 			len(missingSpecialistBoundaries(&current)) != 0 ||
 			len(missingBoundaryProofs(&current)) != 0 {

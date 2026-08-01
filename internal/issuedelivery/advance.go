@@ -268,7 +268,8 @@ func outcomeFromRecord(record runRecord) Outcome {
 		BlockerKind:     blockerKindFromRecord(record),
 		SupersedesRunID: record.SupersedesRunID, Decision: record.PendingDecision,
 		Evidence: record.Evidence, Observations: record.Observations,
-		Candidate: candidate, Repair: record.PendingRepair, LocalReadiness: record.LocalReadiness,
+		Candidate: candidate, ImpactConfirmation: impactConfirmationFromCandidate(candidate),
+		Repair: record.PendingRepair, LocalReadiness: record.LocalReadiness,
 		QualificationCorrection: record.PendingQualificationCorrection,
 		QualificationApproved:   record.QualificationApproved,
 		QualificationReviews:    append([]QualificationReview(nil), record.QualificationReviews...),
@@ -343,6 +344,9 @@ func reviewPause(outcome Outcome) (PauseCause, NextAction) {
 			return PauseDeterministicAdvance, ActionAdvance
 		}
 		return PauseIndependentReview, ActionProvideQualificationReview
+	}
+	if outcome.ImpactConfirmation != nil {
+		return PauseSemanticInput, ActionProvideImpactConfirmation
 	}
 	if hasAcceptedFindings(outcome.Candidate.RepairDecision) ||
 		(outcome.NonLocal != nil && outcome.NonLocal.CandidateFailure != nil) {

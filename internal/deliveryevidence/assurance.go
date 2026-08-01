@@ -3,6 +3,7 @@ package deliveryevidence
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -20,6 +21,30 @@ type CandidateReviewReceipt struct {
 	CommitSHA      string       `json:"commit_sha"`
 	TreeSHA        string       `json:"tree_sha"`
 	CompletedAt    string       `json:"completed_at"`
+}
+
+const ReviewDerivationReceiptSchema = "packy.review-derivation-receipt/v1"
+
+// ReviewDerivationReceipt retains one exact parent obligation without copying
+// or relabeling the parent's review content.
+type ReviewDerivationReceipt struct {
+	Schema                string                       `json:"schema"`
+	Identity              string                       `json:"identity"`
+	ParentReceiptIdentity string                       `json:"parent_receipt_identity"`
+	AssessmentID          string                       `json:"assessment_id"`
+	ConfirmationID        string                       `json:"confirmation_id"`
+	ParentCandidateID     string                       `json:"parent_candidate_id"`
+	DerivedCandidateID    string                       `json:"derived_candidate_id"`
+	Axis                  ReviewAxis                   `json:"axis,omitempty"`
+	Boundary              SensitiveBoundary            `json:"boundary,omitempty"`
+	Obligations           []EvidenceObligationIdentity `json:"obligations"`
+}
+
+func ReviewDerivationReceiptIdentity(receipt ReviewDerivationReceipt) string {
+	receipt.Identity = ""
+	raw, _ := json.Marshal(receipt)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 type AssuranceFindingDecision struct {
