@@ -82,7 +82,7 @@ func moduleFixture(t *testing.T, issue int) (*Module, *fakeGitObserver, *fakeGit
 		Title:      "Qualify one low-risk run",
 		Body:       "explicit authority",
 		State:      "OPEN",
-		Labels:     []string{"type:chore", "status:approved"},
+		Labels:     []string{"delivery:low-risk", "type:chore", "status:approved"},
 		Criteria: []AuthorityItem{
 			{Text: "Persist one self-contained low-risk run.", EvidenceLink: "issue#356:criterion-1"},
 			{Text: "Resume without creating a duplicate run.", EvidenceLink: "issue#356:criterion-2"},
@@ -102,6 +102,32 @@ func moduleFixture(t *testing.T, issue int) (*Module, *fakeGitObserver, *fakeGit
 	return module, git, tracker
 }
 
+func TestAdvanceRejectsInvalidAuthorityDeliveryProfileBinding(t *testing.T) {
+	tests := []struct {
+		name    string
+		labels  []string
+		profile deliveryevidence.DeliveryRiskProfile
+		want    string
+	}{
+		{name: "missing", labels: []string{"status:approved"}, profile: deliveryevidence.RiskLow, want: "exactly one delivery profile"},
+		{name: "multiple", labels: []string{"delivery:low-risk", "delivery:standard", "status:approved"}, profile: deliveryevidence.RiskLow, want: "exactly one delivery profile"},
+		{name: "mismatch", labels: []string{"delivery:standard", "status:approved"}, profile: deliveryevidence.RiskLow, want: "does not match declared risk profile"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			module, _, tracker := moduleFixture(t, 356)
+			module.declaredProfile = test.profile
+			tracker.value.Labels = test.labels
+			_, err := module.Advance(context.Background(), Request{
+				RepositoryPath: "/repo", IssueNumber: 356,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestAdvanceIssue344StyleSelfContainedLowRiskRunCreatesAndResumes(t *testing.T) {
 	module, git, tracker := moduleFixture(t, 356)
 	request := Request{RepositoryPath: "/ignored/by-fake", IssueNumber: 356}
@@ -119,6 +145,11 @@ func TestAdvanceIssue344StyleSelfContainedLowRiskRunCreatesAndResumes(t *testing
 		first.Evidence.RiskProfile != deliveryevidence.RiskLow ||
 		first.Evidence.Spec != (deliveryevidence.SpecIdentity{}) {
 		t.Fatalf("fresh evidence = %#v", first.Evidence)
+	}
+	if first.DeliveryProfile == nil ||
+		first.DeliveryProfile.AuthorityLabel != "delivery:low-risk" ||
+		first.DeliveryProfile.Profile != deliveryevidence.RiskLow {
+		t.Fatalf("delivery profile binding = %#v", first.DeliveryProfile)
 	}
 	if len(first.Evidence.AcceptanceMatrix) != 2 || len(first.Evidence.Scope.OwnedNow) != 2 ||
 		len(first.Evidence.Scope.Forbidden) != 1 || len(first.Timing) != 1 {
@@ -146,6 +177,49 @@ func TestAdvanceIssue344StyleSelfContainedLowRiskRunCreatesAndResumes(t *testing
 	}
 	if git.calls != 2 || tracker.calls != 2 {
 		t.Fatalf("observations were not reacquired: git=%d github=%d", git.calls, tracker.calls)
+	}
+}
+
+func TestAdvanceResumesSchemaV2RunWithoutDeliveryProfileBinding(t *testing.T) {
+	module, git, _ := moduleFixture(t, 356)
+	request := Request{RepositoryPath: "/repo", IssueNumber: 356}
+	first := mustAdvance(t, module, request)
+	var historical []byte
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, found, err := store.loadActive()
+			if err != nil || !found {
+				return err
+			}
+			record, err := decodeRun(data)
+			if err != nil {
+				return err
+			}
+			record.DeliveryProfile = nil
+			historical, err = encodeRun(record)
+			if err != nil {
+				return err
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historicalModule, historicalGit, _ := moduleFixture(t, 356)
+	err = historicalModule.store.withIssueLock(
+		context.Background(), historicalGit.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			return store.storeAndActivate(first.RunID, historical)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := mustAdvance(t, historicalModule, request)
+	if resumed.RunID != first.RunID || resumed.DeliveryProfile != nil {
+		t.Fatalf("resumed pre-binding v2 run=%#v", resumed)
 	}
 }
 

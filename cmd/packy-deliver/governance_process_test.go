@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,15 @@ func (remote *governanceProcessRemote) EnsurePullRequest(
 	ctx context.Context,
 	request issuedelivery.EnsurePullRequestRequest,
 ) error {
+	if request.PullRequest > 0 {
+		for index := range remote.observation.PullRequests {
+			if remote.observation.PullRequests[index].Number == request.PullRequest {
+				remote.observation.PullRequests[index].DeliveryProfiles = []string{request.DeliveryProfile}
+				return nil
+			}
+		}
+		return errors.New("pull request is not observable")
+	}
 	observation, err := (productionNonLocalGateway{runner: remote.runner}).ObserveNonLocal(
 		ctx,
 		issuedelivery.NonLocalObserveRequest{
@@ -77,7 +87,7 @@ func TestAdvanceProcessReachesMergeWithCandidateHeadedPullRequestTargetGovernanc
 		t.Fatalf("ordinary Packy CI did not reach an adopted merge: %#v", result.Report)
 	}
 	for _, operation := range result.ObservationOps {
-		for _, forbidden := range []string{"issue comment", "issue edit", "label", " status create"} {
+		for _, forbidden := range []string{"issue comment", "issue edit", "--add-label", " status create"} {
 			if strings.Contains(operation, forbidden) {
 				t.Fatalf("Governance observation required operator side effect %q", operation)
 			}

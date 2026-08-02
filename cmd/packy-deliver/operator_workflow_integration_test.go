@@ -40,12 +40,21 @@ func (gateway *operatorWorkflowNonLocalGateway) EnsurePullRequest(
 	_ context.Context,
 	request issuedelivery.EnsurePullRequestRequest,
 ) error {
+	if request.PullRequest > 0 {
+		for index := range gateway.observation.PullRequests {
+			if gateway.observation.PullRequests[index].Number == request.PullRequest {
+				gateway.observation.PullRequests[index].DeliveryProfiles = []string{request.DeliveryProfile}
+				return nil
+			}
+		}
+	}
 	gateway.observation.PullRequests = []issuedelivery.RemotePullRequestObservation{{
 		Number: 31, URL: "https://github.com/yersonargotev/packy/pull/31", State: "OPEN",
 		BaseRef: "main", BaseSHA: strings.Repeat("a", 40),
 		HeadBranch: request.HeadBranch, HeadSHA: request.HeadSHA,
 		HeadRepositoryNodeID: request.Repository.NodeID,
 		ClosingIssue:         request.Issue.Number,
+		DeliveryProfiles:     []string{request.DeliveryProfile},
 	}}
 	return nil
 }

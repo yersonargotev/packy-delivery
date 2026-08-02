@@ -17,6 +17,9 @@ type fakeNonLocalGateway struct {
 	observeCalls      int
 	pushCalls         int
 	createCalls       int
+	profileCalls      int
+	profileErrBefore  error
+	profileErrAfter   error
 	retryCalls        int
 	hideEnsuredPR     bool
 	mergeCalls        int
@@ -75,6 +78,19 @@ func (f *fakeNonLocalGateway) EnsurePullRequest(
 	_ context.Context,
 	request EnsurePullRequestRequest,
 ) error {
+	if request.PullRequest > 0 {
+		f.profileCalls++
+		if f.profileErrBefore != nil {
+			return f.profileErrBefore
+		}
+		for index := range f.observation.PullRequests {
+			if f.observation.PullRequests[index].Number == request.PullRequest {
+				f.observation.PullRequests[index].DeliveryProfiles = []string{request.DeliveryProfile}
+				return f.profileErrAfter
+			}
+		}
+		return errors.New("pull request is not observable")
+	}
 	f.createCalls++
 	if f.createErr != nil {
 		return f.createErr
@@ -84,7 +100,8 @@ func (f *fakeNonLocalGateway) EnsurePullRequest(
 		State: "OPEN", BaseRef: request.BaseRef, BaseSHA: strings.Repeat("a", 40),
 		HeadBranch: request.HeadBranch,
 		HeadSHA:    request.HeadSHA, HeadRepositoryNodeID: request.Repository.NodeID,
-		ClosingIssue: request.Issue.Number,
+		ClosingIssue:     request.Issue.Number,
+		DeliveryProfiles: []string{request.DeliveryProfile},
 	}
 	if !f.hideEnsuredPR {
 		f.observation.PullRequests = []RemotePullRequestObservation{pullRequest}
@@ -313,6 +330,7 @@ func TestAdvanceAdoptsMatchingBranchAndPullRequestWithoutMutation(t *testing.T) 
 		State: "OPEN", BaseRef: "main", BaseSHA: strings.Repeat("a", 40),
 		HeadBranch: ready.LocalReadiness.Branch,
 		HeadSHA:    ready.Candidate.CommitSHA, HeadRepositoryNodeID: "R1", ClosingIssue: 357,
+		DeliveryProfiles: []string{"delivery:low-risk"},
 	}}
 	authorization := exactNonLocalAuthorization(ready)
 	request.NonLocal = &authorization
@@ -322,6 +340,108 @@ func TestAdvanceAdoptsMatchingBranchAndPullRequestWithoutMutation(t *testing.T) 
 	if adopted.NonLocal == nil || adopted.NonLocal.PullRequest == nil ||
 		gateway.pushCalls != 0 || gateway.createCalls != 0 {
 		t.Fatalf("adopted outcome=%#v gateway=%#v", adopted, gateway)
+	}
+}
+
+func TestAdvanceReconcilesMissingPullRequestProfileOnceBeforeCI(t *testing.T) {
+	module, _, gateway, request, ready := nonLocalFixture(t)
+	gateway.observation.Branch = &RemoteBranchObservation{
+		Name: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+	}
+	gateway.observation.PullRequests = []RemotePullRequestObservation{{
+		Number: 9, URL: "https://github.com/yersonargotev/packy/pull/9",
+		State: "OPEN", BaseRef: "main", BaseSHA: strings.Repeat("a", 40),
+		HeadBranch: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+		HeadRepositoryNodeID: "R1", ClosingIssue: 357, DeliveryProfiles: []string{},
+	}}
+	authorization := exactNonLocalAuthorization(ready)
+	request.NonLocal = &authorization
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	prepared := mustAdvance(t, module, request)
+	if prepared.NonLocal == nil || prepared.NonLocal.ProfileIntent == nil ||
+		prepared.NonLocal.ProfileIntent.DispatchedAt != "" || gateway.profileCalls != 0 {
+		t.Fatalf("prepared=%#v gateway=%#v", prepared, gateway)
+	}
+	dispatched := mustAdvance(t, module, request)
+	if dispatched.NonLocal.ProfileIntent.DispatchedAt == "" || gateway.profileCalls != 1 {
+		t.Fatalf("dispatched=%#v gateway=%#v", dispatched, gateway)
+	}
+	adopted := mustAdvance(t, module, request)
+	if adopted.NonLocal.PullRequest == nil ||
+		!reflect.DeepEqual(adopted.NonLocal.PullRequest.DeliveryProfiles, []string{"delivery:low-risk"}) ||
+		gateway.profileCalls != 1 {
+		t.Fatalf("adopted=%#v gateway=%#v", adopted, gateway)
+	}
+}
+
+func TestAdvanceBlocksConflictingPullRequestProfilesWithoutMutation(t *testing.T) {
+	for _, profiles := range [][]string{
+		{"delivery:standard"},
+		{"delivery:low-risk", "delivery:standard"},
+	} {
+		module, _, gateway, request, ready := nonLocalFixture(t)
+		gateway.observation.Branch = &RemoteBranchObservation{
+			Name: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+		}
+		gateway.observation.PullRequests = []RemotePullRequestObservation{{
+			Number: 9, URL: "https://github.com/yersonargotev/packy/pull/9",
+			State: "OPEN", BaseRef: "main", BaseSHA: strings.Repeat("a", 40),
+			HeadBranch: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+			HeadRepositoryNodeID: "R1", ClosingIssue: 357, DeliveryProfiles: profiles,
+		}}
+		authorization := exactNonLocalAuthorization(ready)
+		request.NonLocal = &authorization
+		mustAdvance(t, module, request)
+		mustAdvance(t, module, request)
+		blocked := mustAdvance(t, module, request)
+		if blocked.State != StateBlocked || gateway.profileCalls != 0 || gateway.createCalls != 0 {
+			t.Fatalf("profiles=%v outcome=%#v gateway=%#v", profiles, blocked, gateway)
+		}
+	}
+}
+
+func TestAdvanceAdoptsProfileAfterAmbiguousReconciliationFailureWithoutDuplicateEffect(t *testing.T) {
+	module, _, gateway, request, ready := nonLocalFixture(t)
+	gateway.observation.Branch = &RemoteBranchObservation{
+		Name: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+	}
+	gateway.observation.PullRequests = []RemotePullRequestObservation{{
+		Number: 9, URL: "https://github.com/yersonargotev/packy/pull/9",
+		State: "OPEN", BaseRef: "main", BaseSHA: strings.Repeat("a", 40),
+		HeadBranch: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+		HeadRepositoryNodeID: "R1", ClosingIssue: 357, DeliveryProfiles: []string{},
+	}}
+	gateway.profileErrAfter = errors.New("response lost after mutation")
+	authorization := exactNonLocalAuthorization(ready)
+	request.NonLocal = &authorization
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	failed := mustAdvance(t, module, request)
+	if failed.NonLocal.ProfileIntent == nil || failed.NonLocal.ProfileIntent.DispatchedAt != "" ||
+		gateway.profileCalls != 1 {
+		t.Fatalf("failed=%#v gateway=%#v", failed, gateway)
+	}
+	adopted := mustAdvance(t, module, request)
+	if adopted.NonLocal.PullRequest == nil || gateway.profileCalls != 1 {
+		t.Fatalf("adopted=%#v gateway=%#v", adopted, gateway)
+	}
+}
+
+func TestAdvanceReobservesLabelMutationBeforeCIReadiness(t *testing.T) {
+	module, _, gateway, request, ready := nonLocalFixture(t)
+	pullRequest := advanceToExactPullRequest(t, module, gateway, request, ready)
+	if pullRequest.NonLocal.PullRequest == nil {
+		t.Fatalf("pull request=%#v", pullRequest)
+	}
+	gateway.observation.Checks = exactSuccessfulChecks(ready.Candidate.CommitSHA)
+	gateway.observation.PullRequests[0].DeliveryProfiles = []string{}
+	authorization := exactNonLocalAuthorization(ready)
+	request.NonLocal = &authorization
+	mutated := mustAdvance(t, module, request)
+	if mutated.NonLocal.ProfileIntent == nil || mutated.NonLocal.Merge != nil || gateway.mergeCalls != 0 {
+		t.Fatalf("mutated=%#v gateway=%#v", mutated, gateway)
 	}
 }
 
@@ -745,7 +865,7 @@ func TestAdvanceDoesNotDuplicatePullRequestDuringEventualVisibility(t *testing.T
 	}
 }
 
-func TestRiskEscalationDiscardsNonLocalAuthorizationAndRequiresFreshReadiness(t *testing.T) {
+func TestRiskEscalationRequiresFreshReadinessAndAuthorityProfileRequalification(t *testing.T) {
 	module, _, gateway, request, ready := nonLocalFixture(t)
 	authorization := exactNonLocalAuthorization(ready)
 	request.NonLocal = &authorization
@@ -782,7 +902,9 @@ func TestRiskEscalationDiscardsNonLocalAuthorizationAndRequiresFreshReadiness(t 
 	freshAuthorization := exactNonLocalAuthorization(refreshed)
 	request.NonLocal = &freshAuthorization
 	fresh := mustAdvance(t, module, request)
-	if fresh.NonLocal == nil || fresh.NonLocal.Authorization != freshAuthorization {
+	if fresh.State != StateBlocked || fresh.NonLocal != nil ||
+		!strings.Contains(fresh.Reason, "qualified delivery profile") ||
+		gateway.observeCalls != 0 || gateway.pushCalls != 0 {
 		t.Fatalf("fresh authorization outcome=%#v", fresh)
 	}
 }

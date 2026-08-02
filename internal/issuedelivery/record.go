@@ -35,6 +35,7 @@ type runWire struct {
 	QualificationCorrections       []QualificationCorrection            `json:"qualification_corrections,omitempty"`
 	LocalReadiness                 *LocalReadiness                      `json:"local_readiness,omitempty"`
 	EffectiveProfile               deliveryevidence.DeliveryRiskProfile `json:"effective_profile,omitempty"`
+	DeliveryProfile                *DeliveryProfileBinding              `json:"delivery_profile,omitempty"`
 	RequiredBoundaries             []SensitiveBoundary                  `json:"required_boundaries,omitempty"`
 	ProfileHistory                 []ProfileTransition                  `json:"profile_history,omitempty"`
 	ValidationSessions             []ValidationSession                  `json:"validation_sessions,omitempty"`
@@ -62,6 +63,7 @@ func encodeRun(record runRecord) ([]byte, error) {
 		QualificationCorrections:       record.QualificationCorrections,
 		LocalReadiness:                 record.LocalReadiness,
 		EffectiveProfile:               record.EffectiveProfile, RequiredBoundaries: record.RequiredBoundaries,
+		DeliveryProfile:         record.DeliveryProfile,
 		ProfileHistory:          record.ProfileHistory,
 		ValidationSessions:      record.ValidationSessions,
 		ValidationInvalidations: record.ValidationInvalidations,
@@ -114,6 +116,7 @@ func decodeRun(data []byte) (runRecord, error) {
 		QualificationCorrections:       wire.QualificationCorrections,
 		LocalReadiness:                 wire.LocalReadiness,
 		EffectiveProfile:               wire.EffectiveProfile, RequiredBoundaries: wire.RequiredBoundaries,
+		DeliveryProfile:         wire.DeliveryProfile,
 		ProfileHistory:          wire.ProfileHistory,
 		ValidationSessions:      wire.ValidationSessions,
 		ValidationInvalidations: wire.ValidationInvalidations,
@@ -179,6 +182,20 @@ func validateRun(record runRecord) error {
 		if record.Evidence.Repository != record.Repository || record.Evidence.Issue != record.Issue ||
 			record.Evidence.Authority.IssueSHA256 != record.AuthoritySHA256 {
 			return fmt.Errorf("issue delivery evidence does not match its run")
+		}
+	}
+	if record.DeliveryProfile != nil {
+		expected, err := expectedDeliveryProfileLabel(record.DeliveryProfile.Profile)
+		if err != nil || record.DeliveryProfile.AuthorityLabel != expected || record.Evidence == nil {
+			return fmt.Errorf("issue delivery profile binding is invalid")
+		}
+		profiles := normalizedDeliveryProfileLabels(record.Evidence.Authority.Labels)
+		if len(profiles) != 1 || profiles[0] != expected {
+			return fmt.Errorf("issue delivery profile binding does not match its authority")
+		}
+		if record.EffectiveProfile != "" &&
+			maxRiskProfile(record.DeliveryProfile.Profile, record.EffectiveProfile) != record.EffectiveProfile {
+			return fmt.Errorf("issue delivery effective profile is below its qualified binding")
 		}
 	}
 	if err := validateQualificationHistory(record); err != nil {

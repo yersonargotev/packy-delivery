@@ -134,7 +134,7 @@ func timingCategoryForPhase(phase string) (TimingCategory, bool) {
 	case "qualification":
 		return TimingQualification, true
 	case "implementation", "candidate-development", "non-local-freshness", "non-local-authorization",
-		"non-local-observation", "branch-push", "pull-request":
+		"non-local-observation", "branch-push", "pull-request", "pull-request-profile":
 		return TimingImplementation, true
 	case "review", "specialist-review", "qualification-review", "impact-assessment", "impact-confirmation":
 		return TimingReview, true

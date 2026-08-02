@@ -83,11 +83,20 @@ func (r *commandCompletionRemote) EnsurePullRequest(
 	_ context.Context,
 	request issuedelivery.EnsurePullRequestRequest,
 ) error {
+	if request.PullRequest > 0 {
+		for index := range r.observation.PullRequests {
+			if r.observation.PullRequests[index].Number == request.PullRequest {
+				r.observation.PullRequests[index].DeliveryProfiles = []string{request.DeliveryProfile}
+				return nil
+			}
+		}
+	}
 	r.observation.PullRequests = []issuedelivery.RemotePullRequestObservation{{
 		Number: 1, URL: "https://github.com/yersonargotev/packy/pull/1",
 		State: "OPEN", BaseRef: request.BaseRef, BaseSHA: strings.Repeat("a", 40),
 		HeadBranch: request.HeadBranch, HeadSHA: request.HeadSHA,
 		HeadRepositoryNodeID: request.Repository.NodeID, ClosingIssue: request.Issue.Number,
+		DeliveryProfiles: []string{request.DeliveryProfile},
 	}}
 	r.observation.Checks = commandSuccessfulChecks(request.Repository, request.HeadSHA, strings.Repeat("a", 40))
 	return nil

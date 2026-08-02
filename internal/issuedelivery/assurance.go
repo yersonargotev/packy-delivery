@@ -512,7 +512,9 @@ func (m *Module) advanceAssurance(
 		return Outcome{}, fmt.Errorf("reobserve GitHub after exhaustive validation: %w", err)
 	}
 	freshAuthority, err := compileAuthority(
-		freshGit, freshTracker, record.Decisions, nil, record.Evidence.RiskProfile,
+		freshGit, freshTracker, record.Decisions, nil,
+		qualifiedRiskProfile(record, record.Evidence.RiskProfile),
+		record.DeliveryProfile != nil,
 	)
 	if err != nil {
 		return Outcome{}, err

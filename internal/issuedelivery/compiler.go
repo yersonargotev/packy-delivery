@@ -13,13 +13,14 @@ import (
 )
 
 type compiledAuthority struct {
-	hash          string
-	evidence      deliveryevidence.Bundle
-	pending       *DecisionRequest
-	decisions     []Decision
-	state         State
-	reason        string
-	qualification *QualificationCorrectionRequest
+	hash            string
+	evidence        deliveryevidence.Bundle
+	pending         *DecisionRequest
+	decisions       []Decision
+	state           State
+	reason          string
+	qualification   *QualificationCorrectionRequest
+	deliveryProfile *DeliveryProfileBinding
 }
 
 func compileAuthority(
@@ -28,6 +29,7 @@ func compileAuthority(
 	prior []Decision,
 	offered *Decision,
 	declaredProfile deliveryevidence.DeliveryRiskProfile,
+	requireDeliveryProfile bool,
 ) (compiledAuthority, error) {
 	if err := validateObservations(git, tracker); err != nil {
 		return compiledAuthority{}, err
@@ -39,6 +41,14 @@ func compileAuthority(
 	dependencies := normalizedDependencies(tracker.Dependencies)
 	references := normalizedReferences(tracker.References)
 	labels := normalizedStrings(tracker.Labels)
+	var deliveryProfile *DeliveryProfileBinding
+	if requireDeliveryProfile {
+		qualifiedProfile, err := qualifyDeliveryProfile(labels, declaredProfile)
+		if err != nil {
+			return compiledAuthority{}, err
+		}
+		deliveryProfile = qualifiedProfile
+	}
 
 	available := make(map[string]Decision, len(prior))
 	for _, decision := range prior {
@@ -98,7 +108,7 @@ func compileAuthority(
 	}
 	return compiledAuthority{
 		hash: authorityHash, evidence: bundle, decisions: applied, state: state, reason: reason,
-		qualification: qualification,
+		qualification: qualification, deliveryProfile: deliveryProfile,
 	}, nil
 }
 

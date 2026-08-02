@@ -329,7 +329,7 @@ func productionReadyModule(
 		},
 		Issue: deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
 		Title: "Cut over", Body: "Approved authority.", State: "OPEN",
-		Labels:     []string{"status:approved", "type:chore"},
+		Labels:     []string{"delivery:low-risk", "status:approved", "type:chore"},
 		Criteria:   criteria,
 		Exclusions: []issuedelivery.AuthorityItem{}, Dependencies: []issuedelivery.DependencyObservation{},
 		References: []issuedelivery.ReferenceObservation{}, Ambiguities: []issuedelivery.AuthorityItem{},

@@ -73,7 +73,7 @@ func (m *Module) MaterializeInputTemplate(
 			return errors.New("active issue delivery run identity does not match current repository and issue")
 		}
 		compiled, err := compileAuthority(
-			git, tracker, active.Decisions, nil, m.declaredProfile,
+			git, tracker, active.Decisions, nil, m.declaredProfile, active.DeliveryProfile != nil,
 		)
 		if err != nil {
 			return fmt.Errorf("active semantic-input request is stale: %w", err)
@@ -135,7 +135,7 @@ func (m *Module) validateCurrentCIAttributionRequest(ctx context.Context, active
 	if err != nil || selected == nil ||
 		fresh.Branch == nil || active.NonLocal.Branch == nil ||
 		*fresh.Branch != *active.NonLocal.Branch ||
-		*selected != *active.NonLocal.PullRequest ||
+		!equalRemotePullRequest(*selected, *active.NonLocal.PullRequest) ||
 		fresh.Merge != nil ||
 		!equalCICheckObservations(
 			currentInputTemplateChecks(fresh.Checks),

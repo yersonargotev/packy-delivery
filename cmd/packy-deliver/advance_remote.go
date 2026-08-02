@@ -108,6 +108,9 @@ type remotePullRequest struct {
 		Number int    `json:"number"`
 		ID     string `json:"id"`
 	} `json:"closingIssuesReferences"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
 	MergedAt    string `json:"mergedAt"`
 	MergeCommit *struct {
 		OID string `json:"oid"`
@@ -185,7 +188,7 @@ const (
 	checkRunsProjection    = `{check_runs:[.check_runs[]|{name,head_sha,status,conclusion,details_url,app:{id:.app.id,slug:.app.slug}}]}`
 	statusesProjection     = `[.[]|{id,context,state,target_url,creator:{login:.creator.login,id:.creator.id,type:.creator.type,html_url:.creator.html_url}}]`
 	workflowRunProjection  = `{id,name,path,event,head_sha,html_url,repository:{id:.repository.id,node_id:.repository.node_id,full_name:.repository.full_name},pull_requests:[.pull_requests[]|{number,head:{sha:.head.sha,repo:{id:.head.repo.id}},base:{sha:.base.sha,repo:{id:.base.repo.id}}}],actor:{login:.actor.login,id:.actor.id,type:.actor.type,html_url:.actor.html_url}}`
-	pullRequestsProjection = `[.[]|{number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository:{id:.headRepository.id},closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt,mergeCommit:(if .mergeCommit==null then null else {oid:.mergeCommit.oid} end)}]`
+	pullRequestsProjection = `[.[]|{number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository:{id:.headRepository.id},closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],labels:[.labels[]|{name}],mergedAt,mergeCommit:(if .mergeCommit==null then null else {oid:.mergeCommit.oid} end)}]`
 	pullRequestProjection  = `{number,state,baseRefOid,headRefOid,closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt}`
 	remoteRefsProjection   = `[.[]|{ref,object:{type:.object.type,sha:.object.sha}}]`
 )
@@ -242,7 +245,7 @@ func (gateway productionNonLocalGateway) observeNonLocal(
 
 	prRaw, err := gateway.output(ctx, "gh", "pr", "list", "--repo", repo, "--state", "all",
 		"--head", request.Branch, "--json",
-		"number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,closingIssuesReferences,mergedAt,mergeCommit",
+		"number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,closingIssuesReferences,labels,mergedAt,mergeCommit",
 		"--jq", pullRequestsProjection)
 	if err != nil {
 		return issuedelivery.NonLocalObservation{}, fmt.Errorf("observe pull requests: %w", err)
@@ -354,6 +357,32 @@ func (gateway productionNonLocalGateway) EnsurePullRequest(ctx context.Context, 
 	if err != nil {
 		return err
 	}
+	if request.PullRequest > 0 {
+		if request.DeliveryProfile == "" {
+			return errors.New("pull-request profile reconciliation requires the expected delivery profile")
+		}
+		for _, pr := range state.PullRequests {
+			if pr.Number != request.PullRequest || pr.HeadBranch != request.HeadBranch ||
+				pr.HeadSHA != request.HeadSHA || pr.BaseRef != request.BaseRef ||
+				pr.ClosingIssue != request.Issue.Number {
+				continue
+			}
+			profiles := issuedelivery.NormalizeDeliveryProfileLabels(pr.DeliveryProfiles)
+			if len(profiles) == 1 && profiles[0] == request.DeliveryProfile {
+				return nil
+			}
+			if len(profiles) != 0 {
+				return errors.New("pull request has a conflicting delivery profile")
+			}
+			_, err = gateway.output(ctx, "gh", "pr", "edit", strconv.Itoa(request.PullRequest),
+				"--repo", repositoryName(request.Repository), "--add-label", request.DeliveryProfile)
+			if err != nil {
+				return fmt.Errorf("add exact pull-request delivery profile: %w", err)
+			}
+			return nil
+		}
+		return errors.New("exact pull request is not observable for profile reconciliation")
+	}
 	for _, pr := range state.PullRequests {
 		if pr.HeadBranch == request.HeadBranch && pr.HeadSHA == request.HeadSHA &&
 			pr.BaseRef == request.BaseRef && pr.ClosingIssue == request.Issue.Number {
@@ -361,9 +390,13 @@ func (gateway productionNonLocalGateway) EnsurePullRequest(ctx context.Context, 
 		}
 		return errors.New("an incompatible pull request already owns the delivery branch")
 	}
-	_, err = gateway.output(ctx, "gh", "pr", "create", "--repo", repositoryName(request.Repository),
+	args := []string{"pr", "create", "--repo", repositoryName(request.Repository),
 		"--base", request.BaseRef, "--head", request.HeadBranch,
-		"--title", request.Title, "--body", request.Body)
+		"--title", request.Title, "--body", request.Body}
+	if request.DeliveryProfile != "" {
+		args = append(args, "--label", request.DeliveryProfile)
+	}
+	_, err = gateway.output(ctx, "gh", args...)
 	if err != nil {
 		return fmt.Errorf("create exact pull request: %w", err)
 	}
@@ -1139,11 +1172,16 @@ func convertPullRequest(pr remotePullRequest, request issuedelivery.NonLocalObse
 		!validSHA(pr.BaseRefOID) || !validSHA(pr.HeadRefOID) || pr.HeadRepository.ID == "" {
 		return issuedelivery.RemotePullRequestObservation{}, errors.New("pull-request observation has an unsafe identity")
 	}
+	labels := make([]string, 0, len(pr.Labels))
+	for _, label := range pr.Labels {
+		labels = append(labels, label.Name)
+	}
 	return issuedelivery.RemotePullRequestObservation{
 		Number: pr.Number, URL: pr.URL, State: pr.State, BaseRef: pr.BaseRefName,
 		BaseSHA: pr.BaseRefOID, HeadBranch: pr.HeadRefName, HeadSHA: pr.HeadRefOID,
 		HeadRepositoryNodeID: pr.HeadRepository.ID,
 		ClosingIssue:         closingIssue(pr.ClosingIssuesReferences, request.Issue),
+		DeliveryProfiles:     issuedelivery.NormalizeDeliveryProfileLabels(labels),
 	}, nil
 }
 

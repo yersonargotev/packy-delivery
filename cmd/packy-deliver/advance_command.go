@@ -83,6 +83,7 @@ type advanceReport struct {
 	QualificationCorrections []issuedelivery.QualificationCorrection       `json:"qualification_corrections,omitempty"`
 	ValidationSessions       []issuedelivery.ValidationSession             `json:"validation_sessions,omitempty"`
 	ValidationInvalidations  []issuedelivery.ValidationInvalidation        `json:"validation_invalidations,omitempty"`
+	DeliveryProfile          *issuedelivery.DeliveryProfileBinding         `json:"delivery_profile,omitempty"`
 	Evidence                 *deliveryevidence.Bundle                      `json:"evidence,omitempty"`
 	Observations             issuedelivery.Observations                    `json:"observations"`
 	Candidate                *issuedelivery.Candidate                      `json:"candidate,omitempty"`
@@ -685,6 +686,7 @@ func reportFromOutcome(outcome issuedelivery.Outcome, now time.Time) (advanceRep
 		QualificationCorrections: outcome.QualificationCorrections,
 		ValidationSessions:       outcome.ValidationSessions,
 		ValidationInvalidations:  outcome.ValidationInvalidations,
+		DeliveryProfile:          outcome.DeliveryProfile,
 		Candidate:                outcome.Candidate, LocalReadiness: outcome.LocalReadiness,
 		NonLocal: outcome.NonLocal, Timing: outcome.Timing, TimingReport: timingReport,
 	}, nil
