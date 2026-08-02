@@ -463,7 +463,7 @@ func TestAdvanceMonitorsRequiredCIForExactHead(t *testing.T) {
 	}
 }
 
-func TestAdvanceRetriesInfrastructureFailureOnlyOnceWithoutInvalidatingCandidate(t *testing.T) {
+func TestInfrastructureRetryJournalRemainsReadableUntilGreenRetryIsAdopted(t *testing.T) {
 	module, _, gateway, request, ready := nonLocalFixture(t)
 	advanceToExactPullRequest(t, module, gateway, request, ready)
 	checks := exactSuccessfulChecks(ready.Candidate.CommitSHA)
@@ -473,12 +473,156 @@ func TestAdvanceRetriesInfrastructureFailureOnlyOnceWithoutInvalidatingCandidate
 	authorization := exactNonLocalAuthorization(ready)
 	request.NonLocal = &authorization
 
-	first := mustAdvance(t, module, request)
-	second := mustAdvance(t, module, request)
-	if gateway.retryCalls != 1 || len(second.NonLocal.Retries) != 1 ||
-		first.LocalReadiness == nil || second.LocalReadiness == nil ||
-		second.Candidate.Exhaustive == nil || len(second.Candidate.Acceptance) == 0 {
-		t.Fatalf("first=%#v second=%#v gateway=%#v", first, second, gateway)
+	retrying := mustAdvance(t, module, request)
+	if gateway.retryCalls != 1 || len(retrying.NonLocal.Retries) != 1 ||
+		retrying.LocalReadiness == nil || retrying.Candidate.Exhaustive == nil ||
+		len(retrying.Candidate.Acceptance) == 0 {
+		t.Fatalf("retrying=%#v gateway=%#v", retrying, gateway)
+	}
+
+	checks[0].Conclusion = ""
+	checks[0].FailureAttribution = ""
+	gateway.observation.Checks = checks
+	pending := mustAdvance(t, module, request)
+	if gateway.retryCalls != 1 || pending.PauseCause != PauseExternalResult ||
+		pending.NextAction != ActionObserveExternalResult ||
+		pending.NonLocal.CIStatus != string(CIPending) ||
+		pending.Candidate.ID != ready.Candidate.ID ||
+		pending.Candidate.CommitSHA != ready.Candidate.CommitSHA {
+		t.Fatalf("pending=%#v gateway=%#v", pending, gateway)
+	}
+
+	status, err := module.Status(context.Background(), StatusRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+	})
+	if err != nil || status.PauseCause != PauseExternalResult ||
+		status.NextAction != ActionObserveExternalResult {
+		t.Fatalf("status=%#v err=%v", status, err)
+	}
+
+	module.waiter = &timeoutAfterInitialPollWaiter{ready: make(chan struct{})}
+	var events []WatchEvent
+	err = module.Watch(context.Background(), WatchRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+		Interval: MinimumWatchInterval, Timeout: MinimumWatchTimeout,
+	}, func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	var timeoutErr *WatchTimeoutError
+	if !errors.As(err, &timeoutErr) || len(events) != 2 ||
+		events[0].Outcome.PauseCause != PauseExternalResult ||
+		events[1].TerminalOutcome != WatchTerminalTimeoutNoChange {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+
+	checks[0].Conclusion = "success"
+	gateway.observation.Checks = checks
+	green := mustAdvance(t, module, request)
+	if gateway.retryCalls != 1 || green.NonLocal.CIStatus != string(CISuccess) ||
+		green.Candidate.ID != ready.Candidate.ID ||
+		green.Candidate.CommitSHA != ready.Candidate.CommitSHA ||
+		!strings.Contains(green.Reason, "awaiting merge authority") {
+		t.Fatalf("green=%#v gateway=%#v", green, gateway)
+	}
+
+	status, err = module.Status(context.Background(), StatusRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+	})
+	if err != nil || status.NonLocal.CIStatus != string(CISuccess) ||
+		status.NextAction != ActionAdvance {
+		t.Fatalf("green status=%#v err=%v", status, err)
+	}
+	module.waiter = &watchTestWaiter{timeout: MinimumWatchTimeout}
+	events = nil
+	err = module.Watch(context.Background(), WatchRequest{
+		RepositoryPath: request.RepositoryPath, IssueNumber: request.IssueNumber,
+		Interval: MinimumWatchInterval, Timeout: MinimumWatchTimeout,
+	}, func(event WatchEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil || len(events) != 1 ||
+		events[0].Outcome.NonLocal.CIStatus != string(CISuccess) ||
+		events[0].Outcome.NextAction != ActionAdvance {
+		t.Fatalf("green events=%#v err=%v", events, err)
+	}
+}
+
+func TestInfrastructureRetryJournalValidationFailsClosed(t *testing.T) {
+	module, git, gateway, request, ready := nonLocalFixture(t)
+	advanceToExactPullRequest(t, module, gateway, request, ready)
+	checks := exactSuccessfulChecks(ready.Candidate.CommitSHA)
+	checks[0].Conclusion = "failure"
+	checks[0].FailureAttribution = FailureInfrastructure
+	gateway.observation.Checks = checks
+	authorization := exactNonLocalAuthorization(ready)
+	request.NonLocal = &authorization
+	mustAdvance(t, module, request)
+	checks[0].Conclusion = ""
+	checks[0].FailureAttribution = ""
+	gateway.observation.Checks = checks
+	mustAdvance(t, module, request)
+
+	var valid runRecord
+	err := module.store.withIssueLock(
+		context.Background(), git.value.CommonDir, request.IssueNumber,
+		func(store lockedIssueStore) error {
+			_, data, found, err := store.loadActive()
+			if err != nil || !found {
+				return err
+			}
+			valid, err = decodeRun(data)
+			return err
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*runRecord)
+	}{
+		{name: "malformed retry", mutate: func(value *runRecord) {
+			value.NonLocal.Retries[0].FailedRunID = 0
+		}},
+		{name: "stale head", mutate: func(value *runRecord) {
+			value.NonLocal.Checks[0].HeadSHA = strings.Repeat("c", 40)
+		}},
+		{name: "foreign run", mutate: func(value *runRecord) {
+			value.NonLocal.Retries[0].FailedRunID++
+		}},
+		{name: "foreign job", mutate: func(value *runRecord) {
+			value.NonLocal.Retries[0].CheckIdentity = "foreign required check"
+		}},
+		{name: "conflicting attribution", mutate: func(value *runRecord) {
+			value.NonLocal.Checks[0].Conclusion = "failure"
+			value.NonLocal.Checks[0].FailureAttribution = FailureCandidate
+		}},
+		{name: "conflicting duplicate", mutate: func(value *runRecord) {
+			value.NonLocal.Retries = append(value.NonLocal.Retries, value.NonLocal.Retries[0])
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := encodeRun(valid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutated, err := decodeRun(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.mutate(&mutated)
+			candidate := latestCandidate(&mutated)
+			if candidate == nil {
+				t.Fatal("valid retry journal lacks candidate")
+			}
+			if err := validateNonLocalRecord(mutated, *candidate); err == nil {
+				t.Fatalf("incompatible retry journal was accepted: %#v", mutated.NonLocal)
+			}
+		})
 	}
 }
 

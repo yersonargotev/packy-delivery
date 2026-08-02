@@ -16,6 +16,7 @@ import (
 
 type operatorWorkflowNonLocalGateway struct {
 	observation issuedelivery.NonLocalObservation
+	retryCalls  int
 }
 
 func (gateway *operatorWorkflowNonLocalGateway) ObserveNonLocal(
@@ -49,10 +50,11 @@ func (gateway *operatorWorkflowNonLocalGateway) EnsurePullRequest(
 	return nil
 }
 
-func (*operatorWorkflowNonLocalGateway) RetryInfrastructureCheck(
+func (gateway *operatorWorkflowNonLocalGateway) RetryInfrastructureCheck(
 	context.Context,
 	issuedelivery.RetryInfrastructureCheckRequest,
 ) error {
+	gateway.retryCalls++
 	return nil
 }
 
@@ -222,6 +224,100 @@ func TestOperatorWorkflowRoundTripsGeneratedInputsThroughRealModule(t *testing.T
 		len(final.NonLocal.Checks) != 1 ||
 		final.NonLocal.Checks[0].RunID != 31 {
 		t.Fatalf("final Advance did not adopt the watched external result: %#v", final)
+	}
+}
+
+func TestOperatorCommandsResumePersistedInfrastructureRetryJournal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	nonLocal := &operatorWorkflowNonLocalGateway{observation: issuedelivery.NonLocalObservation{
+		PullRequests: []issuedelivery.RemotePullRequestObservation{},
+		Checks:       []issuedelivery.CICheckObservation{},
+	}}
+	local := &commandCompletionLocal{}
+	module, ready, repository, _, clock := productionReadyModule(t, nonLocal, local, nil, "")
+	local.observation = issuedelivery.LocalCompletionObservation{
+		OperatorStateSHA256: strings.Repeat("9", 64),
+		Integration: issuedelivery.IntegrationWorkspaceObservation{
+			Path: repository, Branch: ready.LocalReadiness.Branch, Clean: true,
+		},
+		Worktrees: []issuedelivery.ManagedWorktreeObservation{},
+		LocalBranch: &issuedelivery.LocalBranchObservation{
+			Name: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+		},
+		LocalMain: issuedelivery.LocalMainObservation{
+			Exists: true, HeadSHA: strings.Repeat("a", 40), OriginHeadSHA: strings.Repeat("a", 40),
+			Relation: issuedelivery.LocalMainSynced, Clean: true,
+		},
+	}
+	cmd := command{
+		Now: clock.Now,
+		AdvanceFactory: func(advanceOptions) (issueDeliveryAdvancer, error) {
+			return module, nil
+		},
+		StatusFactory: func(statusOptions) (issueDeliveryStatuser, error) {
+			return module, nil
+		},
+	}
+
+	waiting := runOperatorAdvanceReport(t, cmd, repository, "--authorize-non-local")
+	if waiting.NonLocal == nil || waiting.NonLocal.PullRequest == nil {
+		waiting = runOperatorAdvanceReport(t, cmd, repository)
+	}
+	if waiting.NonLocal == nil || waiting.NonLocal.PullRequest == nil {
+		t.Fatalf("authorized command did not reach exact CI wait: %#v", waiting)
+	}
+	checks := commandSuccessfulChecks(
+		deliveryevidence.RepositoryIdentity{Owner: "yersonargotev", Name: "packy", NodeID: "R1"},
+		ready.Candidate.CommitSHA,
+		strings.Repeat("a", 40),
+	)
+	checks[0].Conclusion = "failure"
+	checks[0].FailureAttribution = issuedelivery.FailureInfrastructure
+	nonLocal.observation.Checks = checks
+	retrying := runOperatorAdvanceReport(t, cmd, repository)
+	if nonLocal.retryCalls != 1 || retrying.NonLocal == nil ||
+		len(retrying.NonLocal.Retries) != 1 {
+		t.Fatalf("retrying report=%#v retry calls=%d", retrying, nonLocal.retryCalls)
+	}
+
+	checks[0].Conclusion = ""
+	checks[0].FailureAttribution = ""
+	nonLocal.observation.Checks = checks
+	pending := runOperatorAdvanceReport(t, cmd, repository)
+	if nonLocal.retryCalls != 1 || pending.PauseCause != issuedelivery.PauseExternalResult ||
+		pending.NextAction != issuedelivery.ActionObserveExternalResult ||
+		pending.NonLocal == nil || pending.NonLocal.CIStatus != string(issuedelivery.CIPending) {
+		t.Fatalf("pending report=%#v retry calls=%d", pending, nonLocal.retryCalls)
+	}
+
+	var stdout bytes.Buffer
+	if err := cmd.run(context.Background(), []string{
+		"status", "--repository", repository, "--issue", "361",
+	}, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	var status compactAdvanceReport
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.RunID != ready.RunID || status.PauseCause != issuedelivery.PauseExternalResult ||
+		status.NextAction != issuedelivery.ActionObserveExternalResult {
+		t.Fatalf("status did not decode persisted v0.6.2 retry journal: %#v", status)
+	}
+
+	checks[0].Conclusion = "success"
+	nonLocal.observation.Checks = checks
+	green := runOperatorAdvanceReport(t, cmd, repository)
+	if nonLocal.retryCalls != 1 || green.NonLocal == nil ||
+		green.NonLocal.CIStatus != string(issuedelivery.CISuccess) ||
+		len(green.NonLocal.Retries) != 1 || green.Candidate == nil ||
+		green.Candidate.ID != ready.Candidate.ID ||
+		green.Candidate.CommitSHA != ready.Candidate.CommitSHA ||
+		!strings.Contains(green.Reason, "merge was dispatched") {
+		t.Fatalf("green retry did not resume to merge readiness: %#v", green)
 	}
 }
 
