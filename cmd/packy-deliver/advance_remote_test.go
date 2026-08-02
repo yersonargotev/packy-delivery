@@ -61,6 +61,59 @@ func TestProductionNonLocalPushObservesThenUsesExactRefspec(t *testing.T) {
 	}
 }
 
+func TestProductionEnsurePullRequestCreatesWithQualifiedDeliveryProfile(t *testing.T) {
+	head, base := strings.Repeat("b", 40), strings.Repeat("a", 40)
+	runner := &fakeRemoteRunner{outputs: [][]byte{
+		[]byte(`{"id":"R1","nameWithOwner":"yersonargotev/packy"}`),
+		nil,
+		remoteRefFixture("chore/issue-361-remote-adapter", head),
+		remoteRefFixture("main", base),
+		[]byte(base + "\n"),
+		[]byte(`[]`),
+		nil,
+	}}
+	request := issuedelivery.EnsurePullRequestRequest{
+		Repository:  packyRemoteRepository(),
+		Issue:       deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+		CandidateID: "candidate", BaseRef: "main",
+		HeadBranch: "chore/issue-361-remote-adapter", HeadSHA: head,
+		Title: "Deliver issue", Body: "Closes #361", DeliveryProfile: "delivery:low-risk",
+	}
+	if err := (productionNonLocalGateway{runner: runner}).EnsurePullRequest(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	got := runner.calls[len(runner.calls)-1]
+	if got.name != "gh" || !reflect.DeepEqual(got.args, []string{
+		"pr", "create", "--repo", "yersonargotev/packy", "--base", "main",
+		"--head", request.HeadBranch, "--title", request.Title, "--body", request.Body,
+		"--label", "delivery:low-risk",
+	}) {
+		t.Fatalf("create command=%#v", got)
+	}
+}
+
+func TestProductionEnsurePullRequestAddsOnlyMissingQualifiedDeliveryProfile(t *testing.T) {
+	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
+	runner := candidateHeadedGovernanceRunner(head, base, definition, nil)
+	runner.outputs = append(runner.outputs, nil)
+	request := issuedelivery.EnsurePullRequestProfileRequest{
+		Repository:  packyRemoteRepository(),
+		Issue:       deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
+		CandidateID: "candidate", BaseRef: "main",
+		HeadBranch: "chore/issue-361-remote-adapter", HeadSHA: head,
+		PullRequest: 17, ExpectedLabel: "delivery:low-risk",
+	}
+	if err := (productionNonLocalGateway{runner: runner}).EnsurePullRequestProfile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	got := runner.calls[len(runner.calls)-1]
+	if got.name != "gh" || !reflect.DeepEqual(got.args, []string{
+		"pr", "edit", "17", "--repo", "yersonargotev/packy", "--add-label", "delivery:low-risk",
+	}) {
+		t.Fatalf("profile reconciliation command=%#v", got)
+	}
+}
+
 func TestProductionNonLocalObservationRefreshesAndBindsOriginMain(t *testing.T) {
 	head, main := strings.Repeat("b", 40), strings.Repeat("a", 40)
 	runner := &fakeRemoteRunner{outputs: [][]byte{
@@ -95,10 +148,35 @@ func TestProductionNonLocalObservationRefreshesAndBindsOriginMain(t *testing.T) 
 	if got := runner.calls[5]; got.name != "gh" || !reflect.DeepEqual(got.args, []string{
 		"pr", "list", "--repo", "yersonargotev/packy", "--state", "all",
 		"--head", "chore/issue-361-remote-adapter", "--json",
-		"number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,closingIssuesReferences,mergedAt,mergeCommit",
+		"number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,closingIssuesReferences,labels,mergedAt,mergeCommit",
 		"--jq", pullRequestsProjection,
 	}) {
 		t.Fatalf("pull-request observation command = %#v", got)
+	}
+}
+
+func TestConvertPullRequestExposesNormalizedDeliveryProfiles(t *testing.T) {
+	pr := remotePullRequest{
+		Number: 17, URL: "https://github.com/yersonargotev/packy/pull/17", State: "OPEN",
+		BaseRefName: "main", BaseRefOID: strings.Repeat("a", 40),
+		HeadRefName: "chore/issue-361-remote-adapter", HeadRefOID: strings.Repeat("b", 40),
+	}
+	pr.HeadRepository.ID = "R1"
+	pr.ClosingIssuesReferences = append(pr.ClosingIssuesReferences, struct {
+		Number int    `json:"number"`
+		ID     string `json:"id"`
+	}{Number: 361, ID: "I361"})
+	for _, name := range []string{"status:approved", " Delivery:Standard ", "delivery:low-risk", "delivery:standard"} {
+		pr.Labels = append(pr.Labels, struct {
+			Name string `json:"name"`
+		}{Name: name})
+	}
+	got, err := convertPullRequest(pr, candidateHeadedGovernanceRequest(strings.Repeat("b", 40)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.DeliveryProfiles, []string{"delivery:low-risk", "delivery:standard"}) {
+		t.Fatalf("delivery profiles=%v", got.DeliveryProfiles)
 	}
 }
 

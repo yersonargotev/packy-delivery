@@ -125,6 +125,13 @@ func (commandWaitingNonLocalGateway) EnsurePullRequest(
 	return nil
 }
 
+func (commandWaitingNonLocalGateway) EnsurePullRequestProfile(
+	context.Context,
+	issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	return nil
+}
+
 func (commandWaitingNonLocalGateway) RetryInfrastructureCheck(
 	context.Context,
 	issuedelivery.RetryInfrastructureCheckRequest,
@@ -464,7 +471,7 @@ func TestAdvanceCommandHighestSeamCreatesV2RunThroughRealModule(t *testing.T) {
 		},
 		Issue: deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
 		Title: "Cut over issue delivery to Advance", Body: "self-contained authority",
-		State: "OPEN", Labels: []string{"status:approved", "type:chore"},
+		State: "OPEN", Labels: []string{"delivery:low-risk", "status:approved", "type:chore"},
 		Criteria: []issuedelivery.AuthorityItem{{
 			Text: "The private CLI invokes Advance.", EvidenceLink: "issue#361:criterion-1",
 		}},
@@ -547,7 +554,7 @@ func TestAdvanceCommandRealModuleReportsQualificationPauseCategories(t *testing.
 				},
 				Issue: deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
 				Title: "Pause metadata", Body: "self-contained authority",
-				State: "OPEN", Labels: []string{"status:approved", "type:chore"},
+				State: "OPEN", Labels: []string{"delivery:low-risk", "status:approved", "type:chore"},
 				Criteria: []issuedelivery.AuthorityItem{{
 					Text: "Advance reports typed pause metadata.", EvidenceLink: "issue#361:criterion-1",
 				}},
@@ -609,7 +616,7 @@ func TestAdvanceCommandRealModuleReportsLockContention(t *testing.T) {
 			},
 			Issue: deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
 			Title: "Lock contention", Body: "self-contained authority",
-			State: "OPEN", Labels: []string{"status:approved", "type:chore"},
+			State: "OPEN", Labels: []string{"delivery:low-risk", "status:approved", "type:chore"},
 			Criteria: []issuedelivery.AuthorityItem{{
 				Text: "Advance retries lock contention.", EvidenceLink: "issue#361:criterion-1",
 			}},

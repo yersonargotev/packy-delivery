@@ -39,6 +39,13 @@ func (remote *governanceProcessRemote) EnsurePullRequest(
 	return nil
 }
 
+func (remote *governanceProcessRemote) EnsurePullRequestProfile(
+	_ context.Context,
+	request issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	return reconcileObservedProfile(remote.observation.PullRequests, request)
+}
+
 type governanceProcessResult struct {
 	Report         advanceReport `json:"report"`
 	ObservationOps []string      `json:"observation_ops"`
@@ -77,7 +84,7 @@ func TestAdvanceProcessReachesMergeWithCandidateHeadedPullRequestTargetGovernanc
 		t.Fatalf("ordinary Packy CI did not reach an adopted merge: %#v", result.Report)
 	}
 	for _, operation := range result.ObservationOps {
-		for _, forbidden := range []string{"issue comment", "issue edit", "label", " status create"} {
+		for _, forbidden := range []string{"issue comment", "issue edit", "--add-label", " status create"} {
 			if strings.Contains(operation, forbidden) {
 				t.Fatalf("Governance observation required operator side effect %q", operation)
 			}

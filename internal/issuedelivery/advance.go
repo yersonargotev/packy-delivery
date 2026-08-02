@@ -76,9 +76,20 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 				}
 			}
 		}
-		compiled, err := compileAuthority(git, tracker, active.Decisions, request.Decision, m.declaredProfile)
+		requireDeliveryProfile := !found || active.DeliveryProfile != nil
+		compiled, err := compileAuthority(
+			git, tracker, active.Decisions, request.Decision, m.declaredProfile, requireDeliveryProfile,
+		)
 		if err != nil {
 			return err
+		}
+		if found && active.DeliveryProfile == nil && active.AuthoritySHA256 != compiled.hash {
+			compiled, err = compileAuthority(
+				git, tracker, active.Decisions, request.Decision, m.declaredProfile, true,
+			)
+			if err != nil {
+				return err
+			}
 		}
 		if found {
 			if active.AuthoritySHA256 == compiled.hash {
@@ -146,6 +157,7 @@ func (m *Module) Advance(ctx context.Context, request Request) (Outcome, error) 
 			Decisions:                      append([]Decision{}, compiled.decisions...),
 			Observations:                   observationsFrom(git, tracker, compiled.hash),
 			EffectiveProfile:               compiled.evidence.RiskProfile,
+			DeliveryProfile:                compiled.deliveryProfile,
 			Timing: []Timing{{
 				Sequence: 1, Phase: "qualification", To: compiled.state,
 				StartedAt: nowStarted.Format(timeFormat), CompletedAt: nowCompleted.Format(timeFormat),
@@ -197,6 +209,7 @@ func compatibleOrphan(
 		record.AuthoritySHA256 == compiled.hash &&
 		record.SupersedesRunID == supersedes &&
 		equalQualificationEvidence(record.Evidence, evidencePointer(compiled)) &&
+		reflect.DeepEqual(record.DeliveryProfile, compiled.deliveryProfile) &&
 		reflect.DeepEqual(record.PendingDecision, compiled.pending) &&
 		reflect.DeepEqual(record.Decisions, compiled.decisions)
 	if !common {
@@ -286,6 +299,7 @@ func outcomeFromRecord(record runRecord) Outcome {
 		ObservationDiagnostic: cloneObservationDiagnostic(record.ObservationDiagnostic),
 		Timing:                append([]Timing(nil), record.Timing...),
 		EffectiveProfile:      record.EffectiveProfile,
+		DeliveryProfile:       record.DeliveryProfile,
 	}
 	if outcome.BlockerKind == BlockerLocalReadiness {
 		outcome.Remediation = &LocalReadinessRemediation{
@@ -338,6 +352,7 @@ func deterministicWaitingTransition(outcome Outcome) bool {
 	case "exact non-local delivery authority is recorded",
 		"exact remote issue branch is proved",
 		"exact pull-request creation intent is recorded before mutation",
+		"exact pull-request profile reconciliation intent is recorded before mutation",
 		"one exact-head pull request is proved",
 		"required CI is green for the exact candidate HEAD; awaiting merge authority",
 		"exact merge intent is recorded before mutation",
@@ -412,7 +427,7 @@ func blockerKindFromRecord(record runRecord) BlockerKind {
 		return BlockerNonLocalObservation
 	case "branch-push":
 		return BlockerRemoteBranch
-	case "pull-request":
+	case "pull-request", "pull-request-profile":
 		return BlockerPullRequest
 	case "ci-wait":
 		if strings.Contains(reason, "attribution is unknown") {

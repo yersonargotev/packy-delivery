@@ -46,8 +46,16 @@ func (gateway *operatorWorkflowNonLocalGateway) EnsurePullRequest(
 		HeadBranch: request.HeadBranch, HeadSHA: request.HeadSHA,
 		HeadRepositoryNodeID: request.Repository.NodeID,
 		ClosingIssue:         request.Issue.Number,
+		DeliveryProfiles:     []string{string(request.DeliveryProfile)},
 	}}
 	return nil
+}
+
+func (gateway *operatorWorkflowNonLocalGateway) EnsurePullRequestProfile(
+	_ context.Context,
+	request issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	return reconcileObservedProfile(gateway.observation.PullRequests, request)
 }
 
 func (gateway *operatorWorkflowNonLocalGateway) RetryInfrastructureCheck(

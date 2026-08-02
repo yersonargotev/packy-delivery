@@ -154,7 +154,9 @@ func (m *Module) ReviewPackets(ctx context.Context, request ReviewPacketRequest)
 		if tracker.Repository != record.Repository || tracker.Issue != record.Issue {
 			return errors.New("active issue delivery run identity does not match current repository and issue")
 		}
-		compiled, err := compileAuthority(git, tracker, record.Decisions, nil, m.declaredProfile)
+		compiled, err := compileAuthority(
+			git, tracker, record.Decisions, nil, m.declaredProfile, record.DeliveryProfile != nil,
+		)
 		if err != nil || compiled.hash != record.AuthoritySHA256 {
 			return errors.New("review packet request is stale because current authority changed")
 		}

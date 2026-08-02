@@ -127,6 +127,14 @@ func (c *statusEffectCounters) EnsurePullRequest(
 	return nil
 }
 
+func (c *statusEffectCounters) EnsurePullRequestProfile(
+	context.Context,
+	issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	c.nonLocalWrite++
+	return nil
+}
+
 func (c *statusEffectCounters) RetryInfrastructureCheck(
 	context.Context,
 	issuedelivery.RetryInfrastructureCheckRequest,
@@ -340,7 +348,7 @@ func TestStatusCommandHighestSeamUsesGitCommonDirectoryAndReadOnlyModule(t *test
 		Title:  "Expose run-aware schema-v2 status",
 		Body:   "self-contained authority",
 		State:  "OPEN",
-		Labels: []string{"status:approved", "type:chore"},
+		Labels: []string{"delivery:low-risk", "status:approved", "type:chore"},
 		Criteria: []issuedelivery.AuthorityItem{{
 			Text: "Status performs one observation.", EvidenceLink: "issue#25:criterion-1",
 		}},

@@ -238,6 +238,7 @@ type Outcome struct {
 	NonLocal                 *NonLocalDelivery
 	Timing                   []Timing
 	EffectiveProfile         deliveryevidence.DeliveryRiskProfile
+	DeliveryProfile          *DeliveryProfileBinding
 	StatusObservation        *StatusObservation
 }
 
@@ -399,6 +400,7 @@ type NonLocalGateway interface {
 	ObserveNonLocal(context.Context, NonLocalObserveRequest) (NonLocalObservation, error)
 	PushIssueBranch(context.Context, PushIssueBranchRequest) error
 	EnsurePullRequest(context.Context, EnsurePullRequestRequest) error
+	EnsurePullRequestProfile(context.Context, EnsurePullRequestProfileRequest) error
 	RetryInfrastructureCheck(context.Context, RetryInfrastructureCheckRequest) error
 	EnsureMerge(context.Context, EnsureMergeRequest) error
 	EnsureRemoteIssueBranchAbsent(context.Context, DeleteRemoteIssueBranchRequest) error
@@ -783,15 +785,16 @@ type RemoteBranchObservation struct {
 }
 
 type RemotePullRequestObservation struct {
-	Number               int    `json:"number"`
-	URL                  string `json:"url"`
-	State                string `json:"state"`
-	BaseRef              string `json:"base_ref"`
-	BaseSHA              string `json:"base_sha"`
-	HeadBranch           string `json:"head_branch"`
-	HeadSHA              string `json:"head_sha"`
-	HeadRepositoryNodeID string `json:"head_repository_node_id"`
-	ClosingIssue         int    `json:"closing_issue"`
+	Number               int      `json:"number"`
+	URL                  string   `json:"url"`
+	State                string   `json:"state"`
+	BaseRef              string   `json:"base_ref"`
+	BaseSHA              string   `json:"base_sha"`
+	HeadBranch           string   `json:"head_branch"`
+	HeadSHA              string   `json:"head_sha"`
+	HeadRepositoryNodeID string   `json:"head_repository_node_id"`
+	ClosingIssue         int      `json:"closing_issue"`
+	DeliveryProfiles     []string `json:"delivery_profiles"`
 }
 
 type NonLocalObservation struct {
@@ -811,6 +814,22 @@ type PushIssueBranchRequest struct {
 }
 
 type EnsurePullRequestRequest struct {
+	RunID           string
+	Repository      deliveryevidence.RepositoryIdentity
+	Issue           deliveryevidence.IssueIdentity
+	CandidateID     string
+	IdempotencyKey  string
+	BaseRef         string
+	HeadBranch      string
+	HeadSHA         string
+	Title           string
+	Body            string
+	DeliveryProfile DeliveryProfileLabel
+}
+
+type DeliveryProfileLabel string
+
+type EnsurePullRequestProfileRequest struct {
 	RunID          string
 	Repository     deliveryevidence.RepositoryIdentity
 	Issue          deliveryevidence.IssueIdentity
@@ -819,11 +838,19 @@ type EnsurePullRequestRequest struct {
 	BaseRef        string
 	HeadBranch     string
 	HeadSHA        string
-	Title          string
-	Body           string
+	PullRequest    int
+	ExpectedLabel  DeliveryProfileLabel
 }
 
 type PullRequestIntent struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	PreparedAt     string `json:"prepared_at"`
+	DispatchedAt   string `json:"dispatched_at,omitempty"`
+}
+
+type PullRequestProfileIntent struct {
+	PullRequest    int    `json:"pull_request"`
+	ExpectedLabel  string `json:"expected_label"`
 	IdempotencyKey string `json:"idempotency_key"`
 	PreparedAt     string `json:"prepared_at"`
 	DispatchedAt   string `json:"dispatched_at,omitempty"`
@@ -1009,6 +1036,7 @@ type NonLocalDelivery struct {
 	BaseRef           string                        `json:"base_ref"`
 	Branch            *RemoteBranchObservation      `json:"branch,omitempty"`
 	PullRequestIntent *PullRequestIntent            `json:"pull_request_intent,omitempty"`
+	ProfileIntent     *PullRequestProfileIntent     `json:"profile_intent,omitempty"`
 	PullRequest       *RemotePullRequestObservation `json:"pull_request,omitempty"`
 	Checks            []CICheckObservation          `json:"checks"`
 	Retries           []CIRetry                     `json:"retries"`
@@ -1157,6 +1185,7 @@ type runRecord struct {
 	QualificationCorrections       []QualificationCorrection
 	LocalReadiness                 *LocalReadiness
 	EffectiveProfile               deliveryevidence.DeliveryRiskProfile
+	DeliveryProfile                *DeliveryProfileBinding
 	RequiredBoundaries             []SensitiveBoundary
 	ProfileHistory                 []ProfileTransition
 	ValidationSessions             []ValidationSession

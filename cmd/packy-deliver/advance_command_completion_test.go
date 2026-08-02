@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -88,9 +89,30 @@ func (r *commandCompletionRemote) EnsurePullRequest(
 		State: "OPEN", BaseRef: request.BaseRef, BaseSHA: strings.Repeat("a", 40),
 		HeadBranch: request.HeadBranch, HeadSHA: request.HeadSHA,
 		HeadRepositoryNodeID: request.Repository.NodeID, ClosingIssue: request.Issue.Number,
+		DeliveryProfiles: []string{string(request.DeliveryProfile)},
 	}}
 	r.observation.Checks = commandSuccessfulChecks(request.Repository, request.HeadSHA, strings.Repeat("a", 40))
 	return nil
+}
+
+func (r *commandCompletionRemote) EnsurePullRequestProfile(
+	_ context.Context,
+	request issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	return reconcileObservedProfile(r.observation.PullRequests, request)
+}
+
+func reconcileObservedProfile(
+	pullRequests []issuedelivery.RemotePullRequestObservation,
+	request issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	for index := range pullRequests {
+		if pullRequests[index].Number == request.PullRequest {
+			pullRequests[index].DeliveryProfiles = []string{string(request.ExpectedLabel)}
+			return nil
+		}
+	}
+	return errors.New("pull request is not observable")
 }
 
 func (*commandCompletionRemote) RetryInfrastructureCheck(

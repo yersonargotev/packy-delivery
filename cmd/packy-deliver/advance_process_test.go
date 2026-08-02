@@ -565,7 +565,7 @@ func newProcessLifecycleModuleWithExecutors(
 		},
 		Issue: deliveryevidence.IssueIdentity{Number: 44, NodeID: "I44"},
 		Title: "Reproduce Advance process cancellation", Body: "Approved authority.", State: "OPEN",
-		Labels: []string{"status:approved", "type:chore"},
+		Labels: []string{"delivery:low-risk", "status:approved", "type:chore"},
 		Criteria: []issuedelivery.AuthorityItem{{
 			Text: "Characterize a long-running Advance process.", EvidenceLink: "issue#44:acceptance-1",
 		}},

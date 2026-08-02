@@ -146,7 +146,7 @@ func TestLegacyRunContinuesUnderV1AssuranceWithoutRiskReclassification(t *testin
 				record.Candidates[index].BoundaryProofs = nil
 			}
 			compiled, compileErr := compileAuthority(
-				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard,
+				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard, false,
 			)
 			if compileErr != nil {
 				return compileErr
@@ -251,7 +251,7 @@ func TestLegacyRunAtStartingHeadStillCreatesHistoricalCandidate(t *testing.T) {
 				record.Evidence.AcceptanceMatrix[index].Obligations = nil
 			}
 			compiled, compileErr := compileAuthority(
-				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard,
+				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard, false,
 			)
 			if compileErr != nil {
 				return compileErr
@@ -339,7 +339,7 @@ func TestLegacyCandidateChangingRejectedOnlyDecisionRetainsRuntimeSemantics(t *t
 				record.Candidates[index].BoundaryProofs = nil
 			}
 			compiled, compileErr := compileAuthority(
-				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard,
+				git.value, tracker.value, record.Decisions, nil, deliveryevidence.RiskStandard, false,
 			)
 			if compileErr != nil {
 				return compileErr

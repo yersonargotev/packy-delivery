@@ -1,7 +1,7 @@
 # Packy Issue Delivery
 
 Status: Active
-Release: v0.6.3
+Release: v0.7.0
 
 ## Goal
 
@@ -65,6 +65,15 @@ checks, review cadence, evidence depth, specialist review, and
 sensitive-boundary proof. High-risk delivery adds the specialist review required
 by the crossed boundary and may add one exhaustive checkpoint immediately
 before a hard-to-reverse effect.
+
+Every newly qualified authority must carry exactly one matching
+`delivery:low-risk`, `delivery:standard`, or `delivery:high-risk` label. The run
+persists that exact authority-label/profile binding. Missing, multiple, or
+conflicting authority profiles fail qualification. Existing schema-v2 runs
+that predate the binding remain readable and resume under their prior
+compatibility rules; schema-v1 behavior is unchanged. A candidate whose
+mechanically raised profile no longer matches the qualified binding cannot
+enter non-local delivery until the authority is updated and requalified.
 
 ## Advance
 
@@ -314,6 +323,15 @@ identities. Resume adopts a matching effect, never repeats it, blocks on an
 incompatible effect, and never performs automatic external rollback. Pushed
 history is never rewritten. After a confirmed merge, only verification and
 cleanup may continue.
+
+Managed pull requests propagate the run's qualified delivery profile before CI
+collection. Creation includes the exact expected label. Adoption accepts one
+exact matching profile, records and dispatches one resumable reconciliation
+effect when the profile is absent, and blocks without replacing or removing
+labels when a profile conflicts or more than one is observable. Pull-request
+observations expose canonical sorted `delivery:*` labels. Every mutation is
+followed by fresh observation, and required CI is evaluated only while the
+exact expected profile remains observable on the exact candidate HEAD.
 
 ## Qualification and development
 
