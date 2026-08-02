@@ -460,9 +460,8 @@ func firstFailedAttributedCheck(
 	attribution CIFailureAttribution,
 ) *CICheckObservation {
 	for _, value := range values {
-		conclusion := strings.ToLower(strings.TrimSpace(value.Conclusion))
 		if value.HeadSHA == head && value.FailureAttribution == attribution &&
-			(conclusion == "failure" || conclusion == "failed" || conclusion == "cancelled") {
+			isFailedCIConclusion(value.Conclusion) {
 			copy := value
 			return &copy
 		}
@@ -568,7 +567,7 @@ func validateNonLocalRecord(record runRecord, candidate Candidate) error {
 	for _, retry := range remote.Retries {
 		key := fmt.Sprintf("%s\x00%d", retry.CheckIdentity, retry.FailedRunID)
 		if retryIDs[key] || retry.FailedRunID <= 0 || strings.TrimSpace(retry.CheckIdentity) == "" ||
-			!containsInfrastructureFailure(
+			!containsInfrastructureRetryRun(
 				remote.Checks, authorization.CommitSHA, retry.CheckIdentity, retry.FailedRunID,
 			) {
 			return errors.New("non-local CI retry journal is invalid")
@@ -682,20 +681,30 @@ func validateNonLocalRecord(record runRecord, candidate Candidate) error {
 	return nil
 }
 
-func containsInfrastructureFailure(
+func containsInfrastructureRetryRun(
 	checks []CICheckObservation,
 	head, identity string,
 	runID int64,
 ) bool {
 	for _, check := range checks {
-		conclusion := strings.ToLower(strings.TrimSpace(check.Conclusion))
-		if check.Identity == identity && check.RunID == runID && check.HeadSHA == head &&
-			check.FailureAttribution == FailureInfrastructure &&
-			(conclusion == "failure" || conclusion == "failed" || conclusion == "cancelled") {
-			return true
+		if check.Identity != identity || check.RunID != runID || check.HeadSHA != head {
+			continue
 		}
+		if isFailedCIConclusion(check.Conclusion) {
+			return check.FailureAttribution == FailureInfrastructure
+		}
+		return check.FailureAttribution == ""
 	}
 	return false
+}
+
+func isFailedCIConclusion(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "failure", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func equalCICheckObservations(left, right []CICheckObservation) bool {
