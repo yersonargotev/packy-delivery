@@ -163,6 +163,7 @@ type workflowRun struct {
 }
 
 type workflowRunRepository struct {
+	ID       int64  `json:"id"`
 	NodeID   string `json:"node_id"`
 	FullName string `json:"full_name"`
 }
@@ -183,7 +184,7 @@ type remoteRefResponse struct {
 const (
 	checkRunsProjection    = `{check_runs:[.check_runs[]|{name,head_sha,status,conclusion,details_url,app:{id:.app.id,slug:.app.slug}}]}`
 	statusesProjection     = `[.[]|{id,context,state,target_url,creator:{login:.creator.login,id:.creator.id,type:.creator.type,html_url:.creator.html_url}}]`
-	workflowRunProjection  = `{id,name,path,event,head_sha,html_url,repository:{node_id:.repository.node_id,full_name:.repository.full_name},pull_requests:[.pull_requests[]|{number,head:{sha:.head.sha,repo:{node_id:.head.repo.node_id,full_name:.head.repo.full_name}},base:{sha:.base.sha,repo:{node_id:.base.repo.node_id,full_name:.base.repo.full_name}}}],actor:{login:.actor.login,id:.actor.id,type:.actor.type,html_url:.actor.html_url}}`
+	workflowRunProjection  = `{id,name,path,event,head_sha,html_url,repository:{id:.repository.id,node_id:.repository.node_id,full_name:.repository.full_name},pull_requests:[.pull_requests[]|{number,head:{sha:.head.sha,repo:{id:.head.repo.id}},base:{sha:.base.sha,repo:{id:.base.repo.id}}}],actor:{login:.actor.login,id:.actor.id,type:.actor.type,html_url:.actor.html_url}}`
 	pullRequestsProjection = `[.[]|{number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,headRepository:{id:.headRepository.id},closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt,mergeCommit:(if .mergeCommit==null then null else {oid:.mergeCommit.oid} end)}]`
 	pullRequestProjection  = `{number,state,baseRefOid,headRefOid,closingIssuesReferences:[.closingIssuesReferences[]|{number,id}],mergedAt}`
 	remoteRefsProjection   = `[.[]|{ref,object:{type:.object.type,sha:.object.sha}}]`
@@ -905,6 +906,7 @@ func trustedPullRequestTargetGovernance(
 		identity != "Governance / Validate authorization" ||
 		workflow.Name != "Governance" || workflow.Path != ".github/workflows/governance.yml" ||
 		workflow.Event != "pull_request_target" || pullRequest == nil ||
+		workflow.Repository.ID <= 0 ||
 		workflow.Repository.NodeID != repository.NodeID ||
 		workflow.Repository.FullName != repositoryName(repository) ||
 		len(workflow.PullRequests) != 1 ||
@@ -917,10 +919,8 @@ func trustedPullRequestTargetGovernance(
 		association.Head.SHA == pullRequest.HeadSHA &&
 		association.Base.SHA == pullRequest.BaseSHA &&
 		definitionRef == pullRequest.BaseSHA &&
-		association.Head.Repository.NodeID == repository.NodeID &&
-		association.Head.Repository.FullName == repositoryName(repository) &&
-		association.Base.Repository.NodeID == repository.NodeID &&
-		association.Base.Repository.FullName == repositoryName(repository)
+		association.Head.Repository.ID == workflow.Repository.ID &&
+		association.Base.Repository.ID == workflow.Repository.ID
 }
 
 func workflowDefinitionCommandFailure(
