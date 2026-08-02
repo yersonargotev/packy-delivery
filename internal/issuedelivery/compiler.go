@@ -71,6 +71,7 @@ func compileAuthority(
 		if !ok {
 			return compilePending(
 				tracker, labels, criteria, exclusions, ambiguities, dependencies, references, applied, pending,
+				deliveryProfile,
 			)
 		}
 		if err := applyDecision(&criteria, &exclusions, &ambiguities, pending, decision); err != nil {
@@ -121,6 +122,7 @@ func compilePending(
 	references []ReferenceObservation,
 	decisions []Decision,
 	pending *DecisionRequest,
+	deliveryProfile *DeliveryProfileBinding,
 ) (compiledAuthority, error) {
 	hash, err := authorityDigest(
 		tracker, labels, criteria, exclusions, ambiguities, dependencies, references, decisions,
@@ -130,7 +132,7 @@ func compilePending(
 	}
 	return compiledAuthority{
 		hash: hash, pending: pending, decisions: decisions, state: StateNeedsDecision,
-		reason: "qualification requires a typed caller decision",
+		reason: "qualification requires a typed caller decision", deliveryProfile: deliveryProfile,
 	}, nil
 }
 

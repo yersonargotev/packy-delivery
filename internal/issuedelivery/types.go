@@ -400,6 +400,7 @@ type NonLocalGateway interface {
 	ObserveNonLocal(context.Context, NonLocalObserveRequest) (NonLocalObservation, error)
 	PushIssueBranch(context.Context, PushIssueBranchRequest) error
 	EnsurePullRequest(context.Context, EnsurePullRequestRequest) error
+	EnsurePullRequestProfile(context.Context, EnsurePullRequestProfileRequest) error
 	RetryInfrastructureCheck(context.Context, RetryInfrastructureCheckRequest) error
 	EnsureMerge(context.Context, EnsureMergeRequest) error
 	EnsureRemoteIssueBranchAbsent(context.Context, DeleteRemoteIssueBranchRequest) error
@@ -823,8 +824,22 @@ type EnsurePullRequestRequest struct {
 	HeadSHA         string
 	Title           string
 	Body            string
-	PullRequest     int
-	DeliveryProfile string
+	DeliveryProfile DeliveryProfileLabel
+}
+
+type DeliveryProfileLabel string
+
+type EnsurePullRequestProfileRequest struct {
+	RunID          string
+	Repository     deliveryevidence.RepositoryIdentity
+	Issue          deliveryevidence.IssueIdentity
+	CandidateID    string
+	IdempotencyKey string
+	BaseRef        string
+	HeadBranch     string
+	HeadSHA        string
+	PullRequest    int
+	ExpectedLabel  DeliveryProfileLabel
 }
 
 type PullRequestIntent struct {

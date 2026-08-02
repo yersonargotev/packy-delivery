@@ -357,32 +357,6 @@ func (gateway productionNonLocalGateway) EnsurePullRequest(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if request.PullRequest > 0 {
-		if request.DeliveryProfile == "" {
-			return errors.New("pull-request profile reconciliation requires the expected delivery profile")
-		}
-		for _, pr := range state.PullRequests {
-			if pr.Number != request.PullRequest || pr.HeadBranch != request.HeadBranch ||
-				pr.HeadSHA != request.HeadSHA || pr.BaseRef != request.BaseRef ||
-				pr.ClosingIssue != request.Issue.Number {
-				continue
-			}
-			profiles := issuedelivery.NormalizeDeliveryProfileLabels(pr.DeliveryProfiles)
-			if len(profiles) == 1 && profiles[0] == request.DeliveryProfile {
-				return nil
-			}
-			if len(profiles) != 0 {
-				return errors.New("pull request has a conflicting delivery profile")
-			}
-			_, err = gateway.output(ctx, "gh", "pr", "edit", strconv.Itoa(request.PullRequest),
-				"--repo", repositoryName(request.Repository), "--add-label", request.DeliveryProfile)
-			if err != nil {
-				return fmt.Errorf("add exact pull-request delivery profile: %w", err)
-			}
-			return nil
-		}
-		return errors.New("exact pull request is not observable for profile reconciliation")
-	}
 	for _, pr := range state.PullRequests {
 		if pr.HeadBranch == request.HeadBranch && pr.HeadSHA == request.HeadSHA &&
 			pr.BaseRef == request.BaseRef && pr.ClosingIssue == request.Issue.Number {
@@ -394,13 +368,52 @@ func (gateway productionNonLocalGateway) EnsurePullRequest(ctx context.Context, 
 		"--base", request.BaseRef, "--head", request.HeadBranch,
 		"--title", request.Title, "--body", request.Body}
 	if request.DeliveryProfile != "" {
-		args = append(args, "--label", request.DeliveryProfile)
+		args = append(args, "--label", string(request.DeliveryProfile))
 	}
 	_, err = gateway.output(ctx, "gh", args...)
 	if err != nil {
 		return fmt.Errorf("create exact pull request: %w", err)
 	}
 	return nil
+}
+
+func (gateway productionNonLocalGateway) EnsurePullRequestProfile(
+	ctx context.Context,
+	request issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	if request.PullRequest <= 0 || !request.ExpectedLabel.Valid() {
+		return errors.New("pull-request profile reconciliation requires an exact delivery profile")
+	}
+	state, err := gateway.ObserveNonLocal(ctx, issuedelivery.NonLocalObserveRequest{
+		RunID: request.RunID, Repository: request.Repository, Issue: request.Issue,
+		CandidateID: request.CandidateID, Branch: request.HeadBranch,
+		BaseRef: request.BaseRef, HeadSHA: request.HeadSHA,
+	})
+	if err != nil {
+		return err
+	}
+	for _, pr := range state.PullRequests {
+		if pr.Number != request.PullRequest || pr.HeadBranch != request.HeadBranch ||
+			pr.HeadSHA != request.HeadSHA || pr.BaseRef != request.BaseRef ||
+			pr.ClosingIssue != request.Issue.Number {
+			continue
+		}
+		profiles := issuedelivery.NormalizeDeliveryProfileLabels(pr.DeliveryProfiles)
+		expected := string(request.ExpectedLabel)
+		if len(profiles) == 1 && profiles[0] == expected {
+			return nil
+		}
+		if len(profiles) != 0 {
+			return errors.New("pull request has a conflicting delivery profile")
+		}
+		_, err = gateway.output(ctx, "gh", "pr", "edit", strconv.Itoa(request.PullRequest),
+			"--repo", repositoryName(request.Repository), "--add-label", expected)
+		if err != nil {
+			return fmt.Errorf("add exact pull-request delivery profile: %w", err)
+		}
+		return nil
+	}
+	return errors.New("exact pull request is not observable for profile reconciliation")
 }
 
 func (gateway productionNonLocalGateway) RetryInfrastructureCheck(ctx context.Context, request issuedelivery.RetryInfrastructureCheckRequest) error {

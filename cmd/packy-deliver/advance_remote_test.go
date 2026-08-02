@@ -96,14 +96,14 @@ func TestProductionEnsurePullRequestAddsOnlyMissingQualifiedDeliveryProfile(t *t
 	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
 	runner := candidateHeadedGovernanceRunner(head, base, definition, nil)
 	runner.outputs = append(runner.outputs, nil)
-	request := issuedelivery.EnsurePullRequestRequest{
+	request := issuedelivery.EnsurePullRequestProfileRequest{
 		Repository:  packyRemoteRepository(),
 		Issue:       deliveryevidence.IssueIdentity{Number: 361, NodeID: "I361"},
 		CandidateID: "candidate", BaseRef: "main",
 		HeadBranch: "chore/issue-361-remote-adapter", HeadSHA: head,
-		PullRequest: 17, DeliveryProfile: "delivery:low-risk",
+		PullRequest: 17, ExpectedLabel: "delivery:low-risk",
 	}
-	if err := (productionNonLocalGateway{runner: runner}).EnsurePullRequest(context.Background(), request); err != nil {
+	if err := (productionNonLocalGateway{runner: runner}).EnsurePullRequestProfile(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 	got := runner.calls[len(runner.calls)-1]

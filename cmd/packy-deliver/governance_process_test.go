@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,15 +24,6 @@ func (remote *governanceProcessRemote) EnsurePullRequest(
 	ctx context.Context,
 	request issuedelivery.EnsurePullRequestRequest,
 ) error {
-	if request.PullRequest > 0 {
-		for index := range remote.observation.PullRequests {
-			if remote.observation.PullRequests[index].Number == request.PullRequest {
-				remote.observation.PullRequests[index].DeliveryProfiles = []string{request.DeliveryProfile}
-				return nil
-			}
-		}
-		return errors.New("pull request is not observable")
-	}
 	observation, err := (productionNonLocalGateway{runner: remote.runner}).ObserveNonLocal(
 		ctx,
 		issuedelivery.NonLocalObserveRequest{
@@ -47,6 +37,13 @@ func (remote *governanceProcessRemote) EnsurePullRequest(
 	}
 	remote.observation = observation
 	return nil
+}
+
+func (remote *governanceProcessRemote) EnsurePullRequestProfile(
+	_ context.Context,
+	request issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	return reconcileObservedProfile(remote.observation.PullRequests, request)
 }
 
 type governanceProcessResult struct {

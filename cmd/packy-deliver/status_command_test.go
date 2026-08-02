@@ -127,6 +127,14 @@ func (c *statusEffectCounters) EnsurePullRequest(
 	return nil
 }
 
+func (c *statusEffectCounters) EnsurePullRequestProfile(
+	context.Context,
+	issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	c.nonLocalWrite++
+	return nil
+}
+
 func (c *statusEffectCounters) RetryInfrastructureCheck(
 	context.Context,
 	issuedelivery.RetryInfrastructureCheckRequest,

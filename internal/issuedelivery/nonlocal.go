@@ -185,7 +185,7 @@ func (m *Module) advanceNonLocal(
 			BaseRef:    nonLocalBaseRef,
 			HeadBranch: record.LocalReadiness.Branch, HeadSHA: candidate.CommitSHA,
 			Title: tracker.Title, Body: fmt.Sprintf("Closes #%d", record.Issue.Number),
-			DeliveryProfile: deliveryProfileLabel(record),
+			DeliveryProfile: DeliveryProfileLabel(deliveryProfileLabel(record)),
 		}); err != nil {
 			return m.persistAssuranceTransition(
 				store, record, StateWaiting,
@@ -237,12 +237,12 @@ func (m *Module) advanceNonLocal(
 					"pull-request-profile",
 				)
 			}
-			if err := m.nonlocal.EnsurePullRequest(ctx, EnsurePullRequestRequest{
+			if err := m.nonlocal.EnsurePullRequestProfile(ctx, EnsurePullRequestProfileRequest{
 				RunID: record.ID, Repository: record.Repository, Issue: record.Issue,
 				CandidateID: candidate.ID, IdempotencyKey: intent.IdempotencyKey,
 				BaseRef: nonLocalBaseRef, HeadBranch: record.LocalReadiness.Branch,
 				HeadSHA: candidate.CommitSHA, PullRequest: pullRequest.Number,
-				DeliveryProfile: expected,
+				ExpectedLabel: DeliveryProfileLabel(expected),
 			}); err != nil {
 				return m.persistAssuranceTransition(
 					store, record, StateWaiting,
@@ -659,7 +659,8 @@ func validateNonLocalRecord(record runRecord, candidate Candidate) error {
 		expected := deliveryProfileLabel(record)
 		if expected == "" || intent.PullRequest <= 0 || intent.ExpectedLabel != expected ||
 			intent.IdempotencyKey != pullRequestProfileIdempotencyKey(record, candidate, intent.PullRequest, expected) ||
-			!runIDPattern.MatchString(intent.IdempotencyKey) {
+			!runIDPattern.MatchString(intent.IdempotencyKey) ||
+			(remote.PullRequest != nil && intent.PullRequest != remote.PullRequest.Number) {
 			return errors.New("non-local pull-request profile intent identity is invalid")
 		}
 		if _, err := time.Parse(timeFormat, intent.PreparedAt); err != nil {

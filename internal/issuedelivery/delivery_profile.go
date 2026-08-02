@@ -11,18 +11,32 @@ import (
 
 const deliveryProfilePrefix = "delivery:"
 
+var deliveryProfileLabels = map[deliveryevidence.DeliveryRiskProfile]DeliveryProfileLabel{
+	deliveryevidence.RiskLow:      "delivery:low-risk",
+	deliveryevidence.RiskStandard: "delivery:standard",
+	deliveryevidence.RiskHigh:     "delivery:high-risk",
+}
+
 type DeliveryProfileBinding struct {
 	AuthorityLabel string                               `json:"authority_label"`
 	Profile        deliveryevidence.DeliveryRiskProfile `json:"profile"`
 }
 
 func expectedDeliveryProfileLabel(profile deliveryevidence.DeliveryRiskProfile) (string, error) {
-	switch profile {
-	case deliveryevidence.RiskLow, deliveryevidence.RiskStandard, deliveryevidence.RiskHigh:
-		return deliveryProfilePrefix + string(profile), nil
-	default:
+	label, ok := deliveryProfileLabels[profile]
+	if !ok {
 		return "", errors.New("declared delivery risk profile is invalid")
 	}
+	return string(label), nil
+}
+
+func (label DeliveryProfileLabel) Valid() bool {
+	for _, expected := range deliveryProfileLabels {
+		if label == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizedDeliveryProfileLabels(labels []string) []string {

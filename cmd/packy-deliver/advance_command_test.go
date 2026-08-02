@@ -125,6 +125,13 @@ func (commandWaitingNonLocalGateway) EnsurePullRequest(
 	return nil
 }
 
+func (commandWaitingNonLocalGateway) EnsurePullRequestProfile(
+	context.Context,
+	issuedelivery.EnsurePullRequestProfileRequest,
+) error {
+	return nil
+}
+
 func (commandWaitingNonLocalGateway) RetryInfrastructureCheck(
 	context.Context,
 	issuedelivery.RetryInfrastructureCheckRequest,

@@ -78,19 +78,6 @@ func (f *fakeNonLocalGateway) EnsurePullRequest(
 	_ context.Context,
 	request EnsurePullRequestRequest,
 ) error {
-	if request.PullRequest > 0 {
-		f.profileCalls++
-		if f.profileErrBefore != nil {
-			return f.profileErrBefore
-		}
-		for index := range f.observation.PullRequests {
-			if f.observation.PullRequests[index].Number == request.PullRequest {
-				f.observation.PullRequests[index].DeliveryProfiles = []string{request.DeliveryProfile}
-				return f.profileErrAfter
-			}
-		}
-		return errors.New("pull request is not observable")
-	}
 	f.createCalls++
 	if f.createErr != nil {
 		return f.createErr
@@ -101,12 +88,29 @@ func (f *fakeNonLocalGateway) EnsurePullRequest(
 		HeadBranch: request.HeadBranch,
 		HeadSHA:    request.HeadSHA, HeadRepositoryNodeID: request.Repository.NodeID,
 		ClosingIssue:     request.Issue.Number,
-		DeliveryProfiles: []string{request.DeliveryProfile},
+		DeliveryProfiles: []string{string(request.DeliveryProfile)},
 	}
 	if !f.hideEnsuredPR {
 		f.observation.PullRequests = []RemotePullRequestObservation{pullRequest}
 	}
 	return nil
+}
+
+func (f *fakeNonLocalGateway) EnsurePullRequestProfile(
+	_ context.Context,
+	request EnsurePullRequestProfileRequest,
+) error {
+	f.profileCalls++
+	if f.profileErrBefore != nil {
+		return f.profileErrBefore
+	}
+	for index := range f.observation.PullRequests {
+		if f.observation.PullRequests[index].Number == request.PullRequest {
+			f.observation.PullRequests[index].DeliveryProfiles = []string{string(request.ExpectedLabel)}
+			return f.profileErrAfter
+		}
+	}
+	return errors.New("pull request is not observable")
 }
 
 func (f *fakeNonLocalGateway) RetryInfrastructureCheck(
@@ -425,6 +429,41 @@ func TestAdvanceAdoptsProfileAfterAmbiguousReconciliationFailureWithoutDuplicate
 	}
 	adopted := mustAdvance(t, module, request)
 	if adopted.NonLocal.PullRequest == nil || gateway.profileCalls != 1 {
+		t.Fatalf("adopted=%#v gateway=%#v", adopted, gateway)
+	}
+}
+
+func TestAdvanceRetriesPreparedProfileReconciliationAfterPreMutationFailure(t *testing.T) {
+	module, _, gateway, request, ready := nonLocalFixture(t)
+	gateway.observation.Branch = &RemoteBranchObservation{
+		Name: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+	}
+	gateway.observation.PullRequests = []RemotePullRequestObservation{{
+		Number: 9, URL: "https://github.com/yersonargotev/packy/pull/9",
+		State: "OPEN", BaseRef: "main", BaseSHA: strings.Repeat("a", 40),
+		HeadBranch: ready.LocalReadiness.Branch, HeadSHA: ready.Candidate.CommitSHA,
+		HeadRepositoryNodeID: "R1", ClosingIssue: 357, DeliveryProfiles: []string{},
+	}}
+	authorization := exactNonLocalAuthorization(ready)
+	request.NonLocal = &authorization
+	mustAdvance(t, module, request)
+	mustAdvance(t, module, request)
+	prepared := mustAdvance(t, module, request)
+	if prepared.NonLocal.ProfileIntent == nil {
+		t.Fatalf("prepared=%#v", prepared)
+	}
+	gateway.profileErrBefore = errors.New("label mutation unavailable")
+	failed := mustAdvance(t, module, request)
+	if failed.NonLocal.ProfileIntent.DispatchedAt != "" || gateway.profileCalls != 1 {
+		t.Fatalf("failed=%#v gateway=%#v", failed, gateway)
+	}
+	gateway.profileErrBefore = nil
+	dispatched := mustAdvance(t, module, request)
+	if dispatched.NonLocal.ProfileIntent.DispatchedAt == "" || gateway.profileCalls != 2 {
+		t.Fatalf("dispatched=%#v gateway=%#v", dispatched, gateway)
+	}
+	adopted := mustAdvance(t, module, request)
+	if adopted.NonLocal.PullRequest == nil || gateway.profileCalls != 2 {
 		t.Fatalf("adopted=%#v gateway=%#v", adopted, gateway)
 	}
 }

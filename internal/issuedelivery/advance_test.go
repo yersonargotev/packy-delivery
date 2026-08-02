@@ -128,6 +128,20 @@ func TestAdvanceRejectsInvalidAuthorityDeliveryProfileBinding(t *testing.T) {
 	}
 }
 
+func TestAdvancePersistsDeliveryProfileWhileQualificationDecisionIsPending(t *testing.T) {
+	module, _, tracker := moduleFixture(t, 356)
+	tracker.value.Ambiguities = []AuthorityItem{{
+		Text: "Clarify one authority boundary.", EvidenceLink: "issue#356:question-1",
+	}}
+	request := Request{RepositoryPath: "/repo", IssueNumber: 356}
+	first := mustAdvance(t, module, request)
+	resumed := mustAdvance(t, module, request)
+	if first.Decision == nil || first.DeliveryProfile == nil ||
+		resumed.RunID != first.RunID || !reflect.DeepEqual(resumed.DeliveryProfile, first.DeliveryProfile) {
+		t.Fatalf("first=%#v resumed=%#v", first, resumed)
+	}
+}
+
 func TestAdvanceIssue344StyleSelfContainedLowRiskRunCreatesAndResumes(t *testing.T) {
 	module, git, tracker := moduleFixture(t, 356)
 	request := Request{RepositoryPath: "/ignored/by-fake", IssueNumber: 356}

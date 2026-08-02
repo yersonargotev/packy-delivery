@@ -186,12 +186,15 @@ func validateRun(record runRecord) error {
 	}
 	if record.DeliveryProfile != nil {
 		expected, err := expectedDeliveryProfileLabel(record.DeliveryProfile.Profile)
-		if err != nil || record.DeliveryProfile.AuthorityLabel != expected || record.Evidence == nil {
+		if err != nil || record.DeliveryProfile.AuthorityLabel != expected ||
+			(record.Evidence == nil && record.PendingDecision == nil) {
 			return fmt.Errorf("issue delivery profile binding is invalid")
 		}
-		profiles := normalizedDeliveryProfileLabels(record.Evidence.Authority.Labels)
-		if len(profiles) != 1 || profiles[0] != expected {
-			return fmt.Errorf("issue delivery profile binding does not match its authority")
+		if record.Evidence != nil {
+			profiles := normalizedDeliveryProfileLabels(record.Evidence.Authority.Labels)
+			if len(profiles) != 1 || profiles[0] != expected {
+				return fmt.Errorf("issue delivery profile binding does not match its authority")
+			}
 		}
 		if record.EffectiveProfile != "" &&
 			maxRiskProfile(record.DeliveryProfile.Profile, record.EffectiveProfile) != record.EffectiveProfile {
