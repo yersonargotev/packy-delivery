@@ -161,10 +161,22 @@ func TestProductionNonLocalObservationRejectsIncompatiblePullRequestTargetGovern
 			return strings.Replace(raw, `"base":{"sha":"`+base, `"base":{"sha":"`+foreignBase, 1)
 		}},
 		{name: "foreign workflow repository", mutate: func(raw string) string {
-			return strings.Replace(raw, `"repository":{"node_id":"R1","full_name":"yersonargotev/packy"}`, `"repository":{"node_id":"R2","full_name":"other/packy"}`, 1)
+			return strings.Replace(raw, `"repository":{"id":1,"node_id":"R1","full_name":"yersonargotev/packy"}`, `"repository":{"id":2,"node_id":"R2","full_name":"other/packy"}`, 1)
+		}},
+		{name: "conflicting workflow repository identity", mutate: func(raw string) string {
+			return strings.Replace(raw, `"repository":{"id":1`, `"repository":{"id":2`, 1)
+		}},
+		{name: "missing workflow repository identity", mutate: func(raw string) string {
+			return strings.Replace(raw, `"repository":{"id":1`, `"repository":{"id":0`, 1)
 		}},
 		{name: "foreign pull request repository", mutate: func(raw string) string {
-			return strings.Replace(raw, `"repo":{"node_id":"R1","full_name":"yersonargotev/packy"}`, `"repo":{"node_id":"R2","full_name":"other/packy"}`, 1)
+			return strings.Replace(raw, `"repo":{"id":1}`, `"repo":{"id":2}`, 1)
+		}},
+		{name: "missing pull request repository identity", mutate: func(raw string) string {
+			return strings.Replace(raw, `"repo":{"id":1}`, `"repo":{}`, 1)
+		}},
+		{name: "malformed pull request repository identity", mutate: func(raw string) string {
+			return strings.Replace(raw, `"repo":{"id":1}`, `"repo":{"id":-1}`, 1)
 		}},
 		{name: "missing pull request association", mutate: func(raw string) string {
 			start := strings.Index(raw, `"pull_requests":[`)
@@ -242,7 +254,35 @@ func candidateHeadedGovernanceRunner(
 
 func candidateHeadedGovernanceWorkflow(runID int64, head, base string) string {
 	run := strconv.FormatInt(runID, 10)
-	return `{"id":` + run + `,"name":"Governance","path":".github/workflows/governance.yml","event":"pull_request_target","head_sha":"` + head + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/` + run + `","repository":{"node_id":"R1","full_name":"yersonargotev/packy"},"pull_requests":[{"number":17,"head":{"sha":"` + head + `","repo":{"node_id":"R1","full_name":"yersonargotev/packy"}},"base":{"sha":"` + base + `","repo":{"node_id":"R1","full_name":"yersonargotev/packy"}}}],"actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`
+	return `{"id":` + run + `,"name":"Governance","path":".github/workflows/governance.yml","event":"pull_request_target","head_sha":"` + head + `","html_url":"https://github.com/yersonargotev/packy/actions/runs/` + run + `","repository":{"id":1,"node_id":"R1","full_name":"yersonargotev/packy"},"pull_requests":[{"number":17,"head":{"sha":"` + head + `","repo":{"id":1}},"base":{"sha":"` + base + `","repo":{"id":1}}}],"actor":{"login":"maintainer","id":1,"type":"User","html_url":"https://github.com/maintainer"}}`
+}
+
+func TestProductionStatusAndWatchObservationAcceptNumericOnlyGovernanceRepositoryAssociation(t *testing.T) {
+	head, base, definition := strings.Repeat("b", 40), strings.Repeat("a", 40), strings.Repeat("d", 40)
+	for _, commandName := range []string{"status", "watch"} {
+		t.Run(commandName, func(t *testing.T) {
+			advanceRunner := candidateHeadedGovernanceRunner(head, base, definition, nil)
+			runner := &fakeRemoteRunner{outputs: [][]byte{
+				advanceRunner.outputs[0], advanceRunner.outputs[2], advanceRunner.outputs[3],
+				advanceRunner.outputs[5], advanceRunner.outputs[6], advanceRunner.outputs[7],
+				advanceRunner.outputs[8], advanceRunner.outputs[9],
+			}}
+			observer := productionStatusNonLocalObserver{
+				gateway: productionNonLocalGateway{runner: runner, repository: "/packy"},
+			}
+			observation, err := observer.ObserveNonLocal(
+				context.Background(), candidateHeadedGovernanceRequest(head),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observation.Checks) != 1 ||
+				observation.Checks[0].Workflow.DefinitionRef != base ||
+				observation.Checks[0].Workflow.DefinitionSHA != definition {
+				t.Fatalf("%s Governance observation = %#v", commandName, observation.Checks)
+			}
+		})
+	}
 }
 
 func TestProductionStatusNonLocalObservationUsesOnlyReadCommands(t *testing.T) {
